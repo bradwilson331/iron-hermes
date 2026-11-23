@@ -770,8 +770,8 @@ mod tests {
     /// same check later.
     #[test]
     fn send_message_unavailable_implies_nonempty_unsatisfied_prerequisites() {
-        crate::clarify_tool::assert_unavailable_implies_nonempty_prereqs(
-            &make_send_message_tool(Platform::Telegram),
-        );
+        crate::clarify_tool::assert_unavailable_implies_nonempty_prereqs(&make_send_message_tool(
+            Platform::Telegram,
+        ));
     }
 }

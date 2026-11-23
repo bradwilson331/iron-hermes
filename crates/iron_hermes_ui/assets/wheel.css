@@ -2,42 +2,109 @@
    IronHermes Menu Wheel — shared styles
    Used by index.html and app.html
    The wheel's outer SIZE is controlled by --wheel-size on .wheel-shell.
+
+   Colour rule (Phase 54.4 Plan 12, G-54.4-3, D-02): every wheel colour comes
+   from a theme variable or from --wheel-accent / --wheel-accent-bright
+   below. No colour literal belongs in this region or in wheel.rs, so the
+   wheel follows the theme and the accent preference.
    ────────────────────────────────────────────────────────── */
 
 .wheel-shell {
   --wheel-size: 380px;
+  /* Accent-derived wheel colours. Derived from --teal / --teal-bright because
+     the accent preference rewrites exactly those two on <html>; the dim and
+     faint teal variants are NOT rewritten, so they are not used here. */
+  --wheel-accent: var(--teal);
+  --wheel-accent-bright: var(--teal-bright);
+  --wheel-hub-sub: var(--gray);
+  --wheel-hub-hi: var(--bg-card-hover);
+  --wheel-hub-mid: var(--bg-card);
+  --wheel-hub-lo: var(--bg-deep);
   position: fixed;
   width: var(--wheel-size);
   z-index: 40;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
   touch-action: none;
+}
+/* Light-theme ink override. The accent pairs are tuned for dark surfaces and
+   are written inline on <html> for every theme, so on a light theme the raw
+   accent sits near 2:1. Mixing 35% accent with --text keeps the hue and holds
+   5:1 or better for every accent. The hub's lit centre swaps so it stays the
+   brighter stop on a light surface, and its sub-line takes --text-dim.
+   A new light theme MUST be added to this selector list:
+   wheel_light_override_matches_light_themes enforces it. */
+[data-theme="slate-light"] .wheel-shell,
+[data-theme="parchment-light"] .wheel-shell {
+  --wheel-accent: color-mix(in srgb, var(--teal) 35%, var(--text));
+  --wheel-accent-bright: color-mix(in srgb, var(--teal) 35%, var(--text));
+  --wheel-hub-sub: var(--text-dim);
+  --wheel-hub-hi: var(--bg-card);
+  --wheel-hub-mid: var(--bg-card-hover);
+}
+/* Phase 54.4 Plan 01 (D-05, D-26): the wheel docked in the persistent header.
+   An in-flow child of the header grid's first column at the fixed
+   --ih-wheel-size (the box is taller than the banner row; the header is
+   overflow: visible, so it simply overhangs). Nothing here transforms,
+   scales or animates the size — the wheel is re-balanced, not magnified. */
+.wheel-shell.wheel-shell--docked {
+  position: relative;
+  left: auto;
+  top: auto;
+  --wheel-size: var(--ih-wheel-size);
+  width: var(--ih-wheel-size);
+  height: var(--ih-wheel-size);
+  z-index: auto;
+}
+.wheel-shell--docked .wheel-rim { cursor: default; }
+/* Wedge focus. A UA/`outline` focus ring on an SVG <path> is painted as the
+   path's rectangular bounding box (the "white square" seen on click), so the
+   outline is suppressed on every focus state. Keyboard users get the wedge's
+   own highlight (accent fill + stroke) on :focus-visible instead. */
+.wheel-shell .wheel-wedge:focus,
+.wheel-shell--docked .wheel-wedge:focus {
+  outline: none;
+}
+.wheel-shell--docked .wheel-wedge:focus-visible {
+  outline: none;
+  fill: color-mix(in srgb, var(--wheel-accent) 30%, transparent);
+  stroke: var(--wheel-accent);
+  stroke-width: 2.5;
 }
 .wheel-shell.is-moving { cursor: grabbing; }
 .wheel-shell.is-resizing { cursor: nwse-resize; }
 
 .wheel-svg {
+  outline: none;
+  user-select: none;
+  -webkit-user-select: none;
   width: var(--wheel-size);
   height: var(--wheel-size);
   display: block;
   margin: 0 auto;
-  filter: drop-shadow(0 0 28px rgba(57,197,207,0.14));
+  filter: drop-shadow(0 0 28px color-mix(in srgb, var(--wheel-accent) 14%, transparent));
 }
 
 /* ─── Rim: drag-to-move surface (the wheel circumference) ─── */
 .wheel-rim {
   cursor: grab;
+  fill: transparent;
   transition: fill 0.2s;
 }
-.wheel-rim:hover { fill: rgba(57, 197, 207, 0.05) !important; }
-.wheel-shell.is-moving .wheel-rim { cursor: grabbing; fill: rgba(57, 197, 207, 0.07) !important; }
+.wheel-rim:hover { fill: color-mix(in srgb, var(--wheel-accent) 5%, transparent); }
+.wheel-shell.is-moving .wheel-rim {
+  cursor: grabbing;
+  fill: color-mix(in srgb, var(--wheel-accent) 7%, transparent);
+}
 
 /* Rim decoration rings — react to hover for affordance */
 .rim-ring { transition: stroke 0.2s; }
-.rim-ring--outer { stroke: rgba(57, 197, 207, 0.20); }
-.rim-ring--inner { stroke: rgba(57, 197, 207, 0.12); }
-.wheel-shell:has(.wheel-rim:hover) .rim-ring--outer { stroke: rgba(57, 197, 207, 0.55); }
-.wheel-shell:has(.wheel-rim:hover) .rim-ring--inner { stroke: rgba(57, 197, 207, 0.30); }
-.wheel-shell.is-moving .rim-ring--outer { stroke: rgba(57, 197, 207, 0.75); }
+.rim-ring--outer { stroke: color-mix(in srgb, var(--wheel-accent) 20%, transparent); }
+.rim-ring--inner { stroke: color-mix(in srgb, var(--wheel-accent) 12%, transparent); }
+.wheel-shell:has(.wheel-rim:hover) .rim-ring--outer { stroke: color-mix(in srgb, var(--wheel-accent) 55%, transparent); }
+.wheel-shell:has(.wheel-rim:hover) .rim-ring--inner { stroke: color-mix(in srgb, var(--wheel-accent) 30%, transparent); }
+.wheel-shell.is-moving .rim-ring--outer { stroke: color-mix(in srgb, var(--wheel-accent) 75%, transparent); }
 
 /* ─── Tooltip (custom, follows cursor on rim) ─── */
 .wheel-tooltip {
@@ -48,10 +115,10 @@
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: rgba(13, 17, 23, 0.95);
-  border: 1px solid var(--teal-dim);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6), 0 0 14px rgba(57, 197, 207, 0.18);
-  color: var(--teal);
+  background: color-mix(in srgb, var(--bg) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--wheel-accent) 55%, transparent);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6), 0 0 14px color-mix(in srgb, var(--wheel-accent) 18%, transparent);
+  color: var(--wheel-accent);
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.22em;
@@ -63,98 +130,136 @@
 }
 .wheel-tooltip.is-visible { opacity: 1; }
 .wheel-tooltip-glyph {
-  color: var(--teal-bright);
+  color: var(--wheel-accent-bright);
   font-size: 11px;
 }
 .wheel-shell.is-moving .wheel-tooltip { opacity: 0; }
 
 /* ─── Floating RESIZE RING (orbits outside the rim) ─── */
 .resize-ring {
+  stroke: color-mix(in srgb, var(--amber) 55%, transparent);
   cursor: nwse-resize;
   animation: ring-pulse 3.2s ease-in-out infinite;
   transition: stroke 0.18s, stroke-width 0.18s;
 }
 @keyframes ring-pulse {
-  0%, 100% { stroke: rgba(255, 166, 87, 0.40); }
-  50%      { stroke: rgba(255, 166, 87, 0.85); }
+  0%, 100% { stroke: color-mix(in srgb, var(--amber) 40%, transparent); }
+  50%      { stroke: color-mix(in srgb, var(--amber) 85%, transparent); }
 }
 .resize-ring:hover {
-  stroke: #ffd166 !important;
+  stroke: var(--amber) !important;
   stroke-width: 6 !important;
   animation: ring-flash 0.8s ease-in-out infinite;
 }
 @keyframes ring-flash {
-  0%, 100% { stroke: #ffd166; }
-  50%      { stroke: #56d4dd; }
+  0%, 100% { stroke: var(--amber); }
+  50%      { stroke: var(--wheel-accent-bright); }
 }
 .wheel-shell.is-resizing .resize-ring {
-  stroke: #56d4dd !important;
+  stroke: var(--wheel-accent-bright) !important;
   stroke-width: 6 !important;
   animation: none;
 }
 /* Glow halo around ring on hover/resize */
-#resize-glow { transition: stroke 0.2s; }
+#resize-glow { stroke: transparent; transition: stroke 0.2s; }
+#resize-orbit { stroke: color-mix(in srgb, var(--amber) 30%, transparent); }
 .wheel-shell.is-resize-hover #resize-glow,
 .wheel-shell.is-resizing      #resize-glow {
-  stroke: rgba(255, 209, 102, 0.20);
+  stroke: color-mix(in srgb, var(--amber) 20%, transparent);
 }
 .wheel-shell.is-resizing #resize-glow {
-  stroke: rgba(86, 212, 221, 0.30);
+  stroke: color-mix(in srgb, var(--wheel-accent-bright) 30%, transparent);
 }
 /* Orbit nodes pulse brighter on hover */
-#resize-nodes circle { transition: r 0.2s, fill 0.2s; }
+#resize-nodes circle { fill: var(--amber); transition: r 0.2s, fill 0.2s; }
 .wheel-shell.is-resize-hover #resize-nodes circle,
 .wheel-shell.is-resizing      #resize-nodes circle {
   r: 5;
-  fill: #ffd166;
+  fill: var(--amber);
 }
-.wheel-shell.is-resizing #resize-nodes circle { fill: #56d4dd; }
+.wheel-shell.is-resizing #resize-nodes circle { fill: var(--wheel-accent-bright); }
 /* Tooltip switches color when over the resize ring */
 .wheel-tooltip.is-resize {
-  color: #ffd166;
-  border-color: rgba(255, 209, 102, 0.55);
-  box-shadow: 0 4px 18px rgba(0,0,0,0.6), 0 0 14px rgba(255, 209, 102, 0.22);
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6), 0 0 14px color-mix(in srgb, var(--amber) 22%, transparent);
 }
-.wheel-tooltip.is-resize .wheel-tooltip-glyph { color: #ffd166; }
+.wheel-tooltip.is-resize .wheel-tooltip-glyph { color: var(--amber); }
 
 /* ─── Wedges ─── */
+/* Opaque backing disc under every wedge (Phase 54.4 Plan 12, G-54.4-3): the
+   half of the wheel that hangs below the banner would otherwise show scrolled
+   screen content through the translucent wedges. */
+.wheel-backing { fill: var(--bg-card); }
 .wheel-wedge {
-  fill: rgba(22, 27, 34, 0.55);
-  stroke: rgba(57, 197, 207, 0.10);
+  fill: var(--bg-card);
+  stroke: color-mix(in srgb, var(--wheel-accent) 10%, transparent);
   stroke-width: 1;
   transition: fill 0.18s, stroke 0.18s;
   cursor: pointer;
 }
 .wheel-wedge:hover,
 .wheel-wedge.is-active {
-  fill: rgba(57, 197, 207, 0.22);
-  stroke: rgba(57, 197, 207, 0.70);
+  fill: color-mix(in srgb, var(--wheel-accent) 22%, transparent);
+  stroke: color-mix(in srgb, var(--wheel-accent) 70%, transparent);
 }
 
-.wheel-label { transition: fill 0.2s; pointer-events: none; }
-.wheel-label.is-active { fill: var(--teal-bright); }
-.wheel-glyph { transition: fill 0.2s, font-size 0.2s; pointer-events: none; }
-.wheel-glyph.is-active { fill: var(--teal-bright); }
+.wheel-label { fill: var(--text-dim); transition: fill 0.2s; pointer-events: none; }
+.wheel-label.is-active { fill: var(--wheel-accent-bright); }
+.wheel-glyph {
+  fill: color-mix(in srgb, var(--wheel-accent) 65%, transparent);
+  transition: fill 0.2s, font-size 0.2s;
+  pointer-events: none;
+}
+.wheel-glyph.is-active { fill: var(--wheel-accent-bright); }
+/* Phase 57 R9b: the small amber badge on the CHAT wedge while an approval waits on the
+   operator. A bare marker: no text, not interactive, no animation. The ring in the page
+   background keeps it legible over the wedge fill. */
+.wheel-approval-badge {
+  fill: var(--amber);
+  stroke: var(--bg);
+  stroke-width: 2px;
+  pointer-events: none;
+}
+
+/* Ticks, separators and rings drawn by wheel.rs by class, not by attribute */
+.wheel-tick--major { stroke: color-mix(in srgb, var(--wheel-accent) 55%, transparent); }
+.wheel-tick--minor { stroke: color-mix(in srgb, var(--gray) 35%, transparent); }
+.wheel-sep { stroke: color-mix(in srgb, var(--wheel-accent) 22%, transparent); }
+.wheel-inner-ring { stroke: color-mix(in srgb, var(--wheel-accent) 22%, transparent); }
 
 /* ─── Hub = launch button ─── */
 .wheel-hub {
   cursor: pointer;
   transition: filter 0.2s;
 }
-.wheel-hub:hover { filter: brightness(1.15) drop-shadow(0 0 12px rgba(57,197,207,0.55)); }
+.wheel-hub:hover { filter: brightness(1.15) drop-shadow(0 0 12px color-mix(in srgb, var(--wheel-accent) 55%, transparent)); }
 .wheel-hub #hub-cta { transition: fill 0.18s; }
 .wheel-hub:hover #hub-cta,
-.wheel-hub.is-hover #hub-cta { fill: #56d4dd; }
+.wheel-hub.is-hover #hub-cta { fill: var(--wheel-accent-bright); }
 .wheel-hub:active { filter: brightness(0.92); }
+
+#hub-bg { stroke: color-mix(in srgb, var(--wheel-accent) 55%, transparent); }
+.hub-ring--inner { stroke: color-mix(in srgb, var(--wheel-accent) 18%, transparent); }
+.hub-ring--dashed { stroke: color-mix(in srgb, var(--wheel-accent) 10%, transparent); }
+.hub-stop--hi { stop-color: var(--wheel-hub-hi); }
+.hub-stop--mid { stop-color: var(--wheel-hub-mid); }
+.hub-stop--lo { stop-color: var(--wheel-hub-lo); }
+#hub-glyph { fill: var(--wheel-accent-bright); }
+#hub-label { fill: var(--text); }
+#hub-sub { fill: var(--wheel-hub-sub); }
+#hub-cta { fill: var(--wheel-accent); }
+#hub-arrow { fill: var(--wheel-accent); }
 
 /* Pulsing aura behind hub */
 #hub-aura {
+  fill: transparent;
   transform-origin: center;
   animation: hub-aura-pulse 2.6s ease-in-out infinite;
 }
 @keyframes hub-aura-pulse {
-  0%, 100% { fill: rgba(57,197,207,0.0); }
-  50%      { fill: rgba(57,197,207,0.06); }
+  0%, 100% { fill: transparent; }
+  50%      { fill: color-mix(in srgb, var(--wheel-accent) 6%, transparent); }
 }
 
 /* Top arrow above hub blinks subtly */

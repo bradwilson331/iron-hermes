@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironhermes_core::ToolSchema;
+use ironhermes_core::defcon::session_defcon;
 use ironhermes_cron::parse_schedule;
-use ironhermes_cron::{JobOrigin, JobStore, JobUpdate, ScheduleParsed, scan_cron_prompt};
+use ironhermes_cron::{JobOrigin, JobStore, JobUpdate, ScheduleParsed, scan_cron_prompt_screened};
 use serde_json::{Value, json};
 
 use crate::registry::Tool;
@@ -159,8 +160,9 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
         None => return json!({"status": "error", "message": "Missing required parameter 'prompt'"}),
     };
 
-    // Security scan on prompt
-    if let Err(e) = scan_cron_prompt(&prompt) {
+    // Security scan on prompt: regex floor, then the detection sidecar (Phase 57 D-04a).
+    // The job's name is the label a blocked job is reported under (UI-SPEC R6).
+    if let Err(e) = scan_cron_prompt_screened(&prompt, session_defcon().process_default(), &name) {
         return json!({"status": "error", "message": e});
     }
 
@@ -270,8 +272,15 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
 
     // Resolve canonical ID (find_job matches by ID or name, but update_job
     // only matches by ID)
-    let canonical_id = match store.find_job(&job_id) {
-        Some(j) => j.id.clone(),
+    let (canonical_id, job_label) = match store.find_job(&job_id) {
+        Some(j) => (
+            j.id.clone(),
+            if j.name.trim().is_empty() {
+                j.id.clone()
+            } else {
+                j.name.clone()
+            },
+        ),
         None => return json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
     };
 
@@ -280,9 +289,10 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Security scan on new prompt if being updated
+    // Security scan on new prompt if being updated (regex floor, then the sidecar -- D-04a).
+    // The stored job's name, or its id when the name is empty, is the blocked-job label.
     if let Some(ref p) = new_prompt
-        && let Err(e) = scan_cron_prompt(p)
+        && let Err(e) = scan_cron_prompt_screened(p, session_defcon().process_default(), &job_label)
     {
         return json!({"status": "error", "message": e});
     }
@@ -343,7 +353,8 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
         Ok(job) => {
             let mut response = json!({"status": "updated", "job": job_to_json(&job)});
             if let Some(schedule) = schedule_for_notice
-                && let Some(notice) = schedule_notice(&schedule, job.next_run_at, chrono::Utc::now())
+                && let Some(notice) =
+                    schedule_notice(&schedule, job.next_run_at, chrono::Utc::now())
                 && let Value::Object(ref mut map) = response
             {
                 map.insert("schedule_notice".to_string(), json!(notice));
@@ -941,7 +952,10 @@ mod tests {
         let job = reopened.find_job(&job_id).expect("job persists");
         let next_run_at = job.next_run_at.expect("next_run_at set");
         let age = (chrono::Utc::now() - next_run_at).num_seconds().abs();
-        assert!(age < 5, "next_run_at should be within 5s of now, got {age}s");
+        assert!(
+            age < 5,
+            "next_run_at should be within 5s of now, got {age}s"
+        );
     }
 
     /// Same behavior, resolved by name instead of id — `find_job`'s existing
@@ -970,7 +984,10 @@ mod tests {
         let job = reopened.find_job("run-by-name").expect("job persists");
         let next_run_at = job.next_run_at.expect("next_run_at set");
         let age = (chrono::Utc::now() - next_run_at).num_seconds().abs();
-        assert!(age < 5, "next_run_at should be within 5s of now, got {age}s");
+        assert!(
+            age < 5,
+            "next_run_at should be within 5s of now, got {age}s"
+        );
     }
 
     #[tokio::test]
@@ -1160,6 +1177,146 @@ mod tests {
             .unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "removed");
+    }
+
+    // --- Phase 57 D-04a: the detection sidecar screens prompts at create/update ---
+
+    use ironhermes_core::content_screen::{
+        ContentScreen, ContentScreenOutcome, ContentScreenRequest, ScreenVerdict,
+        clear_content_screen_for_tests, install_content_screen,
+    };
+
+    /// A core-level screen that Blocks any text containing `CANARY-CRON`.
+    struct CanaryScreen;
+
+    impl ContentScreen for CanaryScreen {
+        fn screen(&self, req: &ContentScreenRequest<'_>) -> ContentScreenOutcome {
+            let hit = req.text.contains("CANARY-CRON");
+            ContentScreenOutcome {
+                verdict: if hit {
+                    ScreenVerdict::Block
+                } else {
+                    ScreenVerdict::Allow
+                },
+                rules: if hit {
+                    vec!["FakeBlock".to_string()]
+                } else {
+                    Vec::new()
+                },
+                max_severity: hit.then(|| "CRITICAL".to_string()),
+                unavailable: None,
+            }
+        }
+    }
+
+    /// Holds the crate env lock, points `IRONHERMES_HOME` at a temp dir (the screen writes
+    /// audit rows there) and installs [`CanaryScreen`]; restores everything on drop.
+    struct ScreenGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        _home: tempfile::TempDir,
+        prev_home: Option<std::ffi::OsString>,
+    }
+
+    impl ScreenGuard {
+        async fn new() -> Self {
+            let lock = crate::ENV_LOCK.lock().await;
+            let home = tempfile::tempdir().unwrap();
+            let prev_home = std::env::var_os("IRONHERMES_HOME");
+            // SAFETY: every test touching process env holds `crate::ENV_LOCK`.
+            unsafe { std::env::set_var("IRONHERMES_HOME", home.path()) };
+            install_content_screen(Arc::new(CanaryScreen));
+            Self {
+                _lock: lock,
+                _home: home,
+                prev_home,
+            }
+        }
+    }
+
+    impl Drop for ScreenGuard {
+        fn drop(&mut self) {
+            clear_content_screen_for_tests();
+            // SAFETY: see `new`.
+            match &self.prev_home {
+                Some(v) => unsafe { std::env::set_var("IRONHERMES_HOME", v) },
+                None => unsafe { std::env::remove_var("IRONHERMES_HOME") },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cronjob_tool_create_refuses_screened_prompt() {
+        let _g = ScreenGuard::new().await;
+        let (tool, _dir) = make_tool();
+        let mut rx = ironhermes_core::subscribe_security_events();
+
+        let result = tool
+            .execute(json!({
+                "action": "create",
+                "name": "nightly-digest",
+                "schedule": "every 2h",
+                "prompt": "Summarize CANARY-CRON"
+            }))
+            .await
+            .unwrap();
+
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "error", "got: {v}");
+        let message = v["message"].as_str().unwrap();
+        assert!(
+            message.contains("security screen") && message.contains("tirith:FakeBlock"),
+            "the refusal names the screen and rule, got: {message}"
+        );
+        assert!(
+            !message.contains("CANARY-CRON"),
+            "the refusal never echoes the prompt, got: {message}"
+        );
+        let list = parse_response(&tool.execute(json!({"action": "list"})).await.unwrap());
+        assert_eq!(list["count"], 0, "a refused prompt stores no job");
+        let event = rx.try_recv().expect("a JobBlocked event is published");
+        assert_eq!(event.kind, ironhermes_core::SecurityEventKind::JobBlocked);
+        assert_eq!(event.summary, "nightly-digest", "labelled by the job name");
+    }
+
+    #[tokio::test]
+    async fn cronjob_tool_update_refuses_screened_prompt() {
+        let _g = ScreenGuard::new().await;
+        let (tool, _dir) = make_tool();
+        let created = parse_response(
+            &tool
+                .execute(json!({
+                    "action": "create",
+                    "name": "report",
+                    "schedule": "every 2h",
+                    "prompt": "old prompt"
+                }))
+                .await
+                .unwrap(),
+        );
+        let job_id = created["job"]["id"].as_str().unwrap().to_string();
+
+        let result = tool
+            .execute(json!({
+                "action": "update",
+                "job_id": job_id,
+                "prompt": "Now CANARY-CRON"
+            }))
+            .await
+            .unwrap();
+
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "error", "got: {v}");
+        assert!(
+            v["message"].as_str().unwrap().contains("security screen"),
+            "got: {v}"
+        );
+        let got = parse_response(
+            &tool
+                .execute(json!({"action": "get", "job_id": job_id}))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(got["job"]["prompt"], "old prompt", "the old prompt is kept");
     }
 
     // --- unknown action ---

@@ -53,20 +53,23 @@ impl FakeProvider {
 /// gain or lose an entry silently, so this pins it exactly; adding a provider is a
 /// deliberate act that must update this list.
 ///
-/// Was written in 36.17.5 when the set was `["edge", "elevenlabs"]`, and pinned the
-/// literal AND the length AND each index. Phase 40.5 (`6ad469dc7`) legitimately added
-/// `OpenAiTtsProvider` to the constant without updating the test, so it has been red
-/// ever since — masked because `cargo test -p ironhermes-core` aborts at the first
-/// failing target and two earlier lib tests were failing. Dropped the redundant
-/// length/index assertions: they restate the set equality and were pure churn.
+/// Was written in 36.17.5 when the set was `["edge", "elevenlabs"]`. Phase 40.5
+/// (`6ad469dc7`) added `openai` without updating the test, and Phase 54.7 (D-01/D-19)
+/// appends `openai_compatible`. It is appended LAST so the index-based assertions in
+/// the provider unit tests (edge at 0, elevenlabs at 1) keep their meaning.
 #[test]
-fn test_builtin_names_set() {
+fn builtin_tts_names_include_openai_compatible_last() {
     assert_eq!(
         BUILTIN_TTS_NAMES,
-        &["edge", "elevenlabs", "openai"],
+        &["edge", "elevenlabs", "openai", "openai_compatible"],
         "TTS-08 (D-10): BUILTIN_TTS_NAMES is the source of truth for the built-in set. \
          If you added or removed a provider, update this list deliberately; if you did \
          not, something registered a provider it should not have."
+    );
+    assert_eq!(
+        BUILTIN_TTS_NAMES.last().copied(),
+        Some("openai_compatible"),
+        "D-01: openai_compatible is appended last so existing index-based tests keep their meaning"
     );
 
     let mut sorted = BUILTIN_TTS_NAMES.to_vec();

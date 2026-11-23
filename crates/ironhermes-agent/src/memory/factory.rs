@@ -220,6 +220,18 @@ async fn build_file_provider(
 pub async fn build_memory_manager(
     config: &ironhermes_core::config::MemoryConfig,
 ) -> anyhow::Result<Option<Arc<tokio::sync::Mutex<crate::memory::MemoryManager>>>> {
+    build_memory_manager_at(config, &get_hermes_home()).await
+}
+
+/// [`build_memory_manager`] against an explicit profile home.
+///
+/// 58.2 D-10: when `config.tier2_enabled`, the Tier 2 service is attached through
+/// `MemoryManager::set_tier2` (never `mirror_provider`). A Tier 2 validate/open failure is
+/// logged and leaves a working Tier 1 manager. Tier 2 requires `memory_enabled`.
+pub async fn build_memory_manager_at(
+    config: &ironhermes_core::config::MemoryConfig,
+    home: &std::path::Path,
+) -> anyhow::Result<Option<Arc<tokio::sync::Mutex<crate::memory::MemoryManager>>>> {
     // GAP-4 / T-21.4-02: early-return None when memory is disabled so no
     // provider is constructed and no memory tool is ever registered.
     if !config.memory_enabled {
@@ -227,13 +239,13 @@ pub async fn build_memory_manager(
         return Ok(None);
     }
 
-    let primary = build_tokio_provider(config).await?;
+    let primary = build_tokio_provider(config, home).await?;
 
     let mirror = if let Some(name) = &config.mirror_provider {
         let mut mirror_cfg = config.clone();
         mirror_cfg.provider = name.clone();
         mirror_cfg.mirror_provider = None; // prevent recursion
-        Some(build_tokio_provider(&mirror_cfg).await?)
+        Some(build_tokio_provider(&mirror_cfg, home).await?)
     } else {
         None
     };
@@ -244,6 +256,32 @@ pub async fn build_memory_manager(
     if !config.user_profile_enabled {
         mgr.set_user_profile_enabled(false);
     }
+    if config.tier2_enabled {
+        match config
+            .validate_tier2()
+            .and_then(|()| ironhermes_tier2::Tier2Service::open(home, config))
+        {
+            Ok(svc) => {
+                // D-16: consolidation extracts claims on `model.roles.memory` (else the main model).
+                let svc = svc.with_llm(Arc::new(
+                    crate::memory::tier2_llm::ConfigBackedTier2Llm::for_home(home),
+                ));
+                // D-03: index what Tier 1 already holds, once, on switch-on. Only a snapshot is
+                // read; a failure leaves Tier 1 untouched.
+                let svc = Arc::new(svc);
+                let entries = mgr.to_memory_entries().await;
+                if let Err(e) =
+                    ironhermes_core::tier2::Tier2Handle::sync_tier1(&*svc, &entries).await
+                {
+                    tracing::warn!(error = %e, "tier2 boot index of Tier 1 failed; Tier 1 unchanged");
+                }
+                mgr.set_tier2(svc);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Tier 2 memory disabled: continuing with Tier 1 only")
+            }
+        }
+    }
     Ok(Some(Arc::new(tokio::sync::Mutex::new(mgr))))
 }
 
@@ -252,14 +290,13 @@ pub async fn build_memory_manager(
 /// the Plan-20-02 tokio-mutex shape that `MemoryManager` requires.
 async fn build_tokio_provider(
     config: &ironhermes_core::config::MemoryConfig,
+    hermes_home: &std::path::Path,
 ) -> anyhow::Result<crate::memory::SharedProvider> {
-    let hermes_home = get_hermes_home();
-
     let provider: crate::memory::SharedProvider = match config.provider.as_str() {
-        "file" => build_tokio_file_provider(&hermes_home).await?,
+        "file" => build_tokio_file_provider(hermes_home).await?,
         #[cfg(feature = "memory-sqlite")]
         "sqlite" => {
-            let provider_config = load_provider_config(&hermes_home, "sqlite");
+            let provider_config = load_provider_config(hermes_home, "sqlite");
             let db_path = hermes_home.join("memory.db");
             let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
             // Phase 47.5 (D-03): wire the relevance floor from config so
@@ -270,7 +307,7 @@ async fn build_tokio_provider(
             // setter call. duckdb arm is deliberately unchanged (see
             // MemoryConfig::recall_min_score doc comment).
             p.set_recall_min_score(config.recall_min_score);
-            p.initialize("factory-boot", &hermes_home, &provider_config)
+            p.initialize("factory-boot", hermes_home, &provider_config)
                 .await?;
             p.load_from_disk()?;
             if !p.is_available() {
@@ -280,7 +317,7 @@ async fn build_tokio_provider(
                     reason = %reason,
                     "memory provider reported is_available=false; falling back to file provider"
                 );
-                return build_tokio_file_provider(&hermes_home).await;
+                return build_tokio_file_provider(hermes_home).await;
             }
             Arc::new(tokio::sync::Mutex::new(p))
         }
@@ -293,10 +330,10 @@ async fn build_tokio_provider(
         }
         #[cfg(feature = "memory-duckdb")]
         "duckdb" => {
-            let provider_config = load_provider_config(&hermes_home, "duckdb");
+            let provider_config = load_provider_config(hermes_home, "duckdb");
             let db_path = hermes_home.join("memory_duckdb.db");
             let mut p = memory_duckdb::DuckDbMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config)
+            p.initialize("factory-boot", hermes_home, &provider_config)
                 .await?;
             p.load_from_disk()?;
             if !p.is_available() {
@@ -306,7 +343,7 @@ async fn build_tokio_provider(
                     reason = %reason,
                     "memory provider reported is_available=false; falling back to file provider"
                 );
-                return build_tokio_file_provider(&hermes_home).await;
+                return build_tokio_file_provider(hermes_home).await;
             }
             Arc::new(tokio::sync::Mutex::new(p))
         }
@@ -319,10 +356,10 @@ async fn build_tokio_provider(
         }
         #[cfg(feature = "memory-grafeo")]
         "grafeo" => {
-            let provider_config = load_provider_config(&hermes_home, "grafeo");
+            let provider_config = load_provider_config(hermes_home, "grafeo");
             let db_path = hermes_home.join("memory_graph.grafeo");
             let mut p = memory_grafeo::GrafeoMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config)
+            p.initialize("factory-boot", hermes_home, &provider_config)
                 .await?;
             p.load_from_disk()?;
             if !p.is_available() {
@@ -332,7 +369,7 @@ async fn build_tokio_provider(
                     reason = %reason,
                     "memory provider reported is_available=false; falling back to file provider"
                 );
-                return build_tokio_file_provider(&hermes_home).await;
+                return build_tokio_file_provider(hermes_home).await;
             }
             Arc::new(tokio::sync::Mutex::new(p))
         }

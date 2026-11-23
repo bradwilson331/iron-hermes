@@ -37,6 +37,18 @@ pub const KEY_WHEEL: &str = "ih.ui.wheel";
 /// localStorage key for the serialised `AvatarPrefs` blob (Phase 40.2, FE-01).
 pub const KEY_AVATAR: &str = "ih.ui.avatar";
 
+/// Phase 54.4 Plan 05 (D-15): localStorage key for the persisted agent-tab
+/// layout (`AgentTabsState`). Agent slugs and layout flags only — never
+/// session ids or secrets.
+pub const KEY_DASHBOARD: &str = "ih.ui.dashboard";
+
+/// Phase 54.4 Plan 08 (D-09 / D-15): localStorage key for the Kanban screen's
+/// own BOARD | TABS view-mode preference. A deliberate split from
+/// `KEY_DASHBOARD` so the Kanban screen owns its preference and no second
+/// writer can clobber the agent-tab layout. The stored value is a JSON string
+/// of the two-variant `KanbanViewMode` enum; anything else hydrates to BOARD.
+pub const KEY_KANBAN_VIEW: &str = "ih.ui.kanban_view";
+
 /// Phase 47.3 Plan 06 (D-17): localStorage key for the session-death
 /// composer-draft stash. This is the ONLY thing D-17 ever writes to
 /// JS-readable storage — the session token itself never crosses into
@@ -53,34 +65,30 @@ pub const KEY_SESSION_DRAFT: &str = "ih.ui.session_expiry_draft";
 /// Runtime UI toggles surfaced by the Tweaks panel (Plan 05).
 ///
 /// Defaults match the prototype's `window.APP_TWEAKS` initial values in
-/// `app.html`. `wheel_size: 240.0` aligns with `WheelState::default().size`
-/// (RESEARCH Pitfall 4 — avoids first-resize jump).
+/// `app.html`.
+///
+/// Phase 54.4 Plan 02 (D-05/D-07/D-26): the former `wheel_size`, `breadcrumb`
+/// and `rail` fields are retired. The docked header wheel's size is now pinned
+/// by the `--ih-wheel-size` CSS variable (D-26), the status strip is permanent
+/// (D-07) and `WheelRail` is deleted. A legacy `ih.ui.tweaks` blob that still
+/// carries those keys deserializes fine (serde ignores unknown keys); the strict
+/// no-`#[serde(default)]` posture is kept on purpose (T-26.2.1-05).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct UiPrefs {
     /// Accent colour swap (D-13 default = teal `#39c5cf`).
     pub accent: AccentColor,
-    /// Wheel diameter in CSS pixels — written to the `--wheel-size`
-    /// custom property by Plan 05.
-    pub wheel_size: f64,
-    /// Breadcrumb chip (`NODE HERMES-7 › BRIDGE › CHAT`) toggle.
-    pub breadcrumb: bool,
     /// App-footer strip toggle.
     pub footer: bool,
     /// Per-row vertical density.
     pub density: Density,
-    /// Optional vertical rail on the chat screen (`body.has-rail.on-chat`).
-    pub rail: bool,
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
         Self {
             accent: AccentColor::Teal,
-            wheel_size: 240.0,
-            breadcrumb: true,
             footer: true,
             density: Density::Comfy,
-            rail: true,
         }
     }
 }
@@ -229,6 +237,22 @@ impl AccentColor {
             AccentColor::Green => ("#3fb950", "#56d364"),
             AccentColor::Violet => ("#a370f7", "#bf8bff"),
             AccentColor::Amber => ("#d29922", "#e3b341"),
+        }
+    }
+
+    /// Returns `(base, hover)` light-theme accent inks (G-54.4-18).
+    ///
+    /// These are derived by lowering OKLCH lightness at each accent's own hue
+    /// until both inks reach 4.5:1 or better on every light surface.
+    /// `theme_effects` writes them only for light themes; `hex_pair()` stays
+    /// the dark-theme ink and the Settings accent picker's identity.
+    pub fn light_hex_pair(self) -> (&'static str, &'static str) {
+        match self {
+            AccentColor::Teal => ("#005b61", "#006167"),
+            AccentColor::Orange => ("#833f01", "#844803"),
+            AccentColor::Green => ("#03601a", "#00661a"),
+            AccentColor::Violet => ("#6930b4", "#713ba8"),
+            AccentColor::Amber => ("#6d4c00", "#6f5302"),
         }
     }
 }
@@ -404,11 +428,42 @@ mod tests {
     fn ui_prefs_default_matches_plan_spec() {
         let p = UiPrefs::default();
         assert_eq!(p.accent, AccentColor::Teal);
-        assert_eq!(p.wheel_size, 240.0);
-        assert!(p.breadcrumb);
         assert!(p.footer);
         assert_eq!(p.density, Density::Comfy);
-        assert!(p.rail);
+    }
+
+    #[test]
+    fn ui_prefs_legacy_blob_with_retired_chrome_fields_still_loads() {
+        // Phase 54.4 Plan 02 (D-05/D-07/D-26, T-54.4-04): `wheel_size`,
+        // `breadcrumb` and `rail` were retired from `UiPrefs` (the docked header
+        // pins the wheel via `--ih-wheel-size`, the status strip is permanent,
+        // `WheelRail` is deleted). A browser that still holds the old
+        // `ih.ui.tweaks` blob — retired keys plus the even older `scanlines`
+        // key — must keep loading: serde ignores unknown keys. We still do NOT
+        // add `#[serde(default)]` (see `unknown_field_falls_back_to_default`).
+        let legacy_blob = serde_json::json!({
+            "accent": "Teal",
+            "wheel_size": 320.0,      // ← retired in 54.4-02; must be ignored
+            "scanlines": true,        // ← retired in 26.2.1-15; must be ignored
+            "breadcrumb": false,      // ← retired in 54.4-02; must be ignored
+            "footer": true,
+            "density": "Comfy",
+            "rail": false,            // ← retired in 54.4-02; must be ignored
+        })
+        .to_string();
+        let parsed: UiPrefs = serde_json::from_str(&legacy_blob)
+            .expect("legacy blob carrying retired chrome keys must still deserialize");
+        assert_eq!(parsed, UiPrefs::default());
+
+        // Behavioral half: the struct must no longer WRITE the retired keys back
+        // (this is what fails while the fields still exist).
+        let written = serde_json::to_value(UiPrefs::default()).expect("serialize UiPrefs");
+        for retired in ["wheel_size", "breadcrumb", "rail"] {
+            assert!(
+                written.get(retired).is_none(),
+                "UiPrefs must not serialize retired key `{retired}`; got {written}"
+            );
+        }
     }
 
     #[test]
@@ -488,6 +543,12 @@ mod tests {
     #[test]
     fn density_default_is_comfy() {
         assert_eq!(Density::default(), Density::Comfy);
+    }
+
+    /// Phase 54.4 Plan 05 (D-15): the agent-tab layout key.
+    #[test]
+    fn ui_prefs_key_dashboard_is_ih_ui_dashboard() {
+        assert_eq!(KEY_DASHBOARD, "ih.ui.dashboard");
     }
 
     #[test]

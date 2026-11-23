@@ -11,6 +11,8 @@
 //! kanban-flavored copy on the Kanban board.
 
 pub mod advanced;
+// Phase 54.4 Plan 09 (D-16/D-19/D-22/D-27): the per-agent settings slide-over.
+pub mod agent_settings;
 pub mod create_dialog;
 pub mod edit_dialog;
 pub mod secrets_source_picker;
@@ -101,9 +103,9 @@ mod tests {
         let ctx = ProfileDialogContext::Bot;
         let copied = ctx;
         assert_eq!(ctx, copied);
-        // `Clone::clone` via reference (not `Copy`'s implicit path) — proves
-        // the derive without tripping clippy's clone-on-copy lint.
-        let cloned = Clone::clone(&ctx);
-        assert_eq!(ctx, cloned);
+        // Prove the `Clone` derive at compile time — any `.clone()` call on a
+        // `Copy` type trips clippy's clone-on-copy lint.
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<ProfileDialogContext>();
     }
 }

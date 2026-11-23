@@ -132,6 +132,63 @@ fn make_test_ctx_with_provider_resolver(fast_model: Option<&str>) -> CommandCont
 }
 
 // =============================================================================
+// /usage context-window line (Phase 58.3.1, D-13)
+// =============================================================================
+
+/// A trait impl that does not override `context_window` reports `None`.
+#[test]
+fn context_window_default_is_none() {
+    let r = FakeResolver::new("openai", "gpt-4o", None);
+    assert_eq!(r.context_window(), None);
+}
+
+/// `/usage` appends the effective window and source word; with no resolver the
+/// output is the unchanged "Session storage not configured." text.
+#[test]
+fn usage_appends_context_window_and_source() {
+    use ironhermes_core::commands::context::ProviderResolverAdapter;
+    use ironhermes_core::config::{Config, ProviderConfig};
+    use ironhermes_core::models_cache::ModelsCache;
+    use ironhermes_core::provider::ProviderResolver;
+
+    let base_url = "http://127.0.0.1:9/usage-test/v1";
+    let mut config = Config::default();
+    config.model.provider = "p".to_string();
+    config.providers.insert(
+        "p".to_string(),
+        ProviderConfig {
+            base_url: Some(base_url.to_string()),
+            default_model: Some("usage-unknown-model".to_string()),
+            ..Default::default()
+        },
+    );
+    let resolver = Arc::new(
+        ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build"),
+    );
+    let handle: Arc<dyn ProviderResolverHandle> = Arc::new(ProviderResolverAdapter(resolver));
+    let ctx = CommandContext::new(Platform::Local, "usage-session".to_string())
+        .with_provider_resolver(handle);
+    let router = make_router();
+    let cmd = find_cmd("usage");
+
+    match dispatch(&cmd, &[], &ctx, &router) {
+        CommandResult::Output(s) => {
+            assert!(
+                s.contains("Context window: 8,192 tokens (local default)"),
+                "got: {s}"
+            );
+            assert!(!s.contains("127.0.0.1"), "base URL must not leak: {s}");
+        }
+        other => panic!("Expected Output, got {:?}", other),
+    }
+
+    match dispatch(&cmd, &[], &make_ctx_no_resolver(), &router) {
+        CommandResult::Output(s) => assert_eq!(s, "Session storage not configured."),
+        other => panic!("Expected Output, got {:?}", other),
+    }
+}
+
+// =============================================================================
 // /model tests
 // =============================================================================
 

@@ -1,4 +1,4 @@
-use ironhermes_core::{ChatMessage, global_estimate_tokens};
+use ironhermes_core::{ChatMessage, Role, global_estimate_tokens};
 use tracing::{debug, info};
 
 /// Token estimation backed by tiktoken BPE (Phase 21.3 D-09).
@@ -214,7 +214,17 @@ impl ContextCompressor {
             tail_start = i;
         }
 
-        let tail_start = tail_start.max(front + 1);
+        let mut tail_start = tail_start.max(front + 1);
+
+        // A tail that starts on a tool result would orphan it from its
+        // assistant.tool_calls, so the tail is extended to keep the pair whole.
+        while tail_start > front + 1
+            && messages
+                .get(tail_start)
+                .is_some_and(|m| m.role == Role::Tool)
+        {
+            tail_start -= 1;
+        }
 
         if tail_start <= front + 1 {
             return;

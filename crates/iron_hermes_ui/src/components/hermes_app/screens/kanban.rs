@@ -30,6 +30,7 @@ pub mod profile_switcher;
 pub mod wizard;
 
 use crate::components::hermes_app::screens::kanban::board::KanbanBoard;
+use crate::components::hermes_app::screens::kanban::column::{KanbanColumn, KanbanColumnStatus};
 use crate::components::hermes_app::screens::kanban::drawer::TaskDrawer;
 use crate::components::hermes_app::screens::kanban::modals::{
     ArchiveConfirmModal, BlockModal, CompleteModal, CreateTaskModal,
@@ -61,6 +62,112 @@ pub enum WsState {
     Disconnected,
 }
 
+/// Phase 54.4 Plan 08 (D-09): which projection of the already-fetched `tasks`
+/// signal the Kanban screen shows. `Board` is the side-by-side board
+/// (unchanged); `Tabs` shows one status column at a time under a counted tab
+/// strip. Persisted at `ui_prefs::KEY_KANBAN_VIEW` (D-15).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) enum KanbanViewMode {
+    #[default]
+    Board,
+    Tabs,
+}
+
+/// Phase 54.4 Plan 08 (D-09): status tab order from the operator mockup,
+/// frame 3 — TRIAGE | TODO | READY | IN PROGRESS | BLOCKED | DONE | ARCHIVED.
+pub(crate) const KANBAN_STATUS_ORDER: [KanbanColumnStatus; 7] = [
+    KanbanColumnStatus::Triage,
+    KanbanColumnStatus::Todo,
+    KanbanColumnStatus::Ready,
+    KanbanColumnStatus::InProgress,
+    KanbanColumnStatus::Blocked,
+    KanbanColumnStatus::Done,
+    KanbanColumnStatus::Archived,
+];
+
+/// Phase 54.4 Plan 08 (D-15 / T-54.4-27): parse a stored view-mode value.
+/// Anything that is not the JSON form of a `KanbanViewMode` variant (a
+/// tampered or stale localStorage value, or no value at all) falls back to
+/// `Board`.
+#[allow(dead_code)] // exercised by the unit tests; the live hydrate path goes through `ui_prefs::read_json`, which applies the same serde parse
+pub(crate) fn kanban_view_from_stored(raw: Option<&str>) -> KanbanViewMode {
+    raw.and_then(|s| serde_json::from_str::<KanbanViewMode>(s).ok())
+        .unwrap_or_default()
+}
+
+/// Phase 54.4 Plan 08 (D-09): per-status task counts for the TABS strip, in
+/// `KANBAN_STATUS_ORDER`. All seven statuses are always present (a zero-count
+/// status still renders as a tab). Comparison is on the wire status string,
+/// so `InProgress` counts `"running"`.
+pub(crate) fn status_counts(tasks: &[TaskRow]) -> Vec<(KanbanColumnStatus, usize)> {
+    KANBAN_STATUS_ORDER
+        .iter()
+        .map(|&status| {
+            let n = tasks.iter().filter(|t| t.status == status.as_str()).count();
+            (status, n)
+        })
+        .collect()
+}
+
+/// Phase 54.4 Plan 08 (T-54.4-28): selecting ARCHIVED forces the
+/// `include_archived` fetch, but only when archived tasks are not already
+/// fetched — so the restart fires once, never in a loop.
+pub(crate) fn selecting_needs_archived_fetch(
+    status: KanbanColumnStatus,
+    archived_visible: bool,
+) -> bool {
+    status == KanbanColumnStatus::Archived && !archived_visible
+}
+
+/// Phase 54.4 Plan 08: Title Case display name of a status, used in the
+/// empty-state copy (the tab labels themselves are the uppercase `label()`).
+pub(crate) fn status_display(status: KanbanColumnStatus) -> &'static str {
+    match status {
+        KanbanColumnStatus::Triage => "Triage",
+        KanbanColumnStatus::Todo => "Todo",
+        KanbanColumnStatus::Ready => "Ready",
+        KanbanColumnStatus::InProgress => "In Progress",
+        KanbanColumnStatus::Blocked => "Blocked",
+        KanbanColumnStatus::Done => "Done",
+        KanbanColumnStatus::Archived => "Archived",
+    }
+}
+
+/// Phase 54.4 Plan 08 (UIC E13-empty): the verbatim UI-SPEC copy for a
+/// selected status with no tasks.
+pub(crate) fn kanban_empty_status_copy(status: KanbanColumnStatus) -> String {
+    let name = status_display(status);
+    format!("Nothing in {name}. Tasks moved to {name} appear here.")
+}
+
+/// Phase 54.4 Plan 08 (UIC E13-populated): a status tab label with its count,
+/// e.g. `"TRIAGE 4"`.
+pub(crate) fn status_tab_label(status: KanbanColumnStatus, count: usize) -> String {
+    format!("{} {count}", status.label())
+}
+
+/// Phase 54.4 Plan 08: arrow-key direction through the status tab strip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum StatusStep {
+    Left,
+    Right,
+}
+
+/// Phase 54.4 Plan 08: the neighbouring status in `KANBAN_STATUS_ORDER`,
+/// wrapping at both ends.
+pub(crate) fn next_status(current: KanbanColumnStatus, dir: StatusStep) -> KanbanColumnStatus {
+    let n = KANBAN_STATUS_ORDER.len();
+    let idx = KANBAN_STATUS_ORDER
+        .iter()
+        .position(|&s| s == current)
+        .unwrap_or(0);
+    let next = match dir {
+        StatusStep::Right => (idx + 1) % n,
+        StatusStep::Left => (idx + n - 1) % n,
+    };
+    KANBAN_STATUS_ORDER[next]
+}
+
 /// Phase 36.3.7.11 Plan 02: kanban dashboard screen.
 ///
 /// Renders six columns (D-09), an archive-toggle toolbar button, a WS
@@ -71,6 +178,23 @@ pub enum WsState {
 pub fn ScreenKanban(is_active: bool) -> Element {
     // ALL hooks register unconditionally on every render (Pattern E from
     // PATTERNS.md — agents.rs UAT-2 hotfix discipline).
+
+    // Phase 54.4 Plan 08 (D-09 / D-15): BOARD | TABS projection and the
+    // status shown in TABS. The view mode hydrates from localStorage
+    // (`read_json` is a native no-op, and an invalid stored value parses to
+    // `None` -> BOARD).
+    let mut view_mode: Signal<KanbanViewMode> = use_signal(|| {
+        crate::ui_prefs::read_json::<KanbanViewMode>(crate::ui_prefs::KEY_KANBAN_VIEW)
+            .unwrap_or_default()
+    });
+    let mut selected_status: Signal<KanbanColumnStatus> =
+        use_signal(|| KanbanColumnStatus::Triage);
+    // Persist effect: reads `view_mode`, writes only to storage — never to
+    // a signal it reads, so it cannot self-retrigger.
+    use_effect(move || {
+        let m = *view_mode.read();
+        crate::ui_prefs::write_json(crate::ui_prefs::KEY_KANBAN_VIEW, &m);
+    });
 
     // Archive toggle — drives the 7th column visibility (D-09) AND the
     // include_archived parameter on `fetch_board` (BUG-1 fix from
@@ -270,6 +394,28 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     // Materialize loading / error states for the rendering branch.
     let is_loading = board_resource.value()().is_none();
     let has_error = matches!(board_resource.value()(), Some(Err(_)));
+    // Phase 54.4 Plan 08: owned copies of the view state, read in render
+    // (`.read()`, so a toggle re-renders) and never held into the rsx! tree.
+    let view = *view_mode.read();
+    let selected = *selected_status.read();
+    // Owned counts for the status tab strip (the `tasks` read is a temporary
+    // dropped at the end of this statement).
+    let counts: Vec<(KanbanColumnStatus, usize)> = status_counts(&tasks.read());
+    let selected_count: usize = counts
+        .iter()
+        .find(|(s, _)| *s == selected)
+        .map_or(0, |(_, n)| *n);
+    // Selecting a status: set it, and when ARCHIVED is chosen before archived
+    // tasks were fetched, force the existing `include_archived` fetch (same
+    // sync `restart()` the SHOW ARCHIVED toggle uses — no signal borrow
+    // across an await). `peek()` is correct here: inside an event closure.
+    let mut select_status = move |status: KanbanColumnStatus| {
+        selected_status.set(status);
+        if selecting_needs_archived_fetch(status, *archived_visible.peek()) {
+            archived_visible.set(true);
+            board_resource.restart();
+        }
+    };
 
     let ws_state_class = match *ws_state.read() {
         WsState::Connecting => "is-connecting",
@@ -591,23 +737,49 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                         },
                         "+ NEW PROFILE"
                     }
+                    // Phase 54.4 Plan 08 (D-09): BOARD | TABS segmented
+                    // control, before `+ Add card`.
+                    div {
+                        class: "kn-view-toggle",
+                        role: "radiogroup",
+                        "aria-label": "Kanban view",
+                        button {
+                            role: "radio",
+                            class: "kn-view-seg",
+                            "aria-checked": if view == KanbanViewMode::Board { "true" } else { "false" },
+                            onclick: move |_| view_mode.set(KanbanViewMode::Board),
+                            "BOARD"
+                        }
+                        button {
+                            role: "radio",
+                            class: "kn-view-seg",
+                            "aria-checked": if view == KanbanViewMode::Tabs { "true" } else { "false" },
+                            onclick: move |_| view_mode.set(KanbanViewMode::Tabs),
+                            "TABS"
+                        }
+                    }
                     button {
                         class: "btn btn--ghost btn--sm",
                         onclick: move |_| create_modal_open.set(true),
                         "+ Add card"
                     }
-                    button {
-                        class: "btn btn--ghost btn--sm",
-                        onclick: move |_| {
-                            let cur = *archived_visible.read();
-                            archived_visible.set(!cur);
-                            // BUG-1 fix (quick-260602-ds9): re-fetch with
-                            // the new include_archived value so the
-                            // ARCHIVED column populates/empties. restart()
-                            // is sync — no signal-borrow span over await.
-                            board_resource.restart();
-                        },
-                        if *archived_visible.read() { "HIDE ARCHIVED" } else { "SHOW ARCHIVED" }
+                    // D-09 / RESEARCH Pattern 6 (A10): the SHOW/HIDE ARCHIVED
+                    // toggle is BOARD-only; in TABS the ARCHIVED status tab
+                    // drives the same fetch.
+                    if view == KanbanViewMode::Board {
+                        button {
+                            class: "btn btn--ghost btn--sm",
+                            onclick: move |_| {
+                                let cur = *archived_visible.read();
+                                archived_visible.set(!cur);
+                                // BUG-1 fix (quick-260602-ds9): re-fetch with
+                                // the new include_archived value so the
+                                // ARCHIVED column populates/empties. restart()
+                                // is sync — no signal-borrow span over await.
+                                board_resource.restart();
+                            },
+                            if *archived_visible.read() { "HIDE ARCHIVED" } else { "SHOW ARCHIVED" }
+                        }
                     }
                     // Phase 46.6 gap-closure: jump to the Artifacts gallery.
                     button {
@@ -635,7 +807,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                 }
             } else if is_loading {
                 div { class: "kn-loading", "Loading board…" }
-            } else {
+            } else if view == KanbanViewMode::Board {
                 KanbanBoard {
                     tasks: tasks,
                     archived_visible: archived_visible_ro,
@@ -647,6 +819,58 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     archive_modal_task: archive_modal_task,
                     on_triage_action: on_triage_action,
                     active_profile: active_profile_ro,
+                }
+            } else {
+                // D-09 TABS view: one status column over the same `tasks`
+                // signal / `board_resource` (no second fetch). Drag between
+                // columns is unavailable here (only one column is visible,
+                // Pitfall 11); card drawer actions remain.
+                div { class: "kn-tabs-view",
+                    // Status tab strip: all seven statuses, each with its
+                    // count. Every tab stays in the tab order (no roving
+                    // tabindex) so Left/Right selection never strands focus.
+                    div {
+                        class: "tabs kn-status-tabs",
+                        role: "tablist",
+                        "aria-label": "Task status",
+                        for (status , count) in counts.iter().copied() {
+                            button {
+                                key: "{status.as_str()}",
+                                role: "tab",
+                                class: if status == selected { "tab is-active" } else { "tab" },
+                                "aria-selected": if status == selected { "true" } else { "false" },
+                                onclick: move |_| select_status(status),
+                                onkeydown: move |evt: KeyboardEvent| {
+                                    let step = match evt.key() {
+                                        Key::ArrowLeft => Some(StatusStep::Left),
+                                        Key::ArrowRight => Some(StatusStep::Right),
+                                        _ => None,
+                                    };
+                                    if let Some(step) = step {
+                                        evt.prevent_default();
+                                        select_status(next_status(status, step));
+                                    }
+                                },
+                                "{status_tab_label(status, count)}"
+                            }
+                        }
+                    }
+                    if selected_count == 0 {
+                        div { class: "kn-status-empty", "{kanban_empty_status_copy(selected)}" }
+                    } else {
+                        KanbanColumn {
+                            status: selected,
+                            tasks: tasks,
+                            on_open_drawer: on_open_drawer,
+                            dragged_task_id: dragged_task_id,
+                            pending_task_ids: pending_task_ids,
+                            toast_msg: toast_msg,
+                            live_region_msg: live_region_msg,
+                            archive_modal_task: archive_modal_task,
+                            on_triage_action: on_triage_action,
+                            active_profile: active_profile_ro,
+                        }
+                    }
                 }
             }
             // UI-SPEC §7.5: optimistic-revert toast surface (visible).
@@ -774,5 +998,170 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D-09/D-15: BOARD is the default view; the serialized form is the
+    /// variant name.
+    #[test]
+    fn kanban_view_mode_defaults_to_board() {
+        assert_eq!(KanbanViewMode::default(), KanbanViewMode::Board);
+        assert_eq!(
+            serde_json::from_str::<KanbanViewMode>("\"Tabs\"").unwrap(),
+            KanbanViewMode::Tabs
+        );
+    }
+
+    /// T-54.4-27: a tampered / missing stored value falls back to BOARD.
+    #[test]
+    fn kanban_view_invalid_stored_value_falls_back_to_board() {
+        assert_eq!(
+            kanban_view_from_stored(Some("nonsense")),
+            KanbanViewMode::Board
+        );
+        assert_eq!(kanban_view_from_stored(None), KanbanViewMode::Board);
+        assert_eq!(
+            kanban_view_from_stored(Some("\"Tabs\"")),
+            KanbanViewMode::Tabs
+        );
+    }
+
+    /// UI-SPEC / mockup frame 3: TRIAGE | TODO | READY | IN PROGRESS |
+    /// BLOCKED | DONE | ARCHIVED.
+    #[test]
+    fn kanban_view_status_order_matches_the_mockup() {
+        assert_eq!(
+            KANBAN_STATUS_ORDER,
+            [
+                KanbanColumnStatus::Triage,
+                KanbanColumnStatus::Todo,
+                KanbanColumnStatus::Ready,
+                KanbanColumnStatus::InProgress,
+                KanbanColumnStatus::Blocked,
+                KanbanColumnStatus::Done,
+                KanbanColumnStatus::Archived,
+            ]
+        );
+    }
+
+    /// D-15: the Kanban screen owns its own view-mode key.
+    #[test]
+    fn kanban_view_key_constant() {
+        assert_eq!(crate::ui_prefs::KEY_KANBAN_VIEW, "ih.ui.kanban_view");
+    }
+
+    /// User-requested layout (supersedes the plan's "first row below the
+    /// wheel"): the header sits beside the wheel at `--ih-row-inset` and the
+    /// content rows start at `--ih-overhang-h`, via variables only and a
+    /// selector that out-ranks screens.css's `#screen-kanban` rule.
+    #[test]
+    fn kanban_view_header_sits_beside_wheel_css() {
+        let css = include_str!("../../../../assets/kanban.css");
+        assert!(css.contains("section#screen-kanban.screen > .screen-header"));
+        assert!(css.contains("var(--ih-row-inset)"));
+        assert!(css.contains("var(--ih-overhang-h)"));
+        assert!(css.contains("margin-left: calc(var(--ih-row-inset)"));
+        assert!(css.contains("min-height: calc(var(--ih-overhang-h)"));
+    }
+
+    fn row(status: &str) -> TaskRow {
+        TaskRow {
+            id: format!("t-{status}"),
+            title: "t".to_string(),
+            body: None,
+            assignee: "a".to_string(),
+            status: status.to_string(),
+            priority: 0,
+            tenant: None,
+            workspace: None,
+            created_at: 0.0,
+            started_at: None,
+            ended_at: None,
+            output_path: None,
+        }
+    }
+
+    /// UIC E13-zero-one-many: every status gets a tab, including zero-count
+    /// ones; InProgress counts the wire value "running".
+    #[test]
+    fn kanban_view_status_counts_cover_all_seven() {
+        let tasks = vec![row("triage"), row("running"), row("running"), row("done")];
+        let counts = status_counts(&tasks);
+        assert_eq!(counts.len(), 7);
+        let order: Vec<KanbanColumnStatus> = counts.iter().map(|(s, _)| *s).collect();
+        assert_eq!(order, KANBAN_STATUS_ORDER.to_vec());
+        let get = |s: KanbanColumnStatus| counts.iter().find(|(x, _)| *x == s).unwrap().1;
+        assert_eq!(get(KanbanColumnStatus::Triage), 1);
+        assert_eq!(get(KanbanColumnStatus::InProgress), 2);
+        assert_eq!(get(KanbanColumnStatus::Done), 1);
+        assert_eq!(get(KanbanColumnStatus::Todo), 0);
+        assert_eq!(get(KanbanColumnStatus::Ready), 0);
+        assert_eq!(get(KanbanColumnStatus::Blocked), 0);
+        assert_eq!(get(KanbanColumnStatus::Archived), 0);
+    }
+
+    /// T-54.4-28: only a first selection of ARCHIVED triggers the refetch.
+    #[test]
+    fn kanban_view_archived_selection_needs_fetch() {
+        assert!(selecting_needs_archived_fetch(
+            KanbanColumnStatus::Archived,
+            false
+        ));
+        assert!(!selecting_needs_archived_fetch(
+            KanbanColumnStatus::Archived,
+            true
+        ));
+        assert!(!selecting_needs_archived_fetch(
+            KanbanColumnStatus::Todo,
+            false
+        ));
+    }
+
+    /// UIC E13-empty: Title Case status in the verbatim UI-SPEC copy.
+    #[test]
+    fn kanban_view_empty_copy_uses_title_case_status() {
+        assert_eq!(
+            kanban_empty_status_copy(KanbanColumnStatus::InProgress),
+            "Nothing in In Progress. Tasks moved to In Progress appear here."
+        );
+        assert_eq!(
+            kanban_empty_status_copy(KanbanColumnStatus::Triage),
+            "Nothing in Triage. Tasks moved to Triage appear here."
+        );
+    }
+
+    /// UIC E13-populated: each tab label carries its count.
+    #[test]
+    fn kanban_view_status_tab_label_has_count() {
+        assert_eq!(status_tab_label(KanbanColumnStatus::Triage, 4), "TRIAGE 4");
+        assert_eq!(
+            status_tab_label(KanbanColumnStatus::InProgress, 0),
+            "IN PROGRESS 0"
+        );
+    }
+
+    /// Keyboard: Left/Right move through the strip and wrap at the ends.
+    #[test]
+    fn kanban_view_next_status_wraps() {
+        assert_eq!(
+            next_status(KanbanColumnStatus::Archived, StatusStep::Right),
+            KanbanColumnStatus::Triage
+        );
+        assert_eq!(
+            next_status(KanbanColumnStatus::Triage, StatusStep::Left),
+            KanbanColumnStatus::Archived
+        );
+        assert_eq!(
+            next_status(KanbanColumnStatus::Todo, StatusStep::Right),
+            KanbanColumnStatus::Ready
+        );
+        assert_eq!(
+            next_status(KanbanColumnStatus::Ready, StatusStep::Left),
+            KanbanColumnStatus::Todo
+        );
     }
 }

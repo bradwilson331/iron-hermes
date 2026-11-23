@@ -215,7 +215,23 @@ impl BrowserSession {
                  or install chromium. Searched: BROWSER_PATH, CHROMIUM_PATH, PATH, /Applications, /usr/bin, %PROGRAMFILES%"
             ))?;
 
-        debug!(binary = %binary.display(), headed = config.headed, no_sandbox = config.no_sandbox,
+        let no_sandbox = effective_no_sandbox(
+            config.no_sandbox,
+            std::env::var(NO_SANDBOX_ENV).ok().as_deref(),
+        );
+        // WR-04: the env var wins over config. `browser.no_sandbox` is a plain bool,
+        // so an explicit `false` cannot be told from the default; warn on any
+        // false -> true flip so a container operator is never silently unsandboxed.
+        // Once per process: the image sets the env var, so every launch would repeat it.
+        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+        if no_sandbox && !config.no_sandbox {
+            WARN_ONCE.call_once(|| warn!(
+                env = NO_SANDBOX_ENV,
+                "Chromium sandbox disabled by {NO_SANDBOX_ENV} (overrides browser.no_sandbox: false); \
+                 unset it or set it to 0 to re-enable the sandbox"
+            ));
+        }
+        debug!(binary = %binary.display(), headed = config.headed, no_sandbox,
                "Phase 25.1: spawning chromium");
 
         let mut builder = CdpBrowserConfig::builder()
@@ -258,7 +274,7 @@ impl BrowserSession {
             // chromiumoxide 0.9 default IS headless; .with_head() opts INTO headed.
             builder = builder.with_head();
         }
-        if config.no_sandbox {
+        if no_sandbox {
             builder = builder.no_sandbox();
         }
 
@@ -425,6 +441,20 @@ fn extract_host(url: &str) -> Option<String> {
 /// process, so 3s is enough headroom to unwind cleanly without keeping
 /// `browser_close` blocked for long.
 const CHILD_TERM_GRACE: Duration = Duration::from_secs(3);
+
+/// D-21 (phase 54.11): env override for `browser.no_sandbox`, set to 1 in the
+/// container image where the hardened seccomp profile blocks Chromium's sandbox.
+const NO_SANDBOX_ENV: &str = "IRONHERMES_BROWSER_NO_SANDBOX";
+
+/// 1/true/yes/on forces no-sandbox, 0/false/no/off forces the sandbox; empty,
+/// unknown or unset defers to config, so a typo never silently disables it.
+fn effective_no_sandbox(config_flag: bool, env_value: Option<&str>) -> bool {
+    match env_value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        _ => config_flag,
+    }
+}
 
 /// Phase 53 Plan 03 (T-53-03-01): the three-way teardown decision `close()`
 /// acts on, factored out so it is unit-testable without a live CDP
@@ -799,9 +829,7 @@ pub fn configured_browser_engine_available(config: &BrowserConfig) -> bool {
             }
         }
         // D-01: cdp_url is NOT consulted on this arm — inert under Chromium.
-        BrowserBackend::Chromium => {
-            find_chromium_binary(config.chromium_path.as_deref()).is_some()
-        }
+        BrowserBackend::Chromium => find_chromium_binary(config.chromium_path.as_deref()).is_some(),
     };
     if !available {
         // D-09: a tool vanishing from the model's schema is otherwise
@@ -1018,6 +1046,29 @@ mod tests {
     use super::*;
     use std::sync::OnceLock;
 
+    #[test]
+    fn effective_no_sandbox_env_overrides_config() {
+        let cases: [(bool, Option<&str>, bool); 10] = [
+            (false, None, false),
+            (true, None, true),
+            (false, Some("1"), true),
+            (false, Some("TRUE"), true),
+            (false, Some("on"), true),
+            (true, Some("0"), false),
+            (true, Some("false"), false),
+            (true, Some("Off"), false),
+            (true, Some(""), true),
+            (false, Some("maybe"), false),
+        ];
+        for (cfg, env, want) in cases {
+            assert_eq!(
+                effective_no_sandbox(cfg, env),
+                want,
+                "cfg={cfg} env={env:?}"
+            );
+        }
+    }
+
     fn env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -1211,8 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cdp_url_under_obscura_makes_availability_independent_of_any_local_binary()
-     {
+    fn a_cdp_url_under_obscura_makes_availability_independent_of_any_local_binary() {
         let config = BrowserConfig {
             backend: BrowserBackend::Obscura,
             cdp_url: Some("ws://127.0.0.1:9/not-a-real-obscura".to_string()),
@@ -1323,10 +1373,7 @@ mod tests {
     #[test]
     fn the_resolver_performs_no_process_spawn_and_no_network_call() {
         let src = include_str!("browser_session.rs");
-        let sig_needle = format!(
-            "{}{}",
-            "pub fn configured_browser_engine_", "available"
-        );
+        let sig_needle = format!("{}{}", "pub fn configured_browser_engine_", "available");
         let start = src
             .find(&sig_needle)
             .expect("configured_browser_engine_available must exist");

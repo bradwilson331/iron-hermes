@@ -5,6 +5,11 @@
 # Extended in Phase 49.1 with Gate 7 (D-17 pre-auth login-page response
 # security headers: frame-ancestors, pinned script-src hash, HSTS,
 # X-Frame-Options) and Gate 8 (D-06 secret-leak scan — see below).
+# Extended in Phase 52 with Gate 9 (h2 0.4.x floor) and in Phase 57 with Gate 10
+# (D-01 / SC-4 licence wall: tirith-core, AGPL-3.0-only, is reachable only from
+# the `ironhermes-tirith` sidecar crate). Extended in Phase 54.11 with Gate 11
+# (D-04 #10 / D-17 container lint: Hadolint, digest pins, healthcheck, OCI
+# labels, compose safety, shellcheck, tmp-exec guard; see scripts/container-lint.sh).
 #
 # D-06 ENFORCEMENT-POINT DECISION (49.1-03, operator-confirmed
 # "both-ci-authoritative"): D-06's own wording says "commit-time", but this
@@ -373,4 +378,115 @@ fi
 echo "    OK (h2 ${H2_04_VERSION})"
 echo
 
-echo "==> All 21.7 + 47.3 + 49.1 + 52 CI gates green."
+# -----------------------------------------------------------------------------
+# Gate 10 / D-01 / SC-4 / Phase 57:
+#   Licence wall. tirith-core is AGPL-3.0-only and is linked into exactly ONE
+#   crate, the `ironhermes-tirith` sidecar binary. Every other workspace crate is
+#   MIT; if any of them (in particular the two shipped binaries, ironhermes-cli
+#   and iron_hermes_ui) could reach tirith-core, the combined work would have to
+#   be relicensed. This gate proves, from cargo's own resolved graph, that:
+#     (a) `ironhermes-tirith` is the ONLY direct dependent of tirith-core in the
+#         whole workspace (normal + build edges, all features);
+#     (b) neither shipped MIT binary has tirith-core anywhere in its tree —
+#         `cargo tree -i` exits non-zero with "did not match any packages";
+#     (c) POSITIVE CONTROL: `cargo tree -p ironhermes-tirith -i tirith-core`
+#         succeeds and prints `tirith-core v0.4.2`. Without it, a misspelled crate
+#         or package name would make every negative check in (b) pass vacuously
+#         ("did not match any packages" is also what a typo produces);
+#     (d) the `license = "AGPL-3.0-only"` manifest line appears in the sidecar's
+#         Cargo.toml and in no other crates/*/Cargo.toml.
+#   Exit statuses are captured explicitly (`&& RC=0 || RC=$?`) so `set -e` never
+#   interacts with a grep count.
+# -----------------------------------------------------------------------------
+echo "--> Gate 10 (D-01 / SC-4): tirith-core reachable only from ironhermes-tirith"
+G10_SIDECAR="ironhermes-tirith"
+G10_FAIL() {
+    echo "    GATE FAIL (D-01 / SC-4): $*"
+    exit 1
+}
+
+# (a) workspace-wide direct dependents of tirith-core.
+G10_A_OUT=$(cargo tree --workspace --all-features -i tirith-core -e normal,build --depth 1 --prefix none 2>&1) && G10_A_RC=0 || G10_A_RC=$?
+if [ "${G10_A_RC}" -ne 0 ]; then
+    echo "${G10_A_OUT}"
+    G10_FAIL "workspace-wide 'cargo tree -i tirith-core' exited ${G10_A_RC}; tirith-core must resolve in the workspace via ${G10_SIDECAR}."
+fi
+G10_A_OTHERS=$(printf '%s\n' "${G10_A_OUT}" | grep -v '^tirith-core v' | grep -v '^$' || true)
+G10_A_COUNT=$(printf '%s\n' "${G10_A_OTHERS}" | grep -c . || true)
+if [ "${G10_A_COUNT}" != "1" ] || ! printf '%s\n' "${G10_A_OTHERS}" | grep -qE "^${G10_SIDECAR} v[0-9]"; then
+    echo "    direct dependents of tirith-core (expected exactly one: ${G10_SIDECAR}):"
+    printf '%s\n' "${G10_A_OTHERS}" | sed 's/^/      /'
+    G10_FAIL "a crate other than ${G10_SIDECAR} depends directly on tirith-core."
+fi
+
+# (b) negative checks for the two shipped MIT binaries.
+# NOTE (measured on cargo 1.99): with `-i`, cargo tree silently IGNORES a `-p`
+# spec that names no package — `cargo tree -p zzz-nonexistent -i serde` exits 0 and
+# prints the whole-workspace answer. So `-p X -i tirith-core` alone cannot prove
+# that X exists. Each check therefore pairs the inverted query with a NON-inverted
+# `cargo tree -p X` existence probe, which does error on an unknown package.
+for G10_CRATE in ironhermes-cli iron_hermes_ui; do
+    G10_EXISTS_ERR=$(cargo tree -p "${G10_CRATE}" --depth 0 2>&1 >/dev/null) && G10_EXISTS_RC=0 || G10_EXISTS_RC=$?
+    if [ "${G10_EXISTS_RC}" -ne 0 ]; then
+        echo "${G10_EXISTS_ERR}"
+        G10_FAIL "package ${G10_CRATE} does not exist in the workspace — the negative check below would be vacuous."
+    fi
+    G10_B_ERR=$(cargo tree -p "${G10_CRATE}" --all-features -i tirith-core -e normal,build 2>&1 >/dev/null) && G10_B_RC=0 || G10_B_RC=$?
+    if [ "${G10_B_RC}" -eq 0 ]; then
+        G10_FAIL "tirith-core IS reachable from ${G10_CRATE} (cargo tree -i exited 0). The MIT binary would be relicensed under AGPL."
+    fi
+    if ! printf '%s\n' "${G10_B_ERR}" | grep -q 'specification `tirith-core` did not match any packages'; then
+        echo "${G10_B_ERR}"
+        G10_FAIL "cargo tree -p ${G10_CRATE} failed for a reason other than 'tirith-core did not match any packages' — the negative check is not trustworthy."
+    fi
+done
+
+# (c) positive control. The crate name is its own variable so the control can be
+# mutated (mutation discipline: a typo here MUST make this gate fail).
+G10_CONTROL_CRATE="${G10_SIDECAR}"
+# (c1) the inverted query succeeds and finds tirith-core 0.4.2 ...
+G10_C_OUT=$(cargo tree -p "${G10_CONTROL_CRATE}" -i tirith-core 2>&1) && G10_C_RC=0 || G10_C_RC=$?
+if [ "${G10_C_RC}" -ne 0 ] || ! printf '%s\n' "${G10_C_OUT}" | grep -q 'tirith-core v0.4.2'; then
+    echo "${G10_C_OUT}"
+    G10_FAIL "positive control failed: 'cargo tree -p ${G10_CONTROL_CRATE} -i tirith-core' must succeed and print 'tirith-core v0.4.2' (exit ${G10_C_RC}). A failing control means the negative checks above proved nothing."
+fi
+# (c2) ... and, because (c1) alone passes for a mistyped crate name (see NOTE
+# above), the sidecar's own non-inverted tree must list tirith-core 0.4.2.
+G10_C2_OUT=$(cargo tree -p "${G10_CONTROL_CRATE}" -e normal,build --depth 1 --prefix none 2>&1) && G10_C2_RC=0 || G10_C2_RC=$?
+if [ "${G10_C2_RC}" -ne 0 ] || ! printf '%s\n' "${G10_C2_OUT}" | grep -q '^tirith-core v0.4.2'; then
+    echo "${G10_C2_OUT}"
+    G10_FAIL "positive control failed: 'cargo tree -p ${G10_CONTROL_CRATE} --depth 1' must succeed and list 'tirith-core v0.4.2' (exit ${G10_C2_RC})."
+fi
+
+# (d) the AGPL licence line lives in exactly the sidecar's manifest.
+G10_AGPL_FILES=$(grep -lE '^license = "AGPL-3\.0-only"' crates/*/Cargo.toml || true)
+if [ "${G10_AGPL_FILES}" != "crates/${G10_SIDECAR}/Cargo.toml" ]; then
+    echo "    manifests declaring license = \"AGPL-3.0-only\":"
+    printf '%s\n' "${G10_AGPL_FILES}" | sed 's/^/      /'
+    G10_FAIL "license = \"AGPL-3.0-only\" must appear in crates/${G10_SIDECAR}/Cargo.toml and in no other crates/*/Cargo.toml."
+fi
+echo "    OK (only ${G10_SIDECAR} depends on tirith-core; ironhermes-cli and iron_hermes_ui cannot reach it; positive control green)"
+echo
+
+# -----------------------------------------------------------------------------
+# Gate 11 / D-04 #10 / D-17 / Phase 54.11:
+#   Container lint. scripts/container-lint.sh runs Hadolint on all three
+#   Dockerfiles, the digest-pin check (with a positive control that must reject
+#   an unpinned FROM), the HEALTHCHECK-target check, the OCI-label check, the
+#   compose-safety check, shellcheck of the container scripts and the D-17 guard
+#   against executing files from temp dirs. `container-lint.sh --image REF` adds
+#   Dockle on a built image; docker-publish.yml runs that on the release images.
+#   Exit status is captured explicitly (`&& RC=0 || RC=$?`) so `set -e` never
+#   interacts with the script's output.
+# -----------------------------------------------------------------------------
+echo "--> Gate 11 (D-04 #10 / D-17): container lint (hadolint, pins, healthcheck, labels, compose, shellcheck, tmp-exec)"
+G11_OUT=$(bash scripts/container-lint.sh 2>&1) && G11_RC=0 || G11_RC=$?
+printf '%s\n' "${G11_OUT}" | sed 's/^/    /'
+if [ "${G11_RC}" -ne 0 ]; then
+    echo "    GATE FAIL (D-04 #10): scripts/container-lint.sh exited ${G11_RC}."
+    exit 1
+fi
+echo "    OK"
+echo
+
+echo "==> All 21.7 + 47.3 + 49.1 + 52 + 54.11 + 57 CI gates green."

@@ -11,6 +11,11 @@
     * launchd stop sends SIGTERM; the gateway currently only handles SIGINT,
       so on `launchctl bootout` it is hard-killed after ExitTimeOut. The pid
       file is written atomically, so this is safe.
+    * No memory cap or job isolation on macOS (58.1 D-08/D-11) — launchd has
+      no equivalent of a systemd memory hard limit or transient scopes.
+      HardResourceLimits/ResidentSetSize only sets memory-pressure priority,
+      so no key is set here; detached agent workloads run as they did before
+      58.1. See docs/DEPLOYMENT.md "Memory cap and agent job scopes".
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

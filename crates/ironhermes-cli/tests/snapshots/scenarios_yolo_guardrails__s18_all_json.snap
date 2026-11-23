@@ -1,6 +1,5 @@
 ---
 source: crates/ironhermes-cli/tests/scenarios_yolo_guardrails.rs
-assertion_line: 182
 expression: json
 ---
 {
@@ -77,6 +76,7 @@ expression: json
   },
   "yolo": {
     "enabled": false,
+    "level": 3,
     "source": "disabled"
   }
 }

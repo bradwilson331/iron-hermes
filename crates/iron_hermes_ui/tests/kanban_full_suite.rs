@@ -35,7 +35,7 @@
 //!   D-21 per-task counter           → kanban.rs declares per_task_event_counter
 //!
 //! Plan 04 (wheel-nav + Agents button):
-//!   D-02 wheel 11-wedge             → state.rs has rem_euclid(11) + WheelWedge::Kanban
+//!   wheel 10-wedge (54.4)          → state.rs has rem_euclid(10) and NO WheelWedge::Kanban
 //!   D-03 Agents toolbar button      → agents.rs has "KANBAN BOARD →"
 
 use std::fs;
@@ -373,22 +373,34 @@ fn plan_03_d21_per_task_event_counter_drives_drawer_refresh() {
 }
 
 // ---------------------------------------------------------------------------
-// Plan 04 — wheel-nav 11th wedge + Agents toolbar button
+// Plan 04 — wheel-nav (Kanban wedge removed in Phase 54.4) + Agents toolbar button
 // ---------------------------------------------------------------------------
 
 #[test]
-fn plan_04_d02_wheel_eleven_wedges_with_kanban() {
+fn plan_04_d02_wheel_ten_wedges_without_kanban() {
     let state = read("src/state.rs");
     assert!(
-        state.contains("rem_euclid(11)"),
-        "D-02 (Plan 04): state.rs WheelWedge::from_index must use rem_euclid(11) \
-         — the wheel now has 11 wedges (10 original + Kanban). Modulo-10 \
-         silently re-routes the 11th wedge to Chat (Risk 1)"
+        state.contains("rem_euclid(10)") && !state.contains("rem_euclid(11)"),
+        "Phase 54.4: state.rs WheelWedge::from_index must use rem_euclid(10) \
+         — the wheel has 10 wedges; a stale index 10 wraps to Chat"
     );
     assert!(
-        state.contains("WheelWedge::Kanban"),
-        "D-02 (Plan 04): state.rs must declare WheelWedge::Kanban — the 11th \
-         wedge variant"
+        !state.contains("WheelWedge::Kanban"),
+        "Phase 54.4: state.rs must not declare WheelWedge::Kanban — the Kanban \
+         wedge was removed (Screen::Kanban is reached via the header shortcut)"
+    );
+    assert!(
+        state.contains("Kanban,"),
+        "Screen::Kanban must still exist in state.rs"
+    );
+}
+
+#[test]
+fn phase_54_4_header_shortcut_reaches_kanban() {
+    let header = read("src/components/hermes_app/header.rs");
+    assert!(
+        header.contains("(Screen::Kanban, \"Kanban\")"),
+        "Phase 54.4: the header HEADER_SHORTCUTS must include the Kanban shortcut"
     );
 }
 

@@ -4,7 +4,9 @@
 //! Auth: `Authorization: Bearer <TAVILY_API_KEY>` header.
 //!
 //! Body: `query`, `max_results`, `search_depth: "basic"` (pinned per
-//! COVERAGE.md §2.2), `topic: "general"` (pinned), `chunks_per_source`,
+//! COVERAGE.md §2.2), `topic` ("news" when `SearchFilters::is_news()`, else
+//! "general"; quick 261015-tcs COVERAGE.md — `time_range` composes with news
+//! and the current Tavily spec has no `days` parameter), `chunks_per_source`,
 //! `include_usage: true` (D-14), plus `include_domains`/`exclude_domains`
 //! and `time_range` when the caller supplies a domain or freshness filter.
 //! `include_answer` is deliberately left off — that belongs to `web_answer`
@@ -69,11 +71,14 @@ pub async fn search(
         .timeout(Duration::from_secs(timeout_secs))
         .build()?;
 
+    // Hard-coded literals behind the allowlist chokepoint — the caller's
+    // category string is never serialized (T-261015-tcs-01).
+    let topic = if filters.is_news() { "news" } else { "general" };
     let mut body = json!({
         "query": query,
         "max_results": limit,
         "search_depth": "basic",
-        "topic": "general",
+        "topic": topic,
         "chunks_per_source": 3,
         "include_usage": true,
     });

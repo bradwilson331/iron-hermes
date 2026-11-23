@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::constants::{OPENROUTER_MODELS_URL, get_hermes_home};
 use crate::model_metadata::{ModelCapabilities, PartialModelMetadata};
+use crate::observed_windows::ObservedWindow;
 
 /// A single cached model metadata entry with fetch timestamp.
 ///
@@ -25,7 +26,22 @@ pub struct ModelsCacheEntry {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ModelsCache {
     pub entries: HashMap<String, ModelsCacheEntry>,
+    /// Phase 58.3.1 (D-07): windows probed from / learned from a server, keyed
+    /// by `observed_window_key` (base_url + model). Absent in older files.
+    #[serde(default)]
+    pub context_windows: HashMap<String, ObservedWindow>,
+    /// Phase 58.3.1 (G-58.3.1-12, D-10): provider name -> ids from that
+    /// provider's last successful `/models` probe, in server order. Read by the
+    /// model picker so ids without a `context_length` stay selectable. Absent
+    /// in older files.
+    #[serde(default)]
+    pub served_models: HashMap<String, Vec<String>>,
 }
+
+/// Longest served id stored (T-58.3.1-40).
+const MAX_SERVED_ID_BYTES: usize = 256;
+/// Most served ids stored per provider (T-58.3.1-40).
+const MAX_SERVED_IDS_PER_PROVIDER: usize = 2_000;
 
 /// Result of a fetch_all operation, reporting success/failure for each source.
 pub struct FetchResult {
@@ -53,6 +69,8 @@ pub struct ProviderProbeOutcome {
     pub model_count: Option<usize>,
     pub error: Option<String>,
     pub drifted_ids: Vec<String>,
+    /// The ids the probe served, in server order; empty when `error` is `Some`.
+    pub served_ids: Vec<String>,
 }
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
@@ -67,40 +85,57 @@ impl ModelsCache {
 
     /// Load cache from disk. Returns empty cache if file doesn't exist or is malformed.
     pub fn load() -> Self {
-        let path = Self::cache_path();
-        match std::fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        Self::load_from(&Self::cache_path())
     }
 
     /// Load cache from a specific path (used for testing and custom locations).
+    /// Served ids are re-filtered on read (T-58.3.1-40): the file is plain JSON,
+    /// so a hand-edited cache must not bypass the write-side filter.
     pub fn load_from(path: &std::path::Path) -> Self {
-        match std::fs::read_to_string(path) {
+        let mut cache: Self = match std::fs::read_to_string(path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        for ids in cache.served_models.values_mut() {
+            *ids = sanitize_served_ids(ids.iter());
         }
+        cache
     }
 
-    /// Save cache to disk as pretty-printed JSON.
+    /// Save cache to disk as pretty-printed JSON (atomic: temp file + rename).
     pub fn save(&self) -> anyhow::Result<()> {
-        let path = Self::cache_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)?;
-        Ok(())
+        self.save_to(&Self::cache_path())
     }
 
     /// Save cache to a specific path (used for testing and custom locations).
+    /// Writes `<file>.tmp.<pid>` then renames, so a concurrent reader never
+    /// sees a half-written file.
     pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp.{}", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp);
+        std::fs::write(&tmp, json)?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
+    }
+
+    /// Load-modify-save one observed window so a concurrent writer's other
+    /// entries survive (Phase 58.3.1, D-07).
+    pub fn upsert_observed_window_at(
+        path: &std::path::Path,
+        key: &str,
+        window: ObservedWindow,
+    ) -> anyhow::Result<()> {
+        let mut cache = Self::load_from(path);
+        cache.context_windows.insert(key.to_string(), window);
+        cache.save_to(path)
     }
 
     /// Convert cache entries into a HashMap<String, PartialModelMetadata> for
@@ -121,6 +156,50 @@ impl ModelsCache {
     pub fn merge_entries(&mut self, fresh: HashMap<String, ModelsCacheEntry>) {
         overlay_cache_entries(&mut self.entries, fresh);
     }
+
+    /// Store each successful probe's served ids under its provider (G-58.3.1-12,
+    /// D-10). Ids are filtered at this trust boundary (T-58.3.1-40): empty,
+    /// over [`MAX_SERVED_ID_BYTES`], or containing a control character are
+    /// dropped, and at most [`MAX_SERVED_IDS_PER_PROVIDER`] are kept. A probe
+    /// with an error leaves that provider's previous list untouched, the same
+    /// rule D-08 applies to `entries`.
+    pub fn record_served_ids(&mut self, probes: &[ProviderProbeOutcome]) {
+        for probe in probes.iter().filter(|p| p.error.is_none()) {
+            self.served_models.insert(
+                probe.provider.clone(),
+                sanitize_served_ids(probe.served_ids.iter()),
+            );
+        }
+    }
+
+    /// The one load-modify-save for a fetch: load, merge `fresh`, record the
+    /// probes' served ids, save, and return the saved cache. Shared by
+    /// `/models refresh` and `ironhermes models fetch` so the order lives in
+    /// one tested place.
+    pub fn persist_fetch_to(
+        path: &std::path::Path,
+        fresh: HashMap<String, ModelsCacheEntry>,
+        probes: &[ProviderProbeOutcome],
+    ) -> anyhow::Result<ModelsCache> {
+        let mut cache = Self::load_from(path);
+        cache.merge_entries(fresh);
+        cache.record_served_ids(probes);
+        cache.save_to(path)?;
+        Ok(cache)
+    }
+}
+
+/// The served-id trust-boundary filter (T-58.3.1-40), shared by the write
+/// path (`record_served_ids`) and the read path (`load_from`): drops empty,
+/// over-long or control-character ids and keeps at most
+/// [`MAX_SERVED_IDS_PER_PROVIDER`].
+fn sanitize_served_ids<'a>(ids: impl Iterator<Item = &'a String>) -> Vec<String> {
+    ids.filter(|id| {
+        !id.is_empty() && id.len() <= MAX_SERVED_ID_BYTES && !id.chars().any(char::is_control)
+    })
+    .take(MAX_SERVED_IDS_PER_PROVIDER)
+    .cloned()
+    .collect()
 }
 
 /// Per-field provider-wins overlay (Phase 50.5, D-09): `fresh`'s observed
@@ -482,10 +561,157 @@ pub async fn fetch_from_provider(
     let now = Utc::now();
     let entries = partials
         .into_iter()
-        .map(|(id, metadata)| (id, ModelsCacheEntry { metadata, fetched_at: now }))
+        .map(|(id, metadata)| {
+            (
+                id,
+                ModelsCacheEntry {
+                    metadata,
+                    fetched_at: now,
+                },
+            )
+        })
         .collect();
 
     Ok((ids, entries))
+}
+
+/// Accept a probed window only inside the plausible band (T-58.3.1-18). Logs
+/// the field name, never the body.
+fn plausible_probed(field: &str, value: Option<u64>) -> Option<usize> {
+    let v = usize::try_from(value?).ok()?;
+    if (crate::constants::MIN_PLAUSIBLE_OBSERVED_CONTEXT_LENGTH
+        ..=crate::constants::MAX_PLAUSIBLE_CONTEXT_LENGTH)
+        .contains(&v)
+    {
+        Some(v)
+    } else {
+        tracing::warn!(
+            field,
+            value = v,
+            "rejected implausible probed context window"
+        );
+        None
+    }
+}
+
+/// LM Studio `GET /api/v1/models` (Phase 58.3.1, D-10): the LOADED window is
+/// `loaded_instances[].config.context_length`; `max_context_length` is the
+/// model's maximum and is never read. Returns the smallest plausible value.
+pub fn parse_lmstudio_loaded_window(body: &serde_json::Value, model: &str) -> Option<usize> {
+    let models = body.get("models").and_then(|m| m.as_array())?;
+    models
+        .iter()
+        .filter_map(|entry| {
+            let instances = entry.get("loaded_instances").and_then(|i| i.as_array())?;
+            let key_match = entry.get("key").and_then(|k| k.as_str()) == Some(model);
+            Some(instances.iter().filter(move |inst| {
+                key_match || inst.get("id").and_then(|i| i.as_str()) == Some(model)
+            }))
+        })
+        .flatten()
+        .filter_map(|inst| {
+            plausible_probed(
+                "loaded_instances.config.context_length",
+                inst.get("config")
+                    .and_then(|c| c.get("context_length"))
+                    .and_then(|v| v.as_u64()),
+            )
+        })
+        .min()
+}
+
+/// Ollama `GET /api/ps` (running models only): `models[].context_length` for
+/// the entry named `model` or `model:latest`.
+pub fn parse_ollama_ps_window(body: &serde_json::Value, model: &str) -> Option<usize> {
+    let latest = format!("{model}:latest");
+    let models = body.get("models").and_then(|m| m.as_array())?;
+    models
+        .iter()
+        .filter(|entry| {
+            ["name", "model"].iter().any(|f| {
+                entry
+                    .get(f)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|n| n == model || n == latest)
+            })
+        })
+        .filter_map(|entry| {
+            plausible_probed(
+                "context_length",
+                entry.get("context_length").and_then(|v| v.as_u64()),
+            )
+        })
+        .min()
+}
+
+/// llama.cpp `GET /props`: `default_generation_settings.n_ctx`. llama-server
+/// serves one model, so the model name is not matched (RESEARCH A7).
+/// `meta.n_ctx_train` is the TRAINING context and is never read.
+pub fn parse_llamacpp_props_window(body: &serde_json::Value) -> Option<usize> {
+    plausible_probed(
+        "default_generation_settings.n_ctx",
+        body.get("default_generation_settings")
+            .and_then(|s| s.get("n_ctx"))
+            .and_then(|v| v.as_u64()),
+    )
+}
+
+/// Ask a local server for the context window it actually loaded (Phase 58.3.1,
+/// D-10). Three concurrent GETs under the provider's own `base_url` (root =
+/// base_url without a trailing `/v1`); the bearer goes only to those URLs and
+/// no redirect is followed (T-58.3.1-17). Bounded to 2s (T-58.3.1-16). Any
+/// failure leaves that leg `None`; the smallest reported value wins.
+pub async fn probe_loaded_window(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+) -> Option<usize> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+
+    async fn get_json(
+        client: &reqwest::Client,
+        url: String,
+        api_key: Option<&str>,
+    ) -> Option<serde_json::Value> {
+        let mut req = client.get(url);
+        if let Some(k) = api_key {
+            req = req.bearer_auth(k);
+        }
+        let resp = req.send().await.ok()?.error_for_status().ok()?;
+        resp.json().await.ok()
+    }
+
+    let (lm, ollama, llama) = tokio::join!(
+        get_json(&client, format!("{root}/api/v1/models"), api_key),
+        get_json(&client, format!("{root}/api/ps"), api_key),
+        get_json(&client, format!("{root}/props"), api_key),
+    );
+    let legs = [
+        (
+            "lmstudio",
+            lm.and_then(|b| parse_lmstudio_loaded_window(&b, model)),
+        ),
+        (
+            "ollama",
+            ollama.and_then(|b| parse_ollama_ps_window(&b, model)),
+        ),
+        (
+            "llamacpp",
+            llama.and_then(|b| parse_llamacpp_props_window(&b)),
+        ),
+    ];
+    for (leg, v) in &legs {
+        if let Some(v) = v {
+            tracing::debug!(leg, window = v, "context window probe answered");
+        }
+    }
+    legs.iter().filter_map(|(_, v)| *v).min()
 }
 
 /// Configured model ids absent from a provider's served id list (Phase 50.5,
@@ -547,7 +773,9 @@ pub async fn fetch_from_openrouter() -> anyhow::Result<HashMap<String, ModelsCac
 /// never fails the whole refresh.
 ///
 /// Returns (merged_entries, FetchResult) where FetchResult reports what succeeded/failed.
-pub async fn fetch_all(config: &crate::config::Config) -> (HashMap<String, ModelsCacheEntry>, FetchResult) {
+pub async fn fetch_all(
+    config: &crate::config::Config,
+) -> (HashMap<String, ModelsCacheEntry>, FetchResult) {
     let mut merged = HashMap::new();
     let mut result = FetchResult {
         models_dev_count: None,
@@ -580,7 +808,20 @@ pub async fn fetch_all(config: &crate::config::Config) -> (HashMap<String, Model
         }
     }
 
-    // Probe each configured, enabled provider with a base_url (D-08/D-09).
+    result.provider_probes = probe_configured_providers(config, &mut merged).await;
+
+    (merged, result)
+}
+
+/// Probe each configured, enabled provider with a base_url (D-08/D-09), overlay
+/// the observed entries onto `merged`, and return one outcome per probed
+/// provider. Split out of [`fetch_all`] so a test can run the real probe loop
+/// against a mock without the curated network fetches.
+pub async fn probe_configured_providers(
+    config: &crate::config::Config,
+    merged: &mut HashMap<String, ModelsCacheEntry>,
+) -> Vec<ProviderProbeOutcome> {
+    let mut probes = Vec::new();
     // Sorted for deterministic ordering — `config.providers` is a HashMap.
     let mut provider_names: Vec<&String> = config.providers.keys().collect();
     provider_names.sort();
@@ -602,7 +843,7 @@ pub async fn fetch_all(config: &crate::config::Config) -> (HashMap<String, Model
         match fetch_from_provider(name, cfg).await {
             Ok((served_ids, fresh_entries)) => {
                 let model_count = served_ids.len();
-                overlay_cache_entries(&mut merged, fresh_entries);
+                overlay_cache_entries(merged, fresh_entries);
 
                 let mut configured_ids: Vec<String> = cfg.models.keys().cloned().collect();
                 if let Some(default_model) = cfg.default_model.as_ref() {
@@ -618,25 +859,27 @@ pub async fn fetch_all(config: &crate::config::Config) -> (HashMap<String, Model
                     );
                 }
 
-                result.provider_probes.push(ProviderProbeOutcome {
+                probes.push(ProviderProbeOutcome {
                     provider: name.clone(),
                     model_count: Some(model_count),
                     error: None,
                     drifted_ids,
+                    served_ids,
                 });
             }
             Err(e) => {
-                result.provider_probes.push(ProviderProbeOutcome {
+                probes.push(ProviderProbeOutcome {
                     provider: name.clone(),
                     model_count: None,
                     error: Some(e.to_string()),
                     drifted_ids: Vec::new(),
+                    served_ids: Vec::new(),
                 });
             }
         }
     }
 
-    (merged, result)
+    probes
 }
 
 #[cfg(test)]
@@ -671,6 +914,43 @@ mod tests {
         assert!(caps.tool_use);
         assert!(!caps.reasoning);
         assert!(caps.streaming);
+    }
+
+    #[test]
+    fn context_windows_round_trip_and_old_cache_loads() {
+        use crate::observed_windows::{ObservedWindow, ObservedWindowSource};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("models-cache.json");
+        let mut cache = ModelsCache::default();
+        cache.context_windows.insert(
+            "http://h:1/v1|m".to_string(),
+            ObservedWindow {
+                tokens: 8192,
+                source: ObservedWindowSource::Learned,
+                observed_at: Utc::now(),
+            },
+        );
+        cache.save_to(&path).expect("save");
+        let back = ModelsCache::load_from(&path);
+        assert_eq!(back.context_windows["http://h:1/v1|m"].tokens, 8192);
+
+        let old: ModelsCache = serde_json::from_str(PRE_MIGRATION_CACHE_JSON).expect("old cache");
+        assert!(old.context_windows.is_empty());
+        assert!(old.entries.contains_key("pre-50-5-fixture-model"));
+    }
+
+    #[test]
+    fn save_is_atomic_no_tmp_left() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("models-cache.json");
+        ModelsCache::default().save_to(&path).expect("save");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["models-cache.json".to_string()]);
+        serde_json::from_str::<ModelsCache>(&std::fs::read_to_string(&path).expect("read"))
+            .expect("parses");
     }
 
     #[test]
@@ -772,7 +1052,14 @@ mod tests {
         assert_eq!(entry.metadata.context_length, Some(200_000));
         assert_eq!(entry.metadata.max_output_tokens, Some(64_000));
         assert_eq!(entry.metadata.tokenizer, Some("cl100k_base".to_string())); // "Claude" -> "cl100k_base"
-        assert!(entry.metadata.capabilities.clone().expect("capabilities").vision); // "text+image->text" contains "image"
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .clone()
+                .expect("capabilities")
+                .vision
+        ); // "text+image->text" contains "image"
 
         // Versioned key also present
         let versioned = entries
@@ -818,7 +1105,10 @@ mod tests {
 
         // GPT-4-turbo uses cl100k_base (no 4o/o3/o4 in name)
         let gpt4_turbo = entries.get("gpt-4-turbo").expect("gpt-4-turbo");
-        assert_eq!(gpt4_turbo.metadata.tokenizer, Some("cl100k_base".to_string()));
+        assert_eq!(
+            gpt4_turbo.metadata.tokenizer,
+            Some("cl100k_base".to_string())
+        );
     }
 
     #[test]
@@ -1016,7 +1306,14 @@ mod tests {
         let entries = parse_openrouter_response(&json);
         let entry = entries.get("llama-3.1-70b-instruct").expect("llama model");
         assert_eq!(entry.metadata.tokenizer, Some("cl100k_base".to_string())); // Llama3 -> cl100k_base fallback
-        assert!(!entry.metadata.capabilities.clone().expect("capabilities").vision); // "text->text" has no "image"
+        assert!(
+            !entry
+                .metadata
+                .capabilities
+                .clone()
+                .expect("capabilities")
+                .vision
+        ); // "text->text" has no "image"
     }
 
     // -------------------------------------------------------------------
@@ -1151,7 +1448,10 @@ mod tests {
 
         assert_eq!(cache.entries.len(), 3);
         assert_eq!(cache.entries["alpha"].metadata.context_length, Some(50_000));
-        assert_eq!(cache.entries["beta"].metadata.context_length, Some(1_048_576));
+        assert_eq!(
+            cache.entries["beta"].metadata.context_length,
+            Some(1_048_576)
+        );
         // beta's tokenizer, unobserved by the fresh entry, survives the merge.
         assert_eq!(
             cache.entries["beta"].metadata.tokenizer,
@@ -1185,5 +1485,261 @@ mod tests {
         let configured = vec!["kimi-k3".to_string()];
 
         assert!(configured_id_drift(&served, &configured).is_empty());
+    }
+
+    // ---- Phase 58.3.1 D-10: loaded-window probe ----
+
+    #[test]
+    fn probe_parse_lmstudio_loaded_instance_context_length() {
+        let body = serde_json::json!({"models":[
+            {"key":"qwen","loaded_instances":[{"id":"x","config":{"context_length":8192}}],"max_context_length":131072}
+        ]});
+        assert_eq!(parse_lmstudio_loaded_window(&body, "qwen"), Some(8192));
+        let by_id = serde_json::json!({"models":[
+            {"key":"other","loaded_instances":[{"id":"qwen","config":{"context_length":4096}}]}
+        ]});
+        assert_eq!(parse_lmstudio_loaded_window(&by_id, "qwen"), Some(4096));
+        let none_loaded = serde_json::json!({"models":[{"key":"qwen","loaded_instances":[]}]});
+        assert_eq!(parse_lmstudio_loaded_window(&none_loaded, "qwen"), None);
+        let max_only = serde_json::json!({"models":[{"key":"qwen","max_context_length":131072}]});
+        assert_eq!(parse_lmstudio_loaded_window(&max_only, "qwen"), None);
+    }
+
+    #[test]
+    fn probe_parse_ollama_ps_context_length() {
+        let body = serde_json::json!({"models":[
+            {"name":"llama3:8b","model":"llama3:8b","context_length":4096},
+            {"name":"phi","model":"phi:latest","context_length":2048}
+        ]});
+        assert_eq!(parse_ollama_ps_window(&body, "llama3:8b"), Some(4096));
+        assert_eq!(parse_ollama_ps_window(&body, "phi"), Some(2048));
+        assert_eq!(parse_ollama_ps_window(&body, "mistral"), None);
+    }
+
+    #[test]
+    fn probe_parse_llamacpp_props_n_ctx() {
+        let body = serde_json::json!({"default_generation_settings":{"n_ctx":8192}});
+        assert_eq!(parse_llamacpp_props_window(&body), Some(8192));
+        let train_only = serde_json::json!({"meta":{"n_ctx_train":131072}});
+        assert_eq!(parse_llamacpp_props_window(&train_only), None);
+    }
+
+    #[test]
+    fn probe_parse_ignores_training_context_fields() {
+        let train = serde_json::json!({"meta":{"n_ctx_train":131072},"models":[
+            {"key":"m","name":"m","max_context_length":131072,
+             "model_info":{"llama":{"context_length":131072}}}
+        ]});
+        assert_eq!(parse_lmstudio_loaded_window(&train, "m"), None);
+        assert_eq!(parse_ollama_ps_window(&train, "m"), None);
+        assert_eq!(parse_llamacpp_props_window(&train), None);
+        for bad in [0u64, 500] {
+            let lm = serde_json::json!({"models":[{"key":"m","loaded_instances":[{"config":{"context_length":bad}}]}]});
+            let ol = serde_json::json!({"models":[{"name":"m","context_length":bad}]});
+            let lc = serde_json::json!({"default_generation_settings":{"n_ctx":bad}});
+            assert_eq!(parse_lmstudio_loaded_window(&lm, "m"), None);
+            assert_eq!(parse_ollama_ps_window(&ol, "m"), None);
+            assert_eq!(parse_llamacpp_props_window(&lc), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_loaded_window_reads_props_from_mock() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/props"))
+            .and(header("authorization", "Bearer sekrit"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"default_generation_settings":{"n_ctx":8192}}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let base = format!("{}/v1", server.uri());
+        assert_eq!(
+            probe_loaded_window(&base, Some("sekrit"), "m").await,
+            Some(8192)
+        );
+        let reqs = server.received_requests().await.expect("recorded");
+        assert!(reqs.len() >= 3, "all three legs fire");
+        assert!(reqs.iter().all(|r| r.headers.contains_key("authorization")));
+    }
+
+    #[tokio::test]
+    async fn probe_loaded_window_times_out_fast() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let start = std::time::Instant::now();
+        assert_eq!(probe_loaded_window(&server.uri(), None, "m").await, None);
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn probe_loaded_window_refuses_redirect() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let target = MockServer::start().await;
+        let origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/props"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/props", target.uri())),
+            )
+            .mount(&origin)
+            .await;
+        assert_eq!(
+            probe_loaded_window(&origin.uri(), Some("sekrit"), "m").await,
+            None
+        );
+        assert!(
+            target
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty()
+        );
+    }
+    /// G-58.3.1-12 / D-10 / T-58.3.1-40: a successful probe stores its served ids
+    /// (filtered) through `persist_fetch_to`; a failed probe keeps the old list;
+    /// an id without `context_length` gets no `entries` row.
+    #[tokio::test]
+    async fn served_ids_persist_from_provider_probe() {
+        use crate::config::ProviderConfig;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let a = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "unsloth/flint-GGUF", "context_length": 8192, "loaded": true},
+                    {"id": "flint-GGUF:UD-Q3_K_XL", "loaded": false},
+                    {"id": "evil\u{1b}[2J"}
+                ]
+            })))
+            .mount(&a)
+            .await;
+        let b = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&b)
+            .await;
+
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "unsloth-mac-local".to_string(),
+            ProviderConfig {
+                base_url: Some(format!("{}/v1", a.uri())),
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "b".to_string(),
+            ProviderConfig {
+                base_url: Some(format!("{}/v1", b.uri())),
+                ..Default::default()
+            },
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_path = dir.path().join("models-cache.json");
+        let mut seed = ModelsCache::default();
+        seed.entries.insert(
+            "keep-me".to_string(),
+            ModelsCacheEntry {
+                metadata: PartialModelMetadata::default(),
+                fetched_at: Utc::now(),
+            },
+        );
+        seed.served_models
+            .insert("b".to_string(), vec!["old-id".to_string()]);
+        seed.save_to(&cache_path).expect("seed saves");
+
+        let mut merged = HashMap::new();
+        let probes = probe_configured_providers(&cfg, &mut merged).await;
+        ModelsCache::persist_fetch_to(&cache_path, merged, &probes).expect("persist");
+        let reloaded = ModelsCache::load_from(&cache_path);
+
+        assert_eq!(
+            reloaded.served_models["unsloth-mac-local"],
+            vec!["unsloth/flint-GGUF", "flint-GGUF:UD-Q3_K_XL"],
+            "control-char id dropped (T-58.3.1-40)"
+        );
+        assert_eq!(
+            reloaded.served_models["b"],
+            vec!["old-id"],
+            "a failed probe keeps the previous list"
+        );
+        assert!(
+            reloaded.entries.contains_key("keep-me"),
+            "merged, not overwritten"
+        );
+        assert!(reloaded.entries.contains_key("unsloth/flint-GGUF"));
+        assert!(
+            !reloaded.entries.contains_key("flint-GGUF:UD-Q3_K_XL"),
+            "D-10: no entry fabricated for an id without context_length"
+        );
+
+        let unsloth = probes
+            .iter()
+            .find(|p| p.provider == "unsloth-mac-local")
+            .expect("unsloth outcome");
+        assert!(unsloth.error.is_none());
+        assert_eq!(unsloth.served_ids.len(), 3);
+        assert_eq!(unsloth.served_ids[0], "unsloth/flint-GGUF");
+        assert_eq!(unsloth.model_count, Some(3));
+
+        let old: ModelsCache = serde_json::from_str("{\"entries\":{}}").expect("old file parses");
+        assert!(old.served_models.is_empty());
+    }
+
+    /// T-58.3.1-40: size caps on stored served ids.
+    #[test]
+    fn record_served_ids_caps_length_and_count() {
+        let probe = ProviderProbeOutcome {
+            provider: "p".to_string(),
+            model_count: Some(0),
+            error: None,
+            drifted_ids: Vec::new(),
+            served_ids: std::iter::once("x".repeat(MAX_SERVED_ID_BYTES + 1))
+                .chain((0..MAX_SERVED_IDS_PER_PROVIDER + 5).map(|i| format!("m{i}")))
+                .chain(std::iter::once(String::new()))
+                .collect(),
+        };
+        let mut cache = ModelsCache::default();
+        cache.record_served_ids(&[probe]);
+        let stored = &cache.served_models["p"];
+        assert_eq!(stored.len(), MAX_SERVED_IDS_PER_PROVIDER);
+        assert_eq!(stored[0], "m0");
+    }
+
+    #[test]
+    fn load_refilters_tampered_served_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models-cache.json");
+        let mut ids = vec![
+            "ok".to_string(),
+            "evil\u{1b}[2J".to_string(),
+            String::new(),
+            "x".repeat(MAX_SERVED_ID_BYTES + 1),
+        ];
+        ids.extend((0..MAX_SERVED_IDS_PER_PROVIDER + 5).map(|i| format!("m{i}")));
+        let json = serde_json::json!({ "entries": {}, "served_models": { "p": ids } });
+        std::fs::write(&path, json.to_string()).unwrap();
+        let stored = &ModelsCache::load_from(&path).served_models["p"];
+        assert_eq!(stored.len(), MAX_SERVED_IDS_PER_PROVIDER);
+        assert_eq!(stored[0], "ok");
+        assert_eq!(stored[1], "m0");
+        assert!(stored.iter().all(|id| !id.chars().any(char::is_control)));
     }
 }

@@ -35,7 +35,13 @@ fn sibling_directory_with_prefix_matching_name_is_not_mistaken_for_a_child() {
     // child of "<parent>/xyz-workspace", even though the STRING "<parent>/xyz-workspace"
     // is a string-prefix of "<parent>/xyz-workspace-evil".
     let root = tempfile::tempdir().expect("tempdir");
-    let base_name = root.path().file_name().unwrap().to_str().unwrap().to_string();
+    let base_name = root
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let parent = root.path().parent().unwrap();
 
     let workspace = parent.join(format!("{base_name}-workspace"));
@@ -63,7 +69,11 @@ fn parent_traversal_that_resolves_back_inside_cwd_is_treated_as_inside() {
 
     // "<cwd>/../cwd/sibling_inside/target.txt" — traverses out and straight back into the
     // SAME cwd via a real, existing intermediate directory.
-    let traversal_path = cwd.join("..").join("cwd").join("sibling_inside").join("target.txt");
+    let traversal_path = cwd
+        .join("..")
+        .join("cwd")
+        .join("sibling_inside")
+        .join("target.txt");
 
     assert!(!is_outside_workspace(&cwd, &traversal_path));
 }
@@ -110,7 +120,10 @@ fn not_yet_existing_path_is_classified_by_its_parent_directory() {
 
     let outside_dir = tempfile::tempdir().expect("tempdir");
     let not_yet_existing_outside = outside_dir.path().join("brand_new_elsewhere.txt");
-    assert!(is_outside_workspace(cwd_dir.path(), &not_yet_existing_outside));
+    assert!(is_outside_workspace(
+        cwd_dir.path(),
+        &not_yet_existing_outside
+    ));
 }
 
 #[test]
@@ -125,7 +138,8 @@ fn negative_check_no_string_prefix_comparison() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        !stripped.contains("starts_with(&cwd_string") && !stripped.contains("to_string_lossy().starts_with"),
+        !stripped.contains("starts_with(&cwd_string")
+            && !stripped.contains("to_string_lossy().starts_with"),
         "tool_render.rs must use component-based Path::starts_with, not a string-prefix comparison"
     );
     assert!(
@@ -154,10 +168,12 @@ mod e2e {
     use agent_client_protocol::{Channel, Client, Responder};
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_state::StateStore;
-    use wiremock::matchers::any;
+    use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn build_config_and_resolver_pointed_at(server_uri: &str) -> (Arc<Config>, Arc<ProviderResolver>) {
+    fn build_config_and_resolver_pointed_at(
+        server_uri: &str,
+    ) -> (Arc<Config>, Arc<ProviderResolver>) {
         let mut config = Config::default();
         config.providers.insert(
             "openrouter".to_string(),
@@ -215,7 +231,7 @@ mod e2e {
     }
 
     async fn mount_tool_call_then_final_text(server: &MockServer, tool_call_sse: String) {
-        Mock::given(any())
+        Mock::given(method("POST"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -224,7 +240,7 @@ mod e2e {
             .up_to_n_times(1)
             .mount(server)
             .await;
-        Mock::given(any())
+        Mock::given(method("POST"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -245,7 +261,7 @@ mod e2e {
         first_turn_tool_call_sse: String,
         second_turn_tool_call_sse: String,
     ) {
-        Mock::given(any())
+        Mock::given(method("POST"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -254,7 +270,7 @@ mod e2e {
             .up_to_n_times(1)
             .mount(server)
             .await;
-        Mock::given(any())
+        Mock::given(method("POST"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -263,7 +279,7 @@ mod e2e {
             .up_to_n_times(1)
             .mount(server)
             .await;
-        Mock::given(any())
+        Mock::given(method("POST"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -272,7 +288,7 @@ mod e2e {
             .up_to_n_times(1)
             .mount(server)
             .await;
-        Mock::given(any())
+        Mock::given(method("POST"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -452,8 +468,11 @@ mod e2e {
 
         let server = MockServer::start().await;
         let args = serde_json::json!({"path": "guarded.txt", "content": "malicious overwrite"});
-        mount_tool_call_then_final_text(&server, sse_tool_call("write_file", "call_write_deny", args))
-            .await;
+        mount_tool_call_then_final_text(
+            &server,
+            sse_tool_call("write_file", "call_write_deny", args),
+        )
+        .await;
 
         let (config, resolver) = build_config_and_resolver_pointed_at(&server.uri());
         let (state_store, _state_tmp) = build_state_store();
@@ -609,8 +628,10 @@ mod e2e {
 
         let descriptions = captured_descriptions.lock().unwrap();
         assert!(
-            descriptions.iter().any(|d| d.to_lowercase().contains("outside")
-                || d.to_lowercase().contains("dangerous")),
+            descriptions
+                .iter()
+                .any(|d| d.to_lowercase().contains("outside")
+                    || d.to_lowercase().contains("dangerous")),
             "the permission request's description must state the outside-workspace reason, \
              got: {descriptions:?}"
         );

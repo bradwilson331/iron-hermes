@@ -77,6 +77,35 @@ pub struct ChatRequest {
     /// (empty `message`, non-empty `attachment_ids`) is a valid turn (D-07).
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// Phase 54.9 Plan 09 (D-09/D-13): true only from the OpenUI screen. Asks the
+    /// server to attach its compiled-in OpenUI system prompt as a one-shot overlay for
+    /// this turn. The prompt text NEVER comes from the client (T-54.9-24); legacy
+    /// clients that omit the field deserialize as `false`.
+    #[serde(default)]
+    pub openui: bool,
+    /// Phase 54.9 Plan 10 (D-09): true only when the OpenUI screen's Gateway toggle is on.
+    /// Together with `openui`, asks the server to generate through the Thesys hosted Gateway
+    /// (key resolved server-side) instead of the operator's own providers. Off by default;
+    /// legacy clients deserialize as `false`.
+    #[serde(default)]
+    pub openui_gateway: bool,
+    /// RR-04: true only for the operator's own typed Generate prompt. An OpenUI turn without it
+    /// (a generated button's action, whose text is model-controlled) is never routed to the
+    /// slash-command router. Fail-closed: a client that omits the field is treated as an action.
+    #[serde(default)]
+    pub openui_prompt: bool,
+}
+
+/// Phase 57 D-17: the worst security state a turn has reached, ordered
+/// `Neutral < Amber < Red`. Drives the colour of the per-turn status dot; severity only
+/// escalates within a turn (`Ord::max`).
+///
+/// JSON wire shape: the bare variant name, `"Neutral"`, `"Amber"` or `"Red"`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TurnWorst {
+    Neutral,
+    Amber,
+    Red,
 }
 
 /// Server → client streaming events.
@@ -85,6 +114,9 @@ pub struct ChatRequest {
 /// (`uuid::Uuid`) so the browser can demultiplex concurrent turn streams.
 /// Global/session-level variants (QueueUpdated, SubagentEvent, VoiceStatus,
 /// WakeWordResult, AudioOut, UserTranscript) are not turn-scoped and remain unchanged.
+/// A third group, the turn-boundary variants (TurnStarted, TurnEnded, TurnCancelled,
+/// YoloBypassNotice), carries `turn_id` without being streaming content; TurnStarted,
+/// TurnEnded and YoloBypassNotice also carry `session_id`.
 ///
 /// `turn_id` serializes as a hyphenated UUID string via the `uuid` crate's built-in
 /// serde support (`uuid = { features = ["serde"] }` in workspace Cargo.toml).
@@ -104,11 +136,17 @@ pub enum ChatStreamEvent {
     /// Agent started a tool call.
     ///
     /// Phase 39.1 Plan 02 (R39.1-08): carries `turn_id` for demultiplexing.
+    ///
+    /// Phase 57 (research A3, T-57-58): the tool ARGUMENTS are never sent to the browser,
+    /// only the tool name. A payload from an older server that still carries an `args`
+    /// field deserializes (the unknown field is ignored) and the value is dropped.
+    ///
+    /// JSON wire shape (external tagging):
+    ///   {"ToolCallStart":{"turn_id":"<uuid>","name":"terminal"}}
     ToolCallStart {
         #[serde(default)]
         turn_id: uuid::Uuid,
         name: String,
-        args: String,
     },
     /// Tool call completed.
     ///
@@ -168,6 +206,97 @@ pub enum ChatStreamEvent {
     /// JSON wire shape (external tagging):
     ///   {"TurnCancelled":{"turn_id":"<uuid>"}}
     TurnCancelled { turn_id: uuid::Uuid },
+    /// Phase 54.3 (D-06/D-07): one aggregated yolo-bypass summary for a turn.
+    ///
+    /// Emitted ONCE per bypassing turn at flush time (after `run_turn` finishes
+    /// its tool loop), never mid-stream. It exists because the notice must not
+    /// travel on the `StreamCallback` that carries assistant tokens: a bypass
+    /// there lands inside the reply. The client folds it into a session-scoped
+    /// header chip; it is never rendered into the transcript.
+    ///
+    /// JSON wire shape (external tagging):
+    ///   {"YoloBypassNotice":{"turn_id":"<uuid>","session_id":"<sid>","count":5,"tools":[["terminal",5]],"reasons":["command contains shell metacharacters — string-level matching cannot verify safety"]}}
+    ///
+    /// `turn_id` correlates the notice with the `yolo_bypass_rollup` audit row's
+    /// `args.turn_id`; `session_id` lets the client scope the indicator.
+    YoloBypassNotice {
+        turn_id: uuid::Uuid,
+        session_id: String,
+        count: u32,
+        tools: Vec<(String, u32)>,
+        reasons: Vec<String>,
+    },
+    /// Phase 57 D-14 (folds backlog 999.3): a gated command is parked awaiting the
+    /// operator. The browser answers through the authenticated
+    /// `resolve_web_approval(approval_id, approved)` server function; nothing typed
+    /// into the chat can approve it.
+    ///
+    /// `reason` is redacted and truncated server-side. The raw tool arguments are
+    /// never sent: only the tool name and the reason.
+    ///
+    /// JSON wire shape (external tagging):
+    ///   {"ApprovalRequested":{"turn_id":"<uuid>","session_id":"<sid>","approval_id":"<uuid>","tool":"terminal","reason":"command matches Tier-1 denylist pattern"}}
+    ApprovalRequested {
+        turn_id: uuid::Uuid,
+        session_id: String,
+        approval_id: String,
+        tool: String,
+        reason: String,
+    },
+    /// Phase 57 D-14 / UI-SPEC C4: the parked approval ended. `outcome` is one of
+    /// `approved`, `denied`, `timed_out`, `cancelled`. `tool` is the tool name only
+    /// (never arguments) so the activity rail can say `{tool} approved` without a
+    /// client-side lookup.
+    ///
+    /// JSON wire shape (external tagging):
+    ///   {"ApprovalResolved":{"turn_id":"<uuid>","session_id":"<sid>","approval_id":"<uuid>","tool":"terminal","outcome":"approved"}}
+    ApprovalResolved {
+        turn_id: uuid::Uuid,
+        session_id: String,
+        approval_id: String,
+        tool: String,
+        outcome: String,
+    },
+    /// Phase 57 UI-SPEC R9c / D-09 / D-21: a session's DEFCON level changed. Session
+    /// scoped (no `turn_id`): it is pushed on the socket right after a `/yolo <N>` that
+    /// actually changed the level, and never for a refused or same-level one.
+    /// `bypass` is the server's own `DefconLevel::yolo_bypass_active()` (levels 4-5), so
+    /// the client never re-derives the D-21 rule.
+    ///
+    /// JSON wire shape (external tagging):
+    ///   {"DefconLevel":{"session_id":"<sid>","level":4,"bypass":true}}
+    DefconLevel {
+        session_id: String,
+        level: u8,
+        bypass: bool,
+    },
+    /// Phase 57 D-17 / UI-SPEC C1: a turn's worst security state escalated. The client
+    /// max-merges it into that turn's status dot (`Neutral < Amber < Red`); a turn never
+    /// downgrades. Carries no tool name, argument or rule text.
+    ///
+    /// JSON wire shape (external tagging):
+    ///   {"TurnSeverity":{"turn_id":"<uuid>","session_id":"<sid>","worst":"Red"}}
+    TurnSeverity {
+        turn_id: uuid::Uuid,
+        session_id: String,
+        worst: TurnWorst,
+    },
+    /// Phase 57 D-16 / UI-SPEC C2: one critical event for the chat transcript.
+    ///
+    /// `kind` is one of `blocked`, `job_blocked`, `sidecar_unavailable`,
+    /// `credential_detected`, `defcon_changed`; the client renders a row for exactly
+    /// those and ignores any other string. `summary` is built server-side from the tool
+    /// name and rule ids only, never command or prompt text. `turn_id` is the nil UUID
+    /// for out-of-turn rows (a blocked cron or kanban job, a `/yolo` level change).
+    ///
+    /// JSON wire shape (external tagging):
+    ///   {"CriticalEvent":{"turn_id":"<uuid>","session_id":"<sid>","kind":"blocked","summary":"terminal was blocked by rule guardrail.rm_rf. It did not run."}}
+    CriticalEvent {
+        turn_id: uuid::Uuid,
+        session_id: String,
+        kind: String,
+        summary: String,
+    },
     /// Phase 26.7.1 Plan 02 (D-07): payload-free subagent-registry-changed signal.
     ///
     /// JSON shape (external tagging — no #[serde(...)] attribute on the enum):
@@ -301,6 +430,15 @@ pub enum ChatStreamEvent {
     /// JSON wire shape (external tagging):
     ///   {"RunTurnMeta":{"text":"▶ Ran skill /gsd-config"}}
     RunTurnMeta { text: String },
+}
+
+/// Phase 57 UI-SPEC R9c: a session's live DEFCON level as the web client reads it
+/// (the `session_defcon_level` server function). `bypass` is the server's
+/// `DefconLevel::yolo_bypass_active()`, never derived client-side.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SessionDefconInfo {
+    pub level: u8,
+    pub bypass: bool,
 }
 
 // =============================================================================
@@ -866,6 +1004,40 @@ pub struct ProfileConfigWritePayload {
     pub provider: Option<String>,
     pub model_default: Option<String>,
     pub skills_disabled: Option<Vec<String>>,
+    /// Phase 54.4 Plan 03 (D-16/D-17/D-18): built-in display-group name ->
+    /// enabled. Each entry writes `tools.toolsets.<name>.enabled` on the
+    /// target profile. `None` leaves every `tools.toolsets` entry alone. MCP
+    /// groups (`mcp__*`) are rejected server-side — they are not toggled
+    /// through `tools.toolsets`.
+    #[serde(default)]
+    pub tools_toolsets: Option<Vec<(String, bool)>>,
+    /// Phase 54.4 WR-06: built-in tool names to ADD to the profile's
+    /// `tools.disabled` — the operator's DELTA, not a full set. The server
+    /// applies it against the `tools.disabled` it re-reads at save time, so a
+    /// tool disabled elsewhere since the panel opened is never re-enabled by
+    /// this save. MCP and unknown names are rejected. `None` disables nothing.
+    #[serde(default)]
+    pub tools_disable: Option<Vec<String>>,
+    /// Phase 54.4 WR-06: built-in tool names to REMOVE from the profile's
+    /// `tools.disabled` (re-enable) — the other half of the delta. A name in
+    /// both lists is rejected. `None` re-enables nothing.
+    #[serde(default)]
+    pub tools_enable: Option<Vec<String>>,
+}
+
+/// Phase 54.4 Plan 03 (D-19): the root profile's agent defaults — provider,
+/// model, disabled skills, disabled built-in toolsets and disabled tools —
+/// for the settings slide-over's "Load default" action. Contains no
+/// credential by construction: there is no field that could carry
+/// `tools.credentials`, a provider key or a `.env` value.
+#[allow(dead_code)] // Plans 09/10 (settings slide-over) consume this via fetch_root_agent_defaults.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct RootAgentDefaults {
+    pub provider: String,
+    pub model: String,
+    pub skills_disabled: Vec<String>,
+    pub disabled_toolsets: Vec<String>,
+    pub tools_disabled: Vec<String>,
 }
 
 /// Phase 50.1 Plan 05 (D-15): one row of a profile-scoped skills catalog —
@@ -1792,6 +1964,164 @@ pub struct BotChatThread {
 mod tests {
     use super::*;
 
+    /// Phase 54.9 Plan 09 (D-09): `openui` is opt-in; a request without it is a normal chat turn.
+    #[test]
+    fn chat_request_openui_defaults_false() {
+        let plain: ChatRequest = serde_json::from_str(r#"{"session_id":"s","message":"hi"}"#)
+            .expect("legacy request deserializes");
+        assert!(!plain.openui);
+        let flagged: ChatRequest =
+            serde_json::from_str(r#"{"session_id":"s","message":"hi","openui":true}"#)
+                .expect("openui request deserializes");
+        assert!(flagged.openui);
+    }
+
+    /// Phase 54.9 Plan 10 (D-09): the hosted Gateway is opt-in; absent means false.
+    #[test]
+    fn chat_request_gateway_defaults_false() {
+        let plain: ChatRequest = serde_json::from_str(r#"{"session_id":"s","message":"hi"}"#)
+            .expect("legacy request deserializes");
+        assert!(!plain.openui_gateway);
+        let on: ChatRequest = serde_json::from_str(
+            r#"{"session_id":"s","message":"hi","openui":true,"openui_gateway":true}"#,
+        )
+        .expect("gateway request deserializes");
+        assert!(on.openui && on.openui_gateway);
+    }
+
+    /// Phase 57 D-14: the two approval events serialize to the documented
+    /// external-tag JSON and deserialize back. `ApprovalResolved` carries the tool
+    /// name (UI-SPEC C4) and neither event has an `args` field.
+    #[test]
+    fn approval_events_round_trip_wire_format() {
+        let turn_id = uuid::Uuid::nil();
+        let requested = ChatStreamEvent::ApprovalRequested {
+            turn_id,
+            session_id: "s".into(),
+            approval_id: "a-1".into(),
+            tool: "terminal".into(),
+            reason: "needs approval".into(),
+        };
+        let json = serde_json::to_value(&requested).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"ApprovalRequested":{
+                "turn_id":"00000000-0000-0000-0000-000000000000",
+                "session_id":"s","approval_id":"a-1","tool":"terminal",
+                "reason":"needs approval"}})
+        );
+        let back: ChatStreamEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            ChatStreamEvent::ApprovalRequested { ref approval_id, .. } if approval_id == "a-1"
+        ));
+
+        let resolved = ChatStreamEvent::ApprovalResolved {
+            turn_id,
+            session_id: "s".into(),
+            approval_id: "a-1".into(),
+            tool: "terminal".into(),
+            outcome: "approved".into(),
+        };
+        let json = serde_json::to_value(&resolved).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"ApprovalResolved":{
+                "turn_id":"00000000-0000-0000-0000-000000000000",
+                "session_id":"s","approval_id":"a-1","tool":"terminal",
+                "outcome":"approved"}})
+        );
+        let text = serde_json::to_string(&resolved).unwrap();
+        assert!(!text.contains("args"), "no raw args on the wire: {text}");
+        let back: ChatStreamEvent = serde_json::from_str(&text).unwrap();
+        assert!(matches!(
+            back,
+            ChatStreamEvent::ApprovalResolved { ref tool, ref outcome, .. }
+                if tool == "terminal" && outcome == "approved"
+        ));
+    }
+
+    /// Phase 57 R9c: the DEFCON push and the server-fn DTO serialize to the documented
+    /// shapes and deserialize back.
+    #[test]
+    fn defcon_level_wire_format() {
+        let ev = ChatStreamEvent::DefconLevel {
+            session_id: "s".into(),
+            level: 4,
+            bypass: true,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"DefconLevel":{"session_id":"s","level":4,"bypass":true}})
+        );
+        let back: ChatStreamEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            ChatStreamEvent::DefconLevel { ref session_id, level: 4, bypass: true }
+                if session_id == "s"
+        ));
+
+        let info = SessionDefconInfo {
+            level: 3,
+            bypass: false,
+        };
+        let text = serde_json::to_string(&info).unwrap();
+        assert_eq!(text, r#"{"level":3,"bypass":false}"#);
+        let back: SessionDefconInfo = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, info);
+    }
+
+    /// Phase 57 D-16/D-17: `TurnSeverity` and `CriticalEvent` serialize to the documented
+    /// external-tag shape and deserialize back; `TurnWorst` orders Neutral < Amber < Red.
+    #[test]
+    fn turn_severity_wire_format() {
+        let turn_id = uuid::Uuid::nil();
+        let sev = ChatStreamEvent::TurnSeverity {
+            turn_id,
+            session_id: "s".into(),
+            worst: TurnWorst::Red,
+        };
+        let json = serde_json::to_value(&sev).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"TurnSeverity":{
+                "turn_id":"00000000-0000-0000-0000-000000000000",
+                "session_id":"s","worst":"Red"}})
+        );
+        let back: ChatStreamEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            ChatStreamEvent::TurnSeverity {
+                worst: TurnWorst::Red,
+                ..
+            }
+        ));
+
+        let crit = ChatStreamEvent::CriticalEvent {
+            turn_id,
+            session_id: "s".into(),
+            kind: "blocked".into(),
+            summary: "terminal was blocked by rule guardrail.rm_rf. It did not run.".into(),
+        };
+        let json = serde_json::to_value(&crit).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"CriticalEvent":{
+                "turn_id":"00000000-0000-0000-0000-000000000000",
+                "session_id":"s","kind":"blocked",
+                "summary":"terminal was blocked by rule guardrail.rm_rf. It did not run."}})
+        );
+        let back: ChatStreamEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            ChatStreamEvent::CriticalEvent { ref kind, .. } if kind == "blocked"
+        ));
+
+        assert!(TurnWorst::Neutral < TurnWorst::Amber && TurnWorst::Amber < TurnWorst::Red);
+        assert_eq!(TurnWorst::Amber.max(TurnWorst::Red), TurnWorst::Red);
+    }
+
     /// Phase 46.7 Plan 04 (D-09): a legacy `ChatRequest` JSON payload that
     /// omits `attachment_ids` entirely (pre-Plan-04 client/shell) must still
     /// deserialize — `#[serde(default)]` backward-compatibility lock.
@@ -2087,6 +2417,56 @@ mod tests {
             json_paused, r#"{"QueueUpdated":{"depth":7,"paused":true}}"#,
             "D-11: paused=true variant must serialize correctly"
         );
+    }
+
+    /// Phase 54.3 (D-07): YoloBypassNotice wire-format lock. External tagging
+    /// with no internal `type` tag, carrying both `turn_id` and `session_id`.
+    #[test]
+    fn yolo_bypass_notice_wire_format_is_externally_tagged() {
+        let turn_id = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+            .expect("fixed uuid parses");
+        let ev = ChatStreamEvent::YoloBypassNotice {
+            turn_id,
+            session_id: "s1".to_string(),
+            count: 2,
+            tools: vec![("terminal".to_string(), 2)],
+            reasons: vec!["command contains shell metacharacters".to_string()],
+        };
+        let json = serde_json::to_string(&ev).expect("serialize YoloBypassNotice");
+        assert_eq!(
+            json,
+            r#"{"YoloBypassNotice":{"turn_id":"11111111-2222-3333-4444-555555555555","session_id":"s1","count":2,"tools":[["terminal",2]],"reasons":["command contains shell metacharacters"]}}"#,
+            "D-07: YoloBypassNotice must serialize to the external-tagged struct shape"
+        );
+        assert!(
+            json.starts_with(r#"{"YoloBypassNotice":{"turn_id":""#),
+            "D-07: external tagging, turn_id first (got {json})"
+        );
+        assert!(
+            !json.contains(r#""type""#),
+            "an internal serde tag must not creep in (got {json})"
+        );
+
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            ChatStreamEvent::YoloBypassNotice {
+                turn_id: t,
+                session_id,
+                count,
+                tools,
+                reasons,
+            } => {
+                assert_eq!(t, turn_id);
+                assert_eq!(session_id, "s1");
+                assert_eq!(count, 2);
+                assert_eq!(tools, vec![("terminal".to_string(), 2)]);
+                assert_eq!(
+                    reasons,
+                    vec!["command contains shell metacharacters".to_string()]
+                );
+            }
+            other => panic!("round-trip must yield YoloBypassNotice, got {other:?}"),
+        }
     }
 
     // =========================================================================

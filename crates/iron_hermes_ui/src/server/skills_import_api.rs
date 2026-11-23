@@ -1902,12 +1902,15 @@ async fn save_job_as_blueprint_in_store(
 ///
 /// `profile` selects which `JobStore` `job_id` is read from (widened
 /// `open_job_store`, Task 2). The DESTINATION is always the process's own
-/// skills root regardless of that profile — the skills tree is a
-/// single-process concept with no profile dimension
+/// skills root regardless of that profile
 /// (`ironhermes_hub::paths::skills_root()` derives solely from this
-/// process's own `IRONHERMES_HOME`, RESEARCH.md Pitfall 5). UI copy
-/// describing this save action must not imply per-profile skill isolation
-/// that does not exist.
+/// process's own `IRONHERMES_HOME`, RESEARCH.md Pitfall 5) — installation
+/// is root-global and shared by every profile (49.4 D-07 clause 3, upheld
+/// by Phase 54.1 D-08). As of Phase 54.1 D-06, ENABLEMENT of an installed
+/// skill is per profile (`toggle_skill` / `list_skills`, `api.rs`), so UI
+/// copy for this action must read "installed for everyone, enabled per
+/// profile" — and must still not imply per-profile install ISOLATION,
+/// which remains deferred.
 ///
 /// Follows `create_skill`'s exact four-step gated-write shape:
 /// `Config::load()` -> `check_skills_write_gate` (FIRST statement, before any

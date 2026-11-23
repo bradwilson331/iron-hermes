@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback, ToolResultCallback};
 use ironhermes_agent::{
-    AgentRuntime, AgentRuntimeInput, MemoryManager, PressureTracker, PromptBuilder, TurnRequest,
+    AgentRuntime, AgentRuntimeInput, MemoryManager, PromptBuilder, TurnRequest,
 };
 use ironhermes_artifacts::ArtifactStore;
 use ironhermes_core::commands::registry::build_registry as build_command_registry;
@@ -21,6 +21,8 @@ use ironhermes_hooks::HooksConfig;
 use ironhermes_state::StateStore;
 use ironhermes_state::StoredMessage;
 use tokio::sync::RwLock;
+
+use crate::server::web_approval_gate::NoticeSink;
 
 /// Phase 39.3 Plan 02 (D-03): data held while a realtime tool call awaits
 /// operator approval.
@@ -257,6 +259,11 @@ pub struct AppState {
     /// (clarify_dispatcher = None); the registry is present so a future WS
     /// round-trip resolver can slot in without AppState changes.
     pub web_clarify_registry: Arc<ironhermes_tools::clarify_registry::PendingClarifyRegistry>,
+
+    /// Phase 57 D-14 (999.3): the parked web approvals, shared by every turn's
+    /// `WebApprovalGate::interactive` and by the authenticated approval server function
+    /// (`approval_api.rs`). Constructed once in `AppState::init`.
+    pub web_approvals: Arc<crate::server::web_approval_gate::WebApprovalRegistry>,
 }
 
 static GLOBAL_APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -273,6 +280,15 @@ pub fn global_app_state() -> &'static AppState {
         .expect("global AppState not initialized")
 }
 
+/// Prompt builder for one web turn. The gate session key is `session_id`, the same string
+/// the terminal/execute_code intercepts pass to `GatePolicy::for_session`, so the ephemeral
+/// security-level line reflects the level the gate will enforce (read live per build).
+fn web_turn_prompt_builder(model: &str, provider: &str, session_id: &str) -> PromptBuilder {
+    PromptBuilder::new(model, "web")
+        .with_provider(provider)
+        .with_defcon_session(session_id)
+}
+
 /// Phase 50.2 Plan 14 (G-50.2-2b): the non-panicking twin of
 /// [`global_app_state`], for code paths that are ALSO reachable from
 /// in-file `#[cfg(test)]` modules — those modules never call
@@ -284,6 +300,20 @@ pub fn global_app_state() -> &'static AppState {
 /// module. Does not change `global_app_state` itself.
 pub fn try_global_app_state() -> Option<&'static AppState> {
     GLOBAL_APP_STATE.get()
+}
+
+/// Phase 57 D-22: whether the operator auth layer (`web_ui.auth`) is enabled for this
+/// server process. Set once at startup from `AuthState::enabled()`. Defaults to `false`,
+/// which is the refusing value: with it unset or off the web surface can never change a
+/// session's DEFCON level through `/yolo <N>`.
+static WEB_AUTH_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_web_auth_enabled(enabled: bool) {
+    WEB_AUTH_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn web_auth_enabled() -> bool {
+    WEB_AUTH_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 impl AppState {
@@ -499,6 +529,7 @@ impl AppState {
             web_clarify_registry: Arc::new(
                 ironhermes_tools::clarify_registry::PendingClarifyRegistry::new(),
             ),
+            web_approvals: Arc::new(crate::server::web_approval_gate::WebApprovalRegistry::new()),
         })
     }
 
@@ -615,6 +646,11 @@ impl AppState {
         // attachments (queue-drain replay, STT transcript turns). Consumed by
         // build_messages_for_turn (Task 3).
         attachment_ids: Vec<String>,
+        // Phase 54.3 (D-07): typed yolo-bypass notice channel. `ws.rs` builds it from the
+        // turn's own event sender and it emits one `ChatStreamEvent::YoloBypassNotice`.
+        // It is NOT the assistant-token `stream_callback` above. `None` for callers
+        // with no event channel (the unscoped bypass fallback then stays silent here).
+        notice_callback: Option<NoticeSink>,
     ) -> Result<ironhermes_agent::AgentResult> {
         // Phase 39.1 Plan 06 (R39.1-06): RunningAgentGuard removed.
         // The RAII guard (phase 36.1 D-06) is deleted along with the running_agent
@@ -629,11 +665,13 @@ impl AppState {
 
         // Phase 28.1 Plan 03 (Task 2): route through AgentRuntime::run_turn.
         // - state_store threaded via TurnRequest so session_search intercept fires (T-28.1-07).
-        // - pressure_tracker: fresh per-turn, matching prior build_agent_loop behavior.
+        // - pressure_tracker: None -> the runtime's session-keyed tracker, so the D-05 notice and
+        //   pressure hysteresis survive across turns.
         // - session_id: use the real per-session id (behavior improvement over hardcoded "web-ui").
         //
         // WR-01 (Phase 34b Plan 03): retain a shared reference to stream_callback so
-        // we can emit context_warnings out-of-band AFTER run_turn returns. StreamCallback
+        // we can emit context_warnings after `run_turn` returns, through the
+        // assistant-token stream callback. StreamCallback
         // is Box<dyn Fn>, not Clone, so we wrap it in Arc before passing a forwarding Box
         // into TurnRequest — the Arc clone is used post-turn for the warnings block.
         let stream_cb_arc: std::sync::Arc<ironhermes_agent::agent_loop::StreamCallback> =
@@ -667,7 +705,15 @@ impl AppState {
         let gated_audit_log = Arc::new(ironhermes_core::AuditLog::load(self.config().audit.clone()));
         let is_remote_backend = self.config().terminal.backend == "ssh";
         let forward_env_nonempty = !self.config().terminal.forward_env.is_empty();
-        let yolo = self.config().autonomous.yolo;
+        // Phase 57 D-09/D-21: there is no boot-time copy of the yolo flag any more. Both
+        // gated intercepts read the session's LIVE DEFCON level at each call.
+        // Phase 57 D-14: the parked-approval registry and its timeout. Every gate this
+        // turn builds (the AgentLoop's own, and the two intercepts') shares them, so an
+        // approval parked inside an intercept is the one the browser resolves.
+        let web_approvals = Some((
+            self.web_approvals.clone(),
+            std::time::Duration::from_secs(self.config().approvals.timeout_secs),
+        ));
         // This surface has no separate "chat_id" concept distinct from the session —
         // the session id doubles as the audit/prompt chat identifier here.
         let gated_chat_id = session_id.to_string();
@@ -678,9 +724,10 @@ impl AppState {
             gated_audit_log.clone(),
             session_id.to_string(),
             gated_chat_id.clone(),
-            yolo,
             is_remote_backend,
             forward_env_nonempty,
+            notice_callback.clone(),
+            web_approvals.clone(),
         );
         // Per D-11: execute_code passes an EMPTY classify_arg and always forwards
         // is_remote_backend=false / forward_env_nonempty=false — the Python script
@@ -692,14 +739,21 @@ impl AppState {
             gated_audit_log,
             session_id.to_string(),
             gated_chat_id,
-            yolo,
+            notice_callback.clone(),
+            web_approvals.clone(),
         );
         // Supplying WebApprovalGate here (unlike CLI/TUI, which leave this None because
         // CliApprovalGate is built inside their intercept closures instead) makes
         // AgentLoop's own NeedsApproval arm for OTHER tools fail-closed-by-gate rather
-        // than fail-closed-by-absence on this surface.
+        // than fail-closed-by-absence on this surface. Phase 54.3 D-01/D-07: the yolo
+        // notice travels on its own typed `NoticeSink` -> `ChatStreamEvent::YoloBypassNotice`
+        // channel and explicitly NOT on `stream_cb_arc`, which is the assistant-token
+        // channel (a notice written there lands inside the reply).
         let web_approval_gate: Arc<dyn ironhermes_core::ApprovalGate> =
-            Arc::new(crate::server::web_approval_gate::WebApprovalGate);
+            Arc::new(crate::server::web_approval_gate::WebApprovalGate::for_turn(
+                notice_callback,
+                web_approvals,
+            ));
 
         let request = TurnRequest {
             messages,
@@ -708,7 +762,7 @@ impl AppState {
             tool_progress: tool_progress_callback,
             tool_result: tool_result_callback,
             state_store: Some(self.state_store.clone()),
-            pressure_tracker: Some(Arc::new(PressureTracker::new())),
+            pressure_tracker: None,
             trajectory_writer: None,
             compression_count: 0,
             cancel_token: None,
@@ -720,9 +774,13 @@ impl AppState {
             messaging_wiring,
             // Phase 36.3.12 D-08/D-10/D-11/D-12 (GAP 2): real gated wiring, built above —
             // see the comment immediately preceding `terminal_guard`'s construction.
-            approval_gate: Some(web_approval_gate),
+            approval_gate: Some(web_approval_gate.clone()),
             terminal_intercept: Some(terminal_intercept),
             execute_code_intercept: Some(execute_code_intercept),
+            // Phase 54.3 D-03: the flush target is the same WebApprovalGate the turn
+            // places on `approval_gate`, named explicitly so the wiring is documented
+            // rather than relying on `run_turn`'s `.or_else(|| req.approval_gate)`.
+            yolo_notifier: Some(web_approval_gate),
         };
         let result = self.runtime.run_turn(request).await?;
 
@@ -750,8 +808,9 @@ impl AppState {
             (stream_cb_arc)(artifact_note.as_str());
         }
 
-        // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
-        // Streamed via the same stream_callback so the web client receives it as a distinct
+        // WR-01 (Phase 34b Plan 03): render context_warnings after `run_turn` returns,
+        // through the assistant-token stream callback. Streamed via the same
+        // stream_callback so the web client receives it as a distinct
         // annotation after the model response. tracing::warn! for server-side visibility.
         if !result.context_warnings.is_empty() {
             let warning_lines: Vec<String> = result
@@ -764,7 +823,7 @@ impl AppState {
             tracing::warn!(
                 session_id = session_id,
                 warnings = ?result.context_warnings,
-                "context_warnings surfaced out-of-band (WR-01)"
+                "context_warnings surfaced after run_turn via the stream callback (WR-01)"
             );
             (stream_cb_arc)(warnings_block.as_str());
         }
@@ -836,9 +895,12 @@ impl AppState {
         // field.  Personality overlays are not applied on the web surface in the current
         // implementation — cmd_personality is not dispatched from the web WS handler.
         // No snapshot needed; mid-turn /personality is therefore safe by absence.
-        let mut prompt_builder = PromptBuilder::new(&self.config().model.default, "web")
-            .with_provider(&self.config().model.provider)
-            .load_context(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let mut prompt_builder = web_turn_prompt_builder(
+            &self.config().model.default,
+            &self.config().model.provider,
+            session_id,
+        )
+        .load_context(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         // Phase 28.1 Plan 03: source skill_registry and merged_tools from the runtime.
         prompt_builder.set_skill_registry(self.runtime.skill_registry().clone());
         // Phase 41.1 Plan 03 (SKILL-13 web / D-06): apply any ONE-SHOT skill
@@ -1280,9 +1342,20 @@ fn build_web_terminal_intercept(
     audit_log: Arc<ironhermes_core::AuditLog>,
     session_id: String,
     chat_id: String,
-    yolo: bool,
     is_remote_backend: bool,
     forward_env_nonempty: bool,
+    // Phase 54.3 D-01/D-07: the typed `NoticeSink` (a `YoloBypassSummary` callback that
+    // `ws.rs` turns into `ChatStreamEvent::YoloBypassNotice`). It is explicitly NOT the
+    // `stream_cb_arc` that `run_web_turn` uses for context_warnings: that is the
+    // assistant-token channel. `None` in every existing test call site in this file;
+    // `Some` at the production call site in `run_web_turn`.
+    notice_sink: Option<crate::server::web_approval_gate::NoticeSink>,
+    // Phase 57 D-14: the shared parked-approval registry and its timeout. `None` in the
+    // tests that want the fail-closed gate.
+    approvals: Option<(
+        Arc<crate::server::web_approval_gate::WebApprovalRegistry>,
+        std::time::Duration,
+    )>,
 ) -> ironhermes_tools::registry::InterceptHandler {
     Arc::new(move |args: serde_json::Value| {
         let tool = tool.clone();
@@ -1290,13 +1363,16 @@ fn build_web_terminal_intercept(
         let audit_log = audit_log.clone();
         let session_id = session_id.clone();
         let chat_id = chat_id.clone();
+        let notice_sink = notice_sink.clone();
+        let approvals = approvals.clone();
         Box::pin(async move {
             let command = args
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let gate = crate::server::web_approval_gate::WebApprovalGate;
+            let gate =
+                crate::server::web_approval_gate::WebApprovalGate::for_turn(notice_sink, approvals);
 
             let outcome = ironhermes_hooks::execute_gated_command(
                 "terminal",
@@ -1307,7 +1383,9 @@ fn build_web_terminal_intercept(
                 &session_id,
                 "web",
                 &chat_id,
-                yolo,
+                // D-09/D-21: the session's LIVE level and the booted sidecar, resolved
+                // at this call, so a `/yolo <N>` takes effect on the very next command.
+                ironhermes_hooks::GatePolicy::for_session(&session_id),
                 is_remote_backend,
                 forward_env_nonempty,
                 || async move {
@@ -1328,20 +1406,33 @@ fn build_web_terminal_intercept(
 
 /// Build a gated `execute_code` intercept handler for the web surface.
 ///
-/// Mirrors [`build_web_terminal_intercept`] but per D-11 passes an EMPTY opaque
-/// `classify_arg` (the Python source never reaches `DangerousCommandGuardrail`'s
-/// shell-syntax patterns) and always forwards `is_remote_backend=false` /
+/// Mirrors [`build_web_terminal_intercept`] but per D-01 (Phase 54 Finding 1,
+/// **overturning D-11**) passes the caller's REAL Python source as `classify_arg` —
+/// `DangerousCommandGuardrail::check`'s `tool_name == "execute_code"` branch
+/// classifies it against `PYTHON_DANGEROUS_PATTERNS` + the evasion-marker arm,
+/// instead of the previous opaque `""` that made the branch permanently dead on
+/// this surface. Always forwards `is_remote_backend=false` /
 /// `forward_env_nonempty=false` — the Python script still runs on the local
 /// `Sandbox`, never a remote backend, identical treatment to the CLI's
 /// `build_gated_execute_code_intercept`. Every resolution — including
-/// `background=true` calls — is still audited (D-08/D-12).
+/// `background=true` calls — is still audited (D-08/D-12). Missing or
+/// non-string `code` in the incoming args coerces to an empty `classify_arg`
+/// rather than panicking.
+#[allow(clippy::too_many_arguments)]
 fn build_web_execute_code_intercept(
     tool: Option<Arc<dyn ironhermes_tools::Tool>>,
     guard: Arc<ironhermes_hooks::DangerousCommandGuardrail>,
     audit_log: Arc<ironhermes_core::AuditLog>,
     session_id: String,
     chat_id: String,
-    yolo: bool,
+    // D-04 (Phase 54 Finding 1): see build_web_terminal_intercept's identical
+    // parameter doc.
+    notice_sink: Option<crate::server::web_approval_gate::NoticeSink>,
+    // Phase 57 D-14: see build_web_terminal_intercept's identical parameter doc.
+    approvals: Option<(
+        Arc<crate::server::web_approval_gate::WebApprovalRegistry>,
+        std::time::Duration,
+    )>,
 ) -> ironhermes_tools::registry::InterceptHandler {
     Arc::new(move |args: serde_json::Value| {
         let tool = tool.clone();
@@ -1349,21 +1440,33 @@ fn build_web_execute_code_intercept(
         let audit_log = audit_log.clone();
         let session_id = session_id.clone();
         let chat_id = chat_id.clone();
+        let notice_sink = notice_sink.clone();
+        let approvals = approvals.clone();
         Box::pin(async move {
-            let gate = crate::server::web_approval_gate::WebApprovalGate;
+            let gate =
+                crate::server::web_approval_gate::WebApprovalGate::for_turn(notice_sink, approvals);
+
+            // D-01 (overturns D-11): extract the real Python source so
+            // DangerousCommandGuardrail's execute_code branch can classify it.
+            let classify_arg = args
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
             let outcome = ironhermes_hooks::execute_gated_command(
                 "execute_code",
-                "", // D-11: opaque — Python source is not shell syntax
+                &classify_arg,
                 &guard,
                 Some(&gate),
                 &audit_log,
                 &session_id,
                 "web",
                 &chat_id,
-                yolo,
-                false, // D-11: execute_code never routes to a remote backend
-                false, // D-11: execute_code never forwards credentials cross-boundary
+                // D-09/D-21: the session's LIVE level, resolved at this call.
+                ironhermes_hooks::GatePolicy::for_session(&session_id),
+                false, // D-01: execute_code never routes to a remote backend
+                false, // D-01: execute_code never forwards credentials cross-boundary
                 || async move {
                     match tool {
                         Some(t) => t.execute(args).await,
@@ -2243,9 +2346,10 @@ mod plan_36_3_12_12_web_gating_tests {
             audit_log,
             "sess-web-1".to_string(),
             "sess-web-1".to_string(),
-            false, // yolo=false
             false, // is_remote_backend
             false, // forward_env_nonempty
+            None,  // D-04: no notice sink needed in this test
+            None,  // D-14: fail-closed gate (no approval registry)
         );
 
         let result = intercept(serde_json::json!({ "command": "rm -rf /" })).await;
@@ -2282,9 +2386,10 @@ mod plan_36_3_12_12_web_gating_tests {
             audit_log,
             "sess-web-2".to_string(),
             "sess-web-2".to_string(),
-            false,
-            false,
-            false,
+            false, // is_remote_backend
+            false, // forward_env_nonempty
+            None,
+            None,
         );
 
         let result = intercept(serde_json::json!({ "command": "echo web-probe" })).await;
@@ -2333,7 +2438,8 @@ mod plan_36_3_12_12_web_gating_tests {
             audit_log,
             "sess-web-3".to_string(),
             "sess-web-3".to_string(),
-            false, // yolo=false
+            None, // D-04: no notice sink needed in this test
+            None, // D-14: fail-closed gate (no approval registry)
         );
 
         let result = intercept(serde_json::json!({ "code": "print('hi')" })).await;
@@ -2374,9 +2480,10 @@ mod plan_36_3_12_12_web_gating_tests {
             audit_log,
             "sess-web-warn".to_string(),
             "sess-web-warn".to_string(),
-            false, // yolo=false
             false, // is_remote_backend
             false, // forward_env_nonempty
+            None,  // D-04: no notice sink needed in this test
+            None,  // D-14: fail-closed gate (no approval registry)
         );
 
         let result = intercept(serde_json::json!({ "command": "curl https://x" })).await;
@@ -2420,9 +2527,10 @@ mod plan_36_3_12_12_web_gating_tests {
             audit_log,
             "sess-web-remote".to_string(),
             "sess-web-remote".to_string(),
-            false, // yolo=false
             true,  // is_remote_backend — D-08 forces an Allow command through the gate
             false, // forward_env_nonempty
+            None,  // D-04: no notice sink needed in this test
+            None,  // D-14: fail-closed gate (no approval registry)
         );
 
         let result = intercept(serde_json::json!({ "command": "ls -la" })).await;
@@ -2445,5 +2553,135 @@ mod plan_36_3_12_12_web_gating_tests {
             "the forced-approval denial must be audited exactly once"
         );
         assert_eq!(entries[0].decision, "denied");
+    }
+
+    /// Phase 57 D-09/D-21 (SC-1, web): the intercept reads the session's LIVE level at
+    /// each call. At level 5 a Tier-1 `terminal` call is an audited bypass; after the
+    /// session is set to 3 the very same intercept parks it for approval. A boot-time
+    /// snapshot of the yolo flag could not do both.
+    // The std lock is held across awaits ON PURPOSE: it serializes this test's use of the
+    // process-global DEFCON registry and installed sidecar service against other tests.
+    // The test runtime is single-threaded and no other task contends for the lock.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn web_gated_sites_use_session_level() {
+        use crate::server::web_approval_gate::{WebApprovalRegistry, WebGateEvent};
+        use ironhermes_core::config::DefconLevel;
+        use ironhermes_core::defcon::session_defcon;
+
+        let _env = crate::server::test_support::env_lock();
+        let session = "sess-web-live-level";
+        let (dir, audit_log) = test_audit_log();
+        let guard = Arc::new(ironhermes_hooks::DangerousCommandGuardrail::new());
+        let invoked = Arc::new(AtomicBool::new(false));
+        let tool: Option<Arc<dyn ironhermes_tools::Tool>> = Some(Arc::new(RecordingTool {
+            invoked: invoked.clone(),
+            output: "ran".to_string(),
+        }));
+        let events: Arc<std::sync::Mutex<Vec<WebGateEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        let sink: crate::server::web_approval_gate::NoticeSink =
+            Arc::new(move |e: &WebGateEvent| sink_events.lock().unwrap().push(e.clone()));
+        let registry = Arc::new(WebApprovalRegistry::new());
+
+        let intercept = build_web_terminal_intercept(
+            tool,
+            guard,
+            audit_log,
+            session.to_string(),
+            session.to_string(),
+            false,
+            false,
+            Some(sink),
+            Some((registry.clone(), std::time::Duration::from_secs(30))),
+        );
+
+        // Level 5: a Warn-class command is an audited bypass and the tool runs.
+        session_defcon().set_session_level(session, DefconLevel::FIVE);
+        let out = intercept(serde_json::json!({ "command": "curl https://x" }))
+            .await
+            .expect("intercept result");
+        assert!(out.starts_with("Ran("), "level 5 bypasses the Warn: {out}");
+        assert!(invoked.load(Ordering::SeqCst), "the tool ran at level 5");
+        let entries = read_audit_entries(&dir);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.decision == "allowed" && e.resolution == "bypass"),
+            "the bypass is audited: {entries:?}"
+        );
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, WebGateEvent::ApprovalRequested { .. })),
+            "no approval is asked for at level 5"
+        );
+
+        // Level 3, same intercept: the call now parks for approval.
+        invoked.store(false, Ordering::SeqCst);
+        session_defcon().set_session_level(session, DefconLevel::THREE);
+        let call = tokio::spawn({
+            let intercept = intercept.clone();
+            async move {
+                intercept(serde_json::json!({ "command": "curl https://x" }))
+                    .await
+                    .expect("intercept result")
+            }
+        });
+        let mut asked = false;
+        for _ in 0..200 {
+            if events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, WebGateEvent::ApprovalRequested { .. }))
+            {
+                asked = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(asked, "level 3 must ask the operator, not bypass");
+        assert!(
+            !invoked.load(Ordering::SeqCst),
+            "the tool must not run while parked"
+        );
+        registry.cancel(session);
+        let out = call.await.expect("join");
+        assert!(
+            out.starts_with("Denied("),
+            "cancelled approval denies: {out}"
+        );
+
+        session_defcon().forget(session);
+    }
+
+    #[test]
+    fn web_turn_system_message_carries_live_defcon_line() {
+        use ironhermes_core::config::DefconLevel;
+        use ironhermes_core::defcon::session_defcon;
+
+        let _env = crate::server::test_support::env_lock();
+        let session = "sess-web-defcon-line";
+        let build = || {
+            let (durable, ephemeral) =
+                web_turn_prompt_builder("m", "p", session).build_split();
+            (durable, ephemeral)
+        };
+
+        session_defcon().set_session_level(session, DefconLevel::THREE);
+        let (durable, ephemeral) = build();
+        assert!(ephemeral.contains("Session DEFCON level: 3"), "{ephemeral}");
+        assert!(!durable.contains("Session DEFCON level"));
+
+        session_defcon().set_session_level(session, DefconLevel::FIVE);
+        let (_, ephemeral) = build();
+        assert!(ephemeral.contains("Session DEFCON level: 5"), "{ephemeral}");
+        assert!(ephemeral.contains("make the call again"), "{ephemeral}");
+
+        session_defcon().forget(session);
     }
 }

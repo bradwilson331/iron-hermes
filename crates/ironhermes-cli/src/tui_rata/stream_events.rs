@@ -11,7 +11,9 @@
 //! The 8 variants below are locked by CONTEXT D-17. Additional variants
 //! (e.g. `MemoryWrite`, `HookFired`, `McpReconnect`) may be added by a
 //! future phase with planner justification, but this phase stays at 8
-//! per RESEARCH Open Question §3 — no speculative additions.
+//! per RESEARCH Open Question §3 — no speculative additions. A field on an
+//! existing variant does not change the 8-variant lock (precedent:
+//! `total_tokens`, Phase 36.2).
 
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -34,7 +36,15 @@ pub enum StreamEvent {
     /// (`StatusLineState.tokens_used`) updates when the turn ends. Without
     /// this payload the pill has no upstream writer and stays stranded at
     /// 0. `0` is a valid value (provider didn't return usage data).
-    Finished { total_tokens: usize },
+    ///
+    /// Phase 58.3.1 D-05: `context_warnings` is this turn's
+    /// `AgentResult.context_warnings` (compact notice, cache-break and
+    /// @-reference warnings), shown by the app as one Role::System line after
+    /// the reply; empty when the turn produced none.
+    Finished {
+        total_tokens: usize,
+        context_warnings: Vec<String>,
+    },
     /// Turn ended with an error. String is already user-facing (no PII
     /// stripping is this enum's responsibility).
     Error(String),
@@ -63,7 +73,10 @@ mod tests {
                 name: "bash".to_string(),
                 ok: true,
             },
-            StreamEvent::Finished { total_tokens: 0 },
+            StreamEvent::Finished {
+                total_tokens: 0,
+                context_warnings: Vec::new(),
+            },
             StreamEvent::Error("timeout".to_string()),
             StreamEvent::Cancelled,
         ];

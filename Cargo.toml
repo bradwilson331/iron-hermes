@@ -2,6 +2,7 @@
 members = [
     "crates/ironhermes-core",
     "crates/ironhermes-state",
+    "crates/ironhermes-tier2",
     "crates/ironhermes-trajectory",
     "crates/ironhermes-tools",
     "crates/ironhermes-agent",
@@ -23,6 +24,9 @@ members = [
     "crates/ironhermes-vault",
     "crates/ironhermes-acp",
     "crates/ironhermes-restgw",
+    "crates/ironhermes-security-proto",
+    "crates/ironhermes-security",
+    "crates/ironhermes-tirith",
 ]
 # crates/ironagent-tools-api is a stale byte-for-byte duplicate of
 # crates/ironhermes-tools (its test files import the sibling `ironhermes_tools`
@@ -34,6 +38,7 @@ exclude = [
 default-members = [
     "crates/ironhermes-core",
     "crates/ironhermes-state",
+    "crates/ironhermes-tier2",
     "crates/ironhermes-trajectory",
     "crates/ironhermes-tools",
     "crates/ironhermes-agent",
@@ -54,11 +59,14 @@ default-members = [
     "crates/ironhermes-vault",
     "crates/ironhermes-acp",
     "crates/ironhermes-restgw",
+    "crates/ironhermes-security-proto",
+    "crates/ironhermes-security",
+    "crates/ironhermes-tirith",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.4.5"
+version = "0.5.7"
 edition = "2024"
 authors = ["Wilson Tech"]
 license = "MIT"
@@ -74,6 +82,7 @@ htmd = "0.5"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_ignored = "0.1"
 serde_yaml = "0.9"
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }

@@ -8,6 +8,8 @@ description = "Multi-platform messaging gateway for IronHermes"
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+# Phase 57 Plan 05 (D-02): every agent host reaches the tirith sidecar service through this crate.
+ironhermes-security = { path = "../ironhermes-security" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 # Plan 21.7-06 (D-29): gateway handler threads ProcessRegistry through from the runner.
@@ -39,6 +41,7 @@ reqwest = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 tokio-util = { workspace = true }
 pdf-extract = { workspace = true }
 base64 = { workspace = true }
@@ -96,6 +99,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # test targets.
 ironhermes-agent = { path = "../ironhermes-agent", features = ["test-support"] }
 wiremock = { workspace = true }
+# Phase 58.2 plan 21: tier2_loops tests seed a Tier 2 claim directly (workspace crate, no new package).
+ironhermes-tier2 = { path = "../ironhermes-tier2", default-features = false }
 # tempfile promoted to [dependencies] — needed at runtime for write_gateway_pid atomic write (Phase 24 D-10)
 # Phase 36.17.1 D-07: proptest powers the #[cfg(test)] SplitSlotQueue parity suite in session_queue.rs.
 # Dev-only — zero runtime cost. ASSUMED legitimate per RESEARCH.md Package Legitimacy Audit.

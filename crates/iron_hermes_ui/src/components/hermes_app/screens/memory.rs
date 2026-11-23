@@ -22,6 +22,8 @@
 
 use dioxus::prelude::*;
 
+use super::memory_tier2::Tier2Panel;
+
 /// Extracts the operator-facing message from a memory write's JSON error
 /// envelope (`ironhermes_core::memory_store::MemoryResult`'s `Err` shape:
 /// `{"error": "...", "reason": "...", ["details": "..."]}`). Prefers
@@ -32,7 +34,7 @@ use dioxus::prelude::*;
 /// unmodified if it isn't the expected JSON shape (also tolerant of a
 /// `ServerFnError` Display wrapper around the JSON, since the exact
 /// wrapping is not part of this crate's stable contract).
-fn extract_memory_error_message(raw: &str) -> String {
+pub(super) fn extract_memory_error_message(raw: &str) -> String {
     let json_slice = match (raw.find('{'), raw.rfind('}')) {
         (Some(start), Some(end)) if end > start => &raw[start..=end],
         _ => raw,
@@ -80,6 +82,7 @@ pub fn ScreenMemory(is_active: bool) -> Element {
     // the resource closure's SYNC prefix (call syntax subscribes) so a
     // bump re-runs the fetch; `.restart()` is deliberately NOT used.
     let refresh_tick = use_signal(|| 0u32);
+    let mut tab = use_signal(|| MemoryTab::Tier1);
     let memory_resource = use_resource(move || {
         let _tick = refresh_tick();
         async move { crate::server::api::get_memory().await }
@@ -94,6 +97,7 @@ pub fn ScreenMemory(is_active: bool) -> Element {
         _ => crate::server::api::MemoryInfo::default(),
     };
     let load_error = matches!(memory_snapshot, Some(Err(_)));
+    let active_tab = *tab.read();
 
     // Split by store — each panel does its own optional client-side filter
     // (agent panel only) and idx-preserving row rendering.
@@ -161,60 +165,117 @@ pub fn ScreenMemory(is_active: bool) -> Element {
                 }
             }
 
-            // D-05: permanent, non-dismissible warning — same visual family
-            // as the Providers restart banner (padding/border/background
-            // shell reused verbatim, UI-SPEC Spacing Scale "Named
-            // exceptions"), but with no DISMISS button.
+            MemoryTabBar { active: active_tab, on_select: move |t| tab.set(t) }
+
             div {
-                style: "border: 1px solid rgba(210,153,34,0.45); background: rgba(210,153,34,0.06); padding: 10px 16px; border-radius: 8px; margin-bottom: 14px;",
-                span {
-                    style: "font-size: 11px; color: var(--amber);",
-                    "Manual memory edits are not recommended."
+                role: "tabpanel",
+                id: "memory-tabpanel",
+                "aria-labelledby": tab_id(active_tab),
+                match active_tab {
+                    MemoryTab::Tier1 => rsx! {
+                        // D-05: permanent, non-dismissible warning — same visual family
+                        // as the Providers restart banner (padding/border/background
+                        // shell reused verbatim, UI-SPEC Spacing Scale "Named
+                        // exceptions"), but with no DISMISS button. Tier 1 only (58.2
+                        // UI-SPEC G7): the warning concerns hand-editing, which Tier 2
+                        // does not offer.
+                        div {
+                            style: "border: 1px solid rgba(210,153,34,0.45); background: rgba(210,153,34,0.06); padding: 10px 16px; border-radius: 8px; margin-bottom: 14px;",
+                            span {
+                                style: "font-size: 11px; color: var(--amber);",
+                                "Manual memory edits are not recommended."
+                            }
+                        }
+
+                        div { class: "split",
+
+                            // ── Left panel: Agent memory (MEMORY.md) ────────────────
+                            MemoryPanel {
+                                title: "Entries".to_string(),
+                                store: "agent".to_string(),
+                                rows: agent_rows,
+                                is_loading,
+                                load_error,
+                                show_filter: true,
+                                refresh_tick,
+                            }
+
+                            div { style: "display: flex; flex-direction: column; gap: 14px;",
+
+                                // ── Right-top panel: User memory (USER.md) ───────────
+                                MemoryPanel {
+                                    title: "User Profile".to_string(),
+                                    store: "user".to_string(),
+                                    rows: user_rows,
+                                    is_loading,
+                                    load_error,
+                                    show_filter: false,
+                                    refresh_tick,
+                                }
+
+                                // ── Right-bottom panel: real per-store stats (Task 3) ──
+                                // Replaces the fabricated vector-store panel (Qdrant/
+                                // embed-model/dimensions/retention) with the flat-file
+                                // store's own accounting. Empty `stats` (memory_manager
+                                // == None, or a load error) renders dashes, never an
+                                // error — get_memory's disabled-path contract stays
+                                // intact.
+                                div { class: "panel",
+                                    div { class: "panel-title", "Memory" }
+                                    dl { class: "kv",
+                                        dt { "Agent — entries" } dd { "{agent_entries_display}" }
+                                        dt { "Agent — chars" } dd { "{agent_chars_display}" }
+                                        dt { "User — entries" } dd { "{user_entries_display}" }
+                                        dt { "User — chars" } dd { "{user_chars_display}" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    MemoryTab::Tier2 => rsx! {
+                        Tier2Panel {}
+                    },
                 }
             }
+        }
+    }
+}
 
-            div { class: "split",
+/// The Memory screen's tabs (58.2 D-13). `Tier 2` mounts its panel only when selected, so no
+/// Tier 2 request fires until the operator opens it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MemoryTab {
+    Tier1,
+    Tier2,
+}
 
-                // ── Left panel: Agent memory (MEMORY.md) ────────────────
-                MemoryPanel {
-                    title: "Entries".to_string(),
-                    store: "agent".to_string(),
-                    rows: agent_rows,
-                    is_loading,
-                    load_error,
-                    show_filter: true,
-                    refresh_tick,
-                }
+const MEMORY_TABS: [(MemoryTab, &str); 2] =
+    [(MemoryTab::Tier1, "Tier 1"), (MemoryTab::Tier2, "Tier 2")];
 
-                div { style: "display: flex; flex-direction: column; gap: 14px;",
+fn tab_id(t: MemoryTab) -> &'static str {
+    match t {
+        MemoryTab::Tier1 => "memory-tab-tier1",
+        MemoryTab::Tier2 => "memory-tab-tier2",
+    }
+}
 
-                    // ── Right-top panel: User memory (USER.md) ───────────
-                    MemoryPanel {
-                        title: "User Profile".to_string(),
-                        store: "user".to_string(),
-                        rows: user_rows,
-                        is_loading,
-                        load_error,
-                        show_filter: false,
-                        refresh_tick,
-                    }
-
-                    // ── Right-bottom panel: real per-store stats (Task 3) ──
-                    // Replaces the fabricated vector-store panel (Qdrant/
-                    // embed-model/dimensions/retention) with the flat-file
-                    // store's own accounting. Empty `stats` (memory_manager
-                    // == None, or a load error) renders dashes, never an
-                    // error — get_memory's disabled-path contract stays
-                    // intact.
-                    div { class: "panel",
-                        div { class: "panel-title", "Memory" }
-                        dl { class: "kv",
-                            dt { "Agent — entries" } dd { "{agent_entries_display}" }
-                            dt { "Agent — chars" } dd { "{agent_chars_display}" }
-                            dt { "User — entries" } dd { "{user_entries_display}" }
-                            dt { "User — chars" } dd { "{user_chars_display}" }
-                        }
-                    }
+/// Tab bar, `logs.rs` markup plus the tabpanel wiring (`aria-controls`, ids). No arrow-key roving.
+#[component]
+fn MemoryTabBar(active: MemoryTab, on_select: EventHandler<MemoryTab>) -> Element {
+    rsx! {
+        div { class: "tabs", role: "tablist", style: "margin-bottom: 16px;",
+            for (t , label) in MEMORY_TABS {
+                button {
+                    key: "{label}",
+                    id: tab_id(t),
+                    class: "tab",
+                    class: if active == t { "is-active" },
+                    r#type: "button",
+                    role: "tab",
+                    "aria-selected": "{active == t}",
+                    "aria-controls": "memory-tabpanel",
+                    onclick: move |_| on_select.call(t),
+                    "{label}"
                 }
             }
         }
@@ -602,5 +663,68 @@ fn MemoryEntryRow(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRC: &str = include_str!("memory.rs");
+
+    fn code_of(src: &str) -> &str {
+        &src[..src.find("#[cfg(test)]").unwrap_or(src.len())]
+    }
+
+    #[test]
+    fn memory_screen_tabs_include_tier2() {
+        let labels: Vec<&str> = MEMORY_TABS.iter().map(|(_, l)| *l).collect();
+        assert_eq!(labels, ["Tier 1", "Tier 2"]);
+    }
+
+    #[test]
+    fn memory_tab_bar_aria() {
+        fn root() -> Element {
+            rsx! {
+                MemoryTabBar { active: MemoryTab::Tier2, on_select: move |_| {} }
+            }
+        }
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        let html = dioxus::ssr::render(&dom);
+        assert_eq!(html.matches("role=\"tablist\"").count(), 1, "{html}");
+        assert_eq!(html.matches("role=\"tab\"").count(), 2, "{html}");
+        assert_eq!(html.matches("type=\"button\"").count(), 2, "{html}");
+        assert_eq!(
+            html.matches("aria-controls=\"memory-tabpanel\"").count(),
+            2,
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"memory-tab-tier1\"") && html.contains("id=\"memory-tab-tier2\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("aria-selected=\"true\"").count(), 1, "{html}");
+        // The selected one is Tier 2 and carries is-active.
+        let tier2 = &html[html.find("id=\"memory-tab-tier2\"").unwrap()..];
+        assert!(tier2.contains("is-active"), "{html}");
+        assert_eq!(html.matches("is-active").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn memory_banner_is_tier1_only() {
+        let code = code_of(SRC);
+        let banner = "Manual memory edits are not recommended.";
+        assert_eq!(code.matches(banner).count(), 1, "banner appears once");
+        let start = code.find("role: \"tabpanel\"").expect("tabpanel");
+        let rest = &code[start..];
+        let end = rest.find("Tier2Panel {").expect("Tier2Panel mount");
+        let slice = &rest[..end];
+        let b = slice
+            .find(banner)
+            .expect("banner inside the tabpanel match");
+        let t1 = slice.find("MemoryTab::Tier1 =>").expect("Tier1 arm");
+        let t2 = slice.find("MemoryTab::Tier2 =>").expect("Tier2 arm");
+        assert!(t1 < b && b < t2, "banner sits in the Tier 1 arm only");
     }
 }

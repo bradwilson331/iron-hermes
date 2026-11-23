@@ -173,6 +173,20 @@ pub(crate) fn read_active_profile_record() -> Option<ActiveProfileRecord> {
     parse_active_profile_record(&config.active_profile)
 }
 
+/// Serialises the activation record's load-modify-save of the ROOT
+/// `config.yaml` (WR-03). Since 54.4 every tab focus writes the record, so
+/// overlapping requests would otherwise interleave their `Config::load()` and
+/// `save()` and one could overwrite the other. Held only across the blocking
+/// load+save (never across an await); a poisoned lock is recovered because the
+/// guarded data is `()`.
+#[cfg(feature = "server")]
+pub(crate) fn lock_root_config_write() -> std::sync::MutexGuard<'static, ()> {
+    static ROOT_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ROOT_CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Phase 49.4 Plan 08 (D-14): persist an activation record. Loads a fresh
 /// `Config` (never the caller's possibly-stale copy — matches
 /// `create_profile_impl`'s own discipline), overwrites only the
@@ -184,6 +198,7 @@ pub(crate) fn read_active_profile_record() -> Option<ActiveProfileRecord> {
 /// separation of concerns (the `#[server]` wrapper gates, the impl writes).
 #[cfg(feature = "server")]
 pub(crate) fn write_active_profile_record(record: &ActiveProfileRecord) -> Result<(), String> {
+    let _guard = lock_root_config_write();
     let mut config =
         ironhermes_core::config::Config::load().map_err(|e| format!("Config load failed: {e}"))?;
     config.active_profile = render_active_profile_record(record);
@@ -243,6 +258,7 @@ pub(crate) fn resolve_active_profile_for(
 /// concerns (the `#[server]` wrapper gates, this fn writes).
 #[cfg(feature = "server")]
 pub(crate) fn clear_active_profile_record() -> Result<(), String> {
+    let _guard = lock_root_config_write();
     let mut config =
         ironhermes_core::config::Config::load().map_err(|e| format!("Config load failed: {e}"))?;
     config.active_profile = ironhermes_core::config::ActiveProfileConfig::default();

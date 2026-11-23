@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         host: Some("127.0.0.1".to_string()),
         port: Some(port),
         public_opt_in: false,
+        allowed_origin: None,
     };
 
     let handles = ironhermes_restgw::api_server::ApiServerHandles {

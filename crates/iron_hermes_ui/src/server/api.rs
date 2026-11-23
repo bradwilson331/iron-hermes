@@ -64,6 +64,13 @@ pub enum ContextWindowSource {
     GlobalPin,
     /// `DEFAULT_CONTEXT_LENGTH` (128,000) — nothing else resolved.
     Fallback,
+    /// Phase 58.3.1: the window the local server itself reported.
+    Probed,
+    /// Phase 58.3.1: the window learned from a provider context-length
+    /// rejection and persisted in the models cache.
+    Learned,
+    /// Phase 58.3.1 (D-11): 8,192 assumed for an unknown model on a local server.
+    LocalDefault,
 }
 
 /// Phase 50.5 (D-12): the mapping exists in exactly one place so the DTO and
@@ -72,12 +79,13 @@ pub enum ContextWindowSource {
 impl From<ironhermes_core::provider::ContextLengthSource> for ContextWindowSource {
     fn from(value: ironhermes_core::provider::ContextLengthSource) -> Self {
         match value {
-            ironhermes_core::provider::ContextLengthSource::PerModelConfig => {
-                Self::PerModelConfig
-            }
+            ironhermes_core::provider::ContextLengthSource::PerModelConfig => Self::PerModelConfig,
             ironhermes_core::provider::ContextLengthSource::Metadata => Self::Metadata,
             ironhermes_core::provider::ContextLengthSource::GlobalPin => Self::GlobalPin,
             ironhermes_core::provider::ContextLengthSource::Fallback => Self::Fallback,
+            ironhermes_core::provider::ContextLengthSource::Probed => Self::Probed,
+            ironhermes_core::provider::ContextLengthSource::Learned => Self::Learned,
+            ironhermes_core::provider::ContextLengthSource::LocalDefault => Self::LocalDefault,
         }
     }
 }
@@ -96,6 +104,9 @@ pub fn provenance_word(source: ContextWindowSource) -> &'static str {
         ContextWindowSource::Metadata => "cache",
         ContextWindowSource::GlobalPin => "pin",
         ContextWindowSource::Fallback => "default",
+        ContextWindowSource::Probed => "probed",
+        ContextWindowSource::Learned => "learned",
+        ContextWindowSource::LocalDefault => "local default",
     }
 }
 
@@ -114,6 +125,40 @@ mod context_window_source_tests {
         assert_eq!(provenance_word(ContextWindowSource::Metadata), "cache");
         assert_eq!(provenance_word(ContextWindowSource::GlobalPin), "pin");
         assert_eq!(provenance_word(ContextWindowSource::Fallback), "default");
+        assert_eq!(provenance_word(ContextWindowSource::Probed), "probed");
+        assert_eq!(provenance_word(ContextWindowSource::Learned), "learned");
+        assert_eq!(
+            provenance_word(ContextWindowSource::LocalDefault),
+            "local default"
+        );
+    }
+
+    /// The core label and the UI word can never drift: one assertion per core
+    /// variant (exhaustive match so a new core variant fails to compile here).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn provenance_word_matches_core_label_for_every_variant() {
+        use ironhermes_core::provider::ContextLengthSource as C;
+        for v in [
+            C::PerModelConfig,
+            C::Metadata,
+            C::GlobalPin,
+            C::Fallback,
+            C::Probed,
+            C::Learned,
+            C::LocalDefault,
+        ] {
+            match v {
+                C::PerModelConfig
+                | C::Metadata
+                | C::GlobalPin
+                | C::Fallback
+                | C::Probed
+                | C::Learned
+                | C::LocalDefault => {}
+            }
+            assert_eq!(provenance_word(ContextWindowSource::from(v)), v.label());
+        }
     }
 
     /// `ContextWindowSource` serializes to lowercase snake_case strings and
@@ -125,6 +170,9 @@ mod context_window_source_tests {
             (ContextWindowSource::Metadata, "\"metadata\""),
             (ContextWindowSource::GlobalPin, "\"global_pin\""),
             (ContextWindowSource::Fallback, "\"fallback\""),
+            (ContextWindowSource::Probed, "\"probed\""),
+            (ContextWindowSource::Learned, "\"learned\""),
+            (ContextWindowSource::LocalDefault, "\"local_default\""),
         ];
         for (source, expected_json) in cases {
             let json = serde_json::to_string(&source).expect("serialize");
@@ -932,7 +980,7 @@ fn build_memory_info(entries: &ironhermes_core::memory_provider::MemoryEntries) 
 /// so it is directly unit-testable without `global_app_state()` or the
 /// network.
 #[cfg(feature = "server")]
-fn check_memory_write_gate(config: &ironhermes_core::config::Config) -> Result<(), String> {
+pub(crate) fn check_memory_write_gate(config: &ironhermes_core::config::Config) -> Result<(), String> {
     if !config.security.web_config_write_enabled {
         return Err("Memory edits are disabled while web config writes are off.".to_string());
     }
@@ -1627,10 +1675,71 @@ fn extract_last_message_preview(msgs: &[ironhermes_state::StoredMessage]) -> Opt
         .map(|c: &String| c.chars().take(80).collect::<String>())
 }
 
+/// Phase 54.1 D-06: pure join between the activated profile's own
+/// `skills.disabled` set and the server's in-process `active_skills` set.
+/// Returns `!set.contains(name)` when a profile is active (opt-out model:
+/// absent from the profile's disabled set means enabled), and falls back
+/// to `active_names.contains(name)` — today's behavior, bit for bit — when
+/// `profile_disabled` is `None`.
+///
+/// Why the read side had to move with the write side: D-07 deliberately
+/// skips the in-process `active_skills` mutation in `toggle_skill` when a
+/// profile is active, so a `list_skills` that kept reading only
+/// `active_skills` would never reflect a toggle made against a profile's
+/// own config — the Skills screen's checkbox would freeze after every
+/// toggle with a profile active.
+#[cfg(not(target_arch = "wasm32"))]
+fn enabled_for_display(
+    name: &str,
+    profile_disabled: Option<&std::collections::HashSet<String>>,
+    active_names: &std::collections::HashSet<String>,
+) -> bool {
+    match profile_disabled {
+        Some(set) => !set.contains(name),
+        None => active_names.contains(name),
+    }
+}
+
+/// Phase 54.1 D-06: resolve the activated profile's own `skills.disabled`
+/// set for display — disk-I/O-only (no `global_app_state()`), mirroring
+/// `fetch_profile_skills_impl`'s read shape (`profile_api.rs:2585-2605`):
+/// `validate_profile_name` -> `Config::load_from(profile_dir_for(slug)/config.yaml)`
+/// -> `cfg.skills.disabled` as a `HashSet`. A load error (invalid name,
+/// missing/malformed config.yaml) is logged and returns `None` rather than
+/// failing the whole catalog read — `enabled_for_display`'s caller then
+/// falls back to the `active_skills` answer.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_profile_disabled_for_display(slug: &str) -> Option<std::collections::HashSet<String>> {
+    let loaded = ironhermes_core::profile::validate_profile_name(slug)
+        .map_err(|e| format!("invalid profile name: {e}"))
+        .and_then(|_| {
+            ironhermes_core::config::Config::load_from(
+                &crate::server::profile_api::profile_dir_for(slug).join("config.yaml"),
+            )
+            .map_err(|e| format!("load profile config.yaml: {e}"))
+        });
+    match loaded {
+        Ok(cfg) => Some(cfg.skills.disabled.iter().cloned().collect()),
+        Err(e) => {
+            tracing::warn!(
+                profile = %slug,
+                error = %e,
+                "skills_display: failed to load profile config for display; degrading to active_skills"
+            );
+            None
+        }
+    }
+}
+
 /// Phase 26.7 Plan 03 (D-09, R-1, R-4): Read-only catalog of skills from the
 /// runtime SkillRegistry, with per-skill `enabled` reflecting the current
 /// session's `active_skills` set. SkillRegistry.list() is sync — no await
 /// needed for the registry read; only the std Mutex lock on active_skills.
+///
+/// Phase 54.1 D-06: `enabled` now resolves from the activated profile's own
+/// `skills.disabled` (via `resolve_chat_optout_target()` — Task 1's seam,
+/// never a second inline `resolve_active_profile_for` call) when one is
+/// active, so this agrees with the store `toggle_skill` writes.
 #[get("/api/skills")]
 pub async fn list_skills() -> Result<Vec<SkillInfo>> {
     let state = crate::server::state::global_app_state();
@@ -1645,6 +1754,12 @@ pub async fn list_skills() -> Result<Vec<SkillInfo>> {
             .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
         guard.iter().map(|r| r.name.clone()).collect()
     };
+
+    let profile_disabled: Option<std::collections::HashSet<String>> =
+        match resolve_chat_optout_target() {
+            OptOutTarget::Root => None,
+            OptOutTarget::Profile(slug) => load_profile_disabled_for_display(&slug),
+        };
 
     let out = registry
         .list()
@@ -1661,11 +1776,199 @@ pub async fn list_skills() -> Result<Vec<SkillInfo>> {
                 name: r.name.clone(),
                 description: r.description.clone(),
                 category: category.to_string(),
-                enabled: active_names.contains(&r.name),
+                enabled: enabled_for_display(&r.name, profile_disabled.as_ref(), &active_names),
             }
         })
         .collect();
     Ok(out)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod skills_display_tests {
+    use super::{enabled_for_display, load_profile_disabled_for_display};
+    use std::collections::HashSet;
+
+    /// RAII guard, duplicated per this crate's own established precedent
+    /// (see `toggle_skill_tests::ScopedEnv`'s doc comment — each
+    /// `#[cfg(test)]` module is its own namespace).
+    struct ScopedEnv {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: single-threaded test context; no concurrent env access.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: single-threaded test context; no concurrent env access.
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn skills_display_d06_profile_disabled_set_overrides_active_skills() {
+        let profile_disabled: HashSet<String> = ["alpha".to_string()].into_iter().collect();
+        let active_names: HashSet<String> = ["alpha".to_string()].into_iter().collect();
+        // alpha is in BOTH active_skills and the profile's disabled set —
+        // the profile set must win (false), proving active_skills alone
+        // would have reported this skill enabled.
+        assert!(!enabled_for_display(
+            "alpha",
+            Some(&profile_disabled),
+            &active_names
+        ));
+        assert!(enabled_for_display(
+            "beta",
+            Some(&profile_disabled),
+            &active_names
+        ));
+    }
+
+    #[test]
+    fn skills_display_d07_no_profile_falls_back_to_active_skills() {
+        let active_names: HashSet<String> = ["alpha".to_string()].into_iter().collect();
+        assert!(enabled_for_display("alpha", None, &active_names));
+        assert!(!enabled_for_display("beta", None, &active_names));
+    }
+
+    #[test]
+    fn skills_display_d06_unloadable_profile_config_degrades_to_active_skills() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        let profile_dir = dir.path().join("profiles").join("mybot");
+        std::fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        std::fs::write(profile_dir.join("config.yaml"), "not: [valid, yaml: :::")
+            .expect("write malformed config");
+
+        assert_eq!(load_profile_disabled_for_display("mybot"), None);
+    }
+}
+
+// =============================================================================
+// Phase 54.1 D-06/D-07: opt-out write-target resolution — the seam both
+// `toggle_skill` and `list_skills` branch on.
+// =============================================================================
+
+/// Phase 54.1 D-06/D-07: the two possible write/read targets for the Skills
+/// screen's opt-out state. `Root` is the pre-54.1 behavior — the process's
+/// own `get_hermes_home()/config.yaml` via `Config::load()`/`Config::save()`.
+/// `Profile(slug)` is new: the activated profile's OWN `config.yaml` under
+/// `profiles/<slug>/`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OptOutTarget {
+    Root,
+    Profile(String),
+}
+
+/// Phase 54.1 D-06/D-07: pure branch on an already-resolved profile slug.
+/// `"default"` is the sentinel `ironhermes_core::current_profile()` and
+/// `resolve_active_profile_for`'s fallback both return when nothing more
+/// specific applies — `RESERVED_NAMES` refuses that literal name, so a
+/// `profiles/default` directory can never exist
+/// (`profile_activation_api.rs:231-234`) — and therefore always maps to the
+/// pre-54.1 root target. Any other slug names a real profile directory and
+/// gets its own target.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_optout_write_target(slug: &str) -> OptOutTarget {
+    if slug == "default" {
+        OptOutTarget::Root
+    } else {
+        OptOutTarget::Profile(slug.to_string())
+    }
+}
+
+/// Phase 54.1 D-06/D-07 (T-54.1-07): the single seam `toggle_skill` and
+/// `list_skills` both branch on — the ONLY place in this file that calls
+/// `resolve_active_profile_for`. Deliberately NOT inlined at either call
+/// site: this fn reads the persisted activation record, which is the whole
+/// property under test, so it exists as a named seam a test can drive
+/// rather than as inline code duplicated twice.
+///
+/// Inertness trap (read before "simplifying" this call): both
+/// `ironhermes_core::current_profile()` and this file's own
+/// `active_profile_identifier()` wrapper (`api.rs:802`) ALWAYS return the
+/// `"default"` sentinel inside this crate's UI server process, because that
+/// process is never `--profile`-pivoted. Using either one as the branch
+/// predicate would make the profile branch unreachable dead code that
+/// reports success while doing nothing — exactly the "plan-registered
+/// mitigation is fiction" failure mode this repository has shipped before.
+/// `resolve_active_profile_for` is the resolver that instead reads the UI's
+/// OWN persisted activation record
+/// (`crate::server::profile_activation_api::read_active_profile_record`)
+/// first, falling back to `current_profile()` only when no record applies.
+/// `skills_optout_d06_call_site_resolves_profile_target_from_activation_record`
+/// is the test that goes red the moment this predicate is reverted.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_chat_optout_target() -> OptOutTarget {
+    let slug = crate::server::profile_activation_api::resolve_active_profile_for(
+        crate::server::profile_activation_api::ActivationSurface::Chat,
+        None,
+    );
+    resolve_optout_write_target(&slug)
+}
+
+/// Phase 54.1 D-06 (T-54.1-05/T-54.1-08): pure payload builder for the
+/// profile opt-out branch. `existing_disabled` is the profile's own
+/// current `skills.disabled` list; `catalog_names` is the live skill
+/// catalog; `name` is the skill being toggled. Returns the payload, whether
+/// `name` was disabled before the toggle, and the list of stale entries
+/// dropped from `existing_disabled`.
+///
+/// Stale-drop rationale: `apply_skills_disabled` (`profile_api.rs:2437+`)
+/// rejects the ENTIRE payload if any entry is absent from the live catalog,
+/// so a single pre-existing stale entry in a profile's list would brick
+/// every future toggle for that profile. Dropping it here (and reporting it
+/// via the returned `dropped_stale` list, which the caller `tracing::warn!`s)
+/// is self-healing — a name absent from the catalog hides nothing.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_profile_optout_payload(
+    slug: &str,
+    existing_disabled: &[String],
+    catalog_names: &std::collections::HashSet<String>,
+    name: &str,
+) -> (crate::protocol::ProfileConfigWritePayload, bool, Vec<String>) {
+    let mut dropped_stale = Vec::new();
+    let mut retained: Vec<String> = Vec::new();
+    for n in existing_disabled {
+        if catalog_names.contains(n) {
+            retained.push(n.clone());
+        } else {
+            dropped_stale.push(n.clone());
+        }
+    }
+    let was_disabled = retained.iter().any(|n| n == name);
+    if was_disabled {
+        retained.retain(|n| n != name);
+    } else {
+        retained.push(name.to_string());
+    }
+    let payload = crate::protocol::ProfileConfigWritePayload {
+        name: slug.to_string(),
+        provider: None,
+        model_default: None,
+        skills_disabled: Some(retained),
+        tools_toolsets: None,
+        tools_disable: None,
+        tools_enable: None,
+    };
+    (payload, was_disabled, dropped_stale)
 }
 
 // =============================================================================
@@ -1687,6 +1990,17 @@ pub async fn list_skills() -> Result<Vec<SkillInfo>> {
 /// Behavior (opt-out model — absent from `disabled` means enabled):
 ///   - If `name` was enabled (absent from disabled): add to disabled, remove from active_skills.
 ///   - If `name` was disabled (present in disabled): remove from disabled, push to active_skills.
+///
+/// Phase 54.1 D-06/D-07: Steps 2-4 now branch on `resolve_chat_optout_target()`
+/// — never `current_profile()` / `active_profile_identifier()`, both of which
+/// always read `"default"` inside this never-pivoted UI server (see that
+/// seam's own doc comment for the inertness-trap detail). With a profile
+/// active, Steps 2-3 instead reproduce `update_profile_config`'s full
+/// four-step protocol (`validate_profile_config_payload` -> fresh
+/// `Config::load()` -> `check_profile_write_gate` -> `update_profile_config_impl`)
+/// against THAT profile's own `config.yaml`, and Step 4 is SKIPPED — the
+/// server's live `active_skills` session belongs to the un-pivoted "default"
+/// operator session, not to whichever profile was just toggled.
 #[server]
 pub async fn toggle_skill(name: String) -> Result<(), ServerFnError> {
     let state = crate::server::state::global_app_state();
@@ -1697,35 +2011,87 @@ pub async fn toggle_skill(name: String) -> Result<(), ServerFnError> {
         return Err(ServerFnError::new(format!("unknown skill: {name}")));
     }
 
-    // Step 2 — load fresh config from disk and toggle the disabled list
-    let mut config = ironhermes_core::config::Config::load().unwrap_or_default();
-    let was_disabled = apply_disable_toggle(&mut config, &name);
+    match resolve_chat_optout_target() {
+        OptOutTarget::Root => {
+            // RR-05 (WR-06): serialise the root load-modify-save; dropped right after the save.
+            let root_write = crate::server::profile_activation_api::lock_root_config_write();
+            // Step 2 — load fresh config from disk and toggle the disabled list
+            let mut config = ironhermes_core::config::Config::load().unwrap_or_default();
+            let was_disabled = apply_disable_toggle(&mut config, &name);
 
-    // Step 3 — persist config back to disk
-    config
-        .save()
-        .map_err(|e| ServerFnError::new(format!("Config save failed: {e}")))?;
+            // Step 3 — persist config back to disk
+            config
+                .save()
+                .map_err(|e| ServerFnError::new(format!("Config save failed: {e}")))?;
+            drop(root_write);
 
-    // Step 4 — in-process active_skills mutation (scoped std::sync::Mutex lock).
-    // The MutexGuard is dropped at the closing brace before fn returns; no async
-    // suspension occurs while the lock is held (lock discipline: Behavior 5).
-    // Pattern: api.rs list_skills lines 234–240 (active_skills lock pattern)
-    {
-        let mut skills = state
-            .runtime
-            .active_skills()
-            .lock()
-            .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
-        if was_disabled {
-            // Was disabled → now enabled: push record if not already present
-            if !skills.iter().any(|s| s.name == name) {
-                skills.push(record.unwrap());
-            }
-        } else {
-            // Was enabled → now disabled: remove from active list
-            skills.retain(|s| s.name != name);
+            // Step 4 — in-process active_skills mutation (scoped std::sync::Mutex lock).
+            // The MutexGuard is dropped at the closing brace before fn returns; no async
+            // suspension occurs while the lock is held (lock discipline: Behavior 5).
+            // Pattern: api.rs list_skills lines 234–240 (active_skills lock pattern)
+            {
+                let mut skills =
+                    state.runtime.active_skills().lock().map_err(|e| {
+                        ServerFnError::new(format!("active_skills lock poisoned: {e}"))
+                    })?;
+                if was_disabled {
+                    // Was disabled → now enabled: push record if not already present
+                    if !skills.iter().any(|s| s.name == name) {
+                        skills.push(record.unwrap());
+                    }
+                } else {
+                    // Was enabled → now disabled: remove from active list
+                    skills.retain(|s| s.name != name);
+                }
+            } // MutexGuard drops here — lock released before fn returns
         }
-    } // MutexGuard drops here — lock released before fn returns
+        OptOutTarget::Profile(slug) => {
+            // Step 2 (profile branch) — validate the slug before any path is
+            // resolved, then load THAT profile's own config.yaml (never the
+            // root), mirroring `fetch_profile_skills_impl`'s read shape.
+            ironhermes_core::profile::validate_profile_name(&slug)
+                .map_err(|e| ServerFnError::new(format!("invalid profile name: {e}")))?;
+            let profile_config_path =
+                crate::server::profile_api::profile_dir_for(&slug).join("config.yaml");
+            let profile_cfg = ironhermes_core::config::Config::load_from(&profile_config_path)
+                .map_err(|e| ServerFnError::new(format!("load profile config.yaml: {e}")))?;
+            let catalog_names: std::collections::HashSet<String> = state
+                .runtime
+                .skill_registry()
+                .list()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect();
+            let (payload, _was_disabled, dropped_stale) = build_profile_optout_payload(
+                &slug,
+                &profile_cfg.skills.disabled,
+                &catalog_names,
+                &name,
+            );
+            for stale in &dropped_stale {
+                tracing::warn!(
+                    profile = %slug,
+                    skill = %stale,
+                    "skills_optout: dropping stale disabled entry absent from live catalog"
+                );
+            }
+
+            // Step 3 (profile branch) — reproduce `update_profile_config`'s
+            // full four-step protocol rather than only its final call, so
+            // this branch never weakens the fail-closed write gate.
+            crate::server::profile_api::validate_profile_config_payload(&payload)
+                .map_err(ServerFnError::new)?;
+            let fresh_config = ironhermes_core::config::Config::load()
+                .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+            crate::server::profile_api::check_profile_write_gate(&fresh_config)
+                .map_err(ServerFnError::new)?;
+            crate::server::profile_api::update_profile_config_impl(&payload)
+                .map_err(ServerFnError::new)?;
+
+            // Step 4 is intentionally SKIPPED in this branch (D-07) — see
+            // this fn's doc comment.
+        }
+    }
 
     Ok(())
 }
@@ -1752,7 +2118,10 @@ fn apply_disable_toggle(config: &mut ironhermes_core::config::Config, name: &str
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod toggle_skill_tests {
-    use super::apply_disable_toggle;
+    use super::{
+        apply_disable_toggle, build_profile_optout_payload, resolve_chat_optout_target,
+        resolve_optout_write_target, OptOutTarget,
+    };
     use ironhermes_core::config::Config;
 
     fn make_config_with_disabled(names: &[&str]) -> Config {
@@ -1798,6 +2167,144 @@ mod toggle_skill_tests {
             !config.skills.disabled.contains(&"baz".to_string()),
             "baz should be re-enabled after second toggle"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 54.1 D-06/D-07/T-54.1-07: skills_optout_* tests.
+    // -----------------------------------------------------------------
+
+    /// RAII guard, duplicated per this crate's own established precedent
+    /// (see `profile_activation_api.rs::profile_activation_tests::ScopedEnv`'s
+    /// doc comment — each `#[cfg(test)]` module is its own namespace).
+    struct ScopedEnv {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: single-threaded test context; no concurrent env access.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: single-threaded test context; no concurrent env access.
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    /// T-54.1-07's primary RED-test evidence: drives `resolve_chat_optout_target()`
+    /// against a REAL persisted activation record under a temp `$IRONHERMES_HOME`
+    /// that is deliberately NOT profile-pivoted, so only the correct resolver
+    /// (`resolve_active_profile_for` reading the persisted record) can possibly
+    /// produce `mybot` — a `current_profile()`-based predicate cannot, because
+    /// the temp home has no `profiles/<slug>` ancestor to reverse-walk into.
+    /// This test mutates process env; it relies on the `--test-threads=1` flag
+    /// this plan's verify block already pins.
+    #[test]
+    fn skills_optout_d06_call_site_resolves_profile_target_from_activation_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        std::fs::create_dir_all(dir.path().join("profiles").join("mybot"))
+            .expect("mkdir profile dir");
+
+        crate::server::profile_activation_api::write_active_profile_record(
+            &crate::protocol::ActiveProfileRecord {
+                name: "mybot".to_string(),
+                scope: crate::protocol::ActivationScope::Everywhere,
+                updated_at_ms: 1,
+            },
+        )
+        .expect("write_active_profile_record should succeed");
+
+        // Load-bearing guard: proves the temp home is NOT profile-pivoted, so
+        // a `current_profile()`-based predicate could not possibly produce
+        // "mybot" below.
+        assert_ne!(ironhermes_core::current_profile(), "mybot");
+
+        match resolve_chat_optout_target() {
+            OptOutTarget::Profile(s) => assert_eq!(s, "mybot"),
+            OptOutTarget::Root => panic!(
+                "resolve_chat_optout_target() returned Root — the predicate was \
+                 reverted to current_profile()/active_profile_identifier(), both \
+                 of which always read \"default\" inside this never-pivoted UI \
+                 server"
+            ),
+        }
+    }
+
+    #[test]
+    fn skills_optout_d07_root_target_when_slug_is_default_sentinel() {
+        assert_eq!(resolve_optout_write_target("default"), OptOutTarget::Root);
+    }
+
+    #[test]
+    fn skills_optout_d06_profile_target_when_slug_is_a_real_profile() {
+        assert_eq!(
+            resolve_optout_write_target("mybot"),
+            OptOutTarget::Profile("mybot".to_string())
+        );
+    }
+
+    #[test]
+    fn skills_optout_d06_payload_targets_profile_and_adds_toggled_name() {
+        let catalog: std::collections::HashSet<String> =
+            ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
+        let existing = vec!["alpha".to_string()];
+        let (payload, was_disabled, dropped_stale) =
+            build_profile_optout_payload("mybot", &existing, &catalog, "beta");
+        assert_eq!(payload.name, "mybot");
+        assert_eq!(payload.provider, None);
+        assert_eq!(payload.model_default, None);
+        assert_eq!(
+            payload.skills_disabled,
+            Some(vec!["alpha".to_string(), "beta".to_string()])
+        );
+        assert!(!was_disabled);
+        assert!(dropped_stale.is_empty());
+    }
+
+    #[test]
+    fn skills_optout_d06_stale_disabled_entry_dropped_not_fatal() {
+        let catalog: std::collections::HashSet<String> =
+            ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
+        let existing = vec!["alpha".to_string(), "ghost".to_string()];
+        let (payload, _was_disabled, dropped_stale) =
+            build_profile_optout_payload("mybot", &existing, &catalog, "beta");
+        let disabled = payload.skills_disabled.clone().expect("Some");
+        assert!(!disabled.contains(&"ghost".to_string()));
+        assert_eq!(dropped_stale, vec!["ghost".to_string()]);
+        assert!(crate::server::profile_api::validate_profile_config_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn skills_optout_d06_payload_goes_through_existing_validator() {
+        let mut payload = crate::protocol::ProfileConfigWritePayload {
+            name: "mybot".to_string(),
+            provider: None,
+            model_default: None,
+            skills_disabled: Some((0..513).map(|i| format!("skill-{i}")).collect()),
+            tools_toolsets: None,
+            tools_disable: None,
+            tools_enable: None,
+        };
+        assert!(crate::server::profile_api::validate_profile_config_payload(&payload).is_err());
+
+        payload.skills_disabled = Some(vec!["   ".to_string()]);
+        assert!(crate::server::profile_api::validate_profile_config_payload(&payload).is_err());
     }
 }
 
@@ -2037,7 +2544,13 @@ pub async fn api_agents_list() -> Result<Vec<AgentInfo>> {
 /// Secret fields (`*_api_key`, `*_token`, `gateway.*`, `model.*`) are NEVER
 /// deserialized from the browser — they are absent by design (secret-exclusion
 /// mitigation: a field that does not exist cannot be clobbered).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+///
+/// Phase 54.7 Plan 06 (D-02): every key field is a REFERENCE name (`*_key_ref`,
+/// a `VOICE_KEY_*` env var or a `secret/voice/*` vault entry) -- no field can
+/// hold a secret value. `Default` + `#[serde(default)]` mean a caller names
+/// only the fields it changes (every other field stays untouched on merge).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
 pub struct VoiceWritePayload {
     // VAD
     pub web_silence_threshold_rms: Option<f32>,
@@ -2072,6 +2585,12 @@ pub struct VoiceWritePayload {
     pub identity_tts_voice: Option<String>,
     /// Override the identity's realtime session voice (D-09/D-12).
     pub identity_realtime_voice: Option<String>,
+    /// Phase 54.7 Plan 15 (D-16): override the identity's TTS model.
+    pub identity_tts_model: Option<String>,
+    /// Phase 54.7 Plan 15 (D-16): override the identity's TTS output format.
+    pub identity_tts_format: Option<String>,
+    /// Phase 54.7 Plan 15 (D-16): override the identity's realtime model.
+    pub identity_realtime_model: Option<String>,
     // D-17: appearance fields — one record holds BOTH appearance and voice.
     /// Orb style token: one of "classic" | "bloom" | "ascii" | "network".
     pub identity_appearance_style: Option<String>,
@@ -2081,6 +2600,46 @@ pub struct VoiceWritePayload {
     pub identity_size: Option<f32>,
     /// Glow intensity 0.0–1.0 (mirrors IdentityAppearance.glow: Option<f32>).
     pub identity_glow: Option<f32>,
+    // Phase 54.7 Plan 06 (D-01/D-03): the OpenAI-compatible TTS block
+    // (`tts.openai_compatible`). Empty `path` / `key_ref` clear the field.
+    /// Server base URL including any `/v1` segment (empty = unset).
+    pub tts_compat_base_url: Option<String>,
+    /// Endpoint path override; empty clears it (the default path applies).
+    pub tts_compat_path: Option<String>,
+    /// Key REFERENCE name (never a value); empty clears it.
+    pub tts_compat_key_ref: Option<String>,
+    pub tts_compat_model: Option<String>,
+    pub tts_compat_voice: Option<String>,
+    pub tts_compat_format: Option<String>,
+    // Phase 54.7 Plan 06 (D-01/D-03): the OpenAI-compatible STT block
+    // (`stt.openai_compatible`). Empty `path` / `key_ref` clear the field.
+    pub stt_compat_base_url: Option<String>,
+    pub stt_compat_path: Option<String>,
+    /// Key REFERENCE name (never a value); empty clears it.
+    pub stt_compat_key_ref: Option<String>,
+    pub stt_compat_model: Option<String>,
+    // Phase 54.7 Plan 06 (D-09, Pitfall 13): per-provider TTS settings, each
+    // persisted into its OWN block so a voice typed for one provider can no
+    // longer overwrite another's.
+    pub tts_openai_model: Option<String>,
+    pub tts_openai_voice: Option<String>,
+    pub tts_openai_format: Option<String>,
+    pub tts_elevenlabs_model: Option<String>,
+    pub tts_elevenlabs_voice: Option<String>,
+    // Phase 54.7 Plan 06 (D-13/D-15): the voice family and the top-level
+    // `realtime:` block. Saving `voice_service` is the one-way migration: it
+    // also clears the legacy `voice.realtime_*` keys and rewrites `open_mic`.
+    /// `realtime` | `turn_based`.
+    pub voice_service: Option<String>,
+    pub realtime_provider: Option<String>,
+    /// Empty means the api.openai.com default.
+    pub realtime_base_url: Option<String>,
+    /// Key REFERENCE name (never a value); empty clears it.
+    pub realtime_key_ref: Option<String>,
+    pub realtime_model: Option<String>,
+    pub realtime_voice: Option<String>,
+    /// A model id, or the reserved `off`.
+    pub realtime_transcription_model: Option<String>,
 }
 
 /// Phase 40.5 Plan 03 (D-09/D-16): Resolved per-identity voice override for
@@ -2098,6 +2657,15 @@ pub struct IdentityOverride {
     pub free_mode_voice: Option<String>,
     /// Resolved realtime voice (identity override OR global fallback).
     pub realtime_voice: String,
+    /// Phase 54.7 Plan 15 (D-16): the identity's own TTS model (`None` = it
+    /// inherits the global block's model).
+    pub free_mode_model: Option<String>,
+    /// Phase 54.7 Plan 15 (D-16): the identity's own TTS format (`None` = it
+    /// inherits the global block's format).
+    pub free_mode_format: Option<String>,
+    /// Phase 54.7 Plan 15 (D-16): resolved realtime model (the identity's own
+    /// or the global `realtime.model()`).
+    pub realtime_model: String,
     /// Phase 40.5 gap-fix: saved orb appearance for this identity (`None` = no
     /// per-identity override stored; the client falls back to the
     /// ORB_PRESET_REGISTRY default for the slug). Lets the panel hydrate the
@@ -2112,7 +2680,12 @@ pub struct IdentityOverride {
 /// voice config fields returned by `get_voice_config`. Never contains raw
 /// `Config` — only fields the UI is allowed to display. Secret field VALUES
 /// are never included; `secret_fields_present` carries label names only.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+///
+/// Phase 54.7 Plan 06: `Default` + `#[serde(default)]` let a stale client
+/// tolerate fields added by a newer server. Key fields carry the reference
+/// NAME and a `found` / `not_found` / `none` status string -- never a value.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
 pub struct VoiceConfigSnapshot {
     // VAD / voice
     pub web_silence_threshold_rms: f32,
@@ -2150,13 +2723,235 @@ pub struct VoiceConfigSnapshot {
     /// Per-identity resolved overrides (global fallback applied for fields not set).
     /// Panel reads these to display the currently selected identity's voice settings.
     pub identity_overrides: Vec<IdentityOverride>,
+    // Phase 54.7 Plan 06 (D-01/D-02/D-03): `tts.openai_compatible`.
+    pub tts_compat_base_url: String,
+    /// Empty when unset (the default path applies).
+    pub tts_compat_path: String,
+    /// Reference NAME only; empty when unset.
+    pub tts_compat_key_ref: String,
+    pub tts_compat_model: String,
+    pub tts_compat_voice: String,
+    pub tts_compat_format: String,
+    /// `found` / `not_found` / `none` -- how the reference resolved, never the value.
+    pub tts_compat_key_status: String,
+    // Phase 54.7 Plan 06: `stt.openai_compatible`.
+    pub stt_compat_base_url: String,
+    /// Empty when unset (the default path applies).
+    pub stt_compat_path: String,
+    /// Reference NAME only; empty when unset.
+    pub stt_compat_key_ref: String,
+    pub stt_compat_model: String,
+    pub stt_compat_key_status: String,
+    // Phase 54.7 Plan 06 (D-09): per-provider TTS settings.
+    pub tts_openai_model: String,
+    pub tts_openai_voice: String,
+    pub tts_openai_format: String,
+    pub tts_elevenlabs_model: String,
+    pub tts_elevenlabs_voice: String,
+    // Phase 54.7 Plan 06 (D-13/D-15): voice family + the `realtime:` block,
+    // resolved through the legacy fold (the panel shows what the server uses).
+    /// Effective voice family: `realtime` | `turn_based`.
+    pub voice_service: String,
+    /// True while pre-54.7 realtime state is still on disk (offers the
+    /// one-way migration save).
+    pub legacy_voice_keys_present: bool,
+    /// Selectable interruption modes -- exactly `["push_to_interrupt"]` (the
+    /// only wired mode, Pitfall 10), so the Interruption row is not rendered.
+    pub barge_in_modes: Vec<String>,
+    pub realtime_provider: String,
+    pub realtime_base_url: String,
+    /// Reference NAME only; empty when unset.
+    pub realtime_key_ref: String,
+    pub realtime_model: String,
+    pub realtime_voice: String,
+    pub realtime_transcription_model: String,
+    pub realtime_key_status: String,
+    /// Phase 54.7 Plan 15 (D-16): TTS registry ids whose provider is registered
+    /// AND available on this server (Edge always; ElevenLabs / OpenAI with a
+    /// key in the environment; OpenAI-compatible with a saved Base URL). Ids
+    /// only -- no key value crosses to the browser. The identity Provider
+    /// select lists only these.
+    pub tts_providers_usable: Vec<String>,
+}
+
+/// The interruption modes the server accepts and the snapshot advertises.
+/// `open_mic` and `half_duplex` are not wired end to end (D-15, Pitfall 10).
+#[cfg(not(target_arch = "wasm32"))]
+const BARGE_IN_MODES: &[&str] = &["push_to_interrupt"];
+
+/// The voice families a payload may select.
+#[cfg(not(target_arch = "wasm32"))]
+const VOICE_SERVICES: &[&str] = &["realtime", "turn_based"];
+
+/// Phase 54.7 Plan 06 (D-02): how each configured key reference resolved.
+///
+/// Computed asynchronously (a vault read may be involved) and handed to the
+/// pure [`build_voice_snapshot`]. Values are the registry `KEY_STATUS_*`
+/// strings; no secret value is ever held here.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VoiceKeyStatuses {
+    pub tts_compat: &'static str,
+    pub stt_compat: &'static str,
+    pub realtime: &'static str,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for VoiceKeyStatuses {
+    fn default() -> Self {
+        use crate::voice_registry::KEY_STATUS_NONE;
+        Self {
+            tts_compat: KEY_STATUS_NONE,
+            stt_compat: KEY_STATUS_NONE,
+            realtime: KEY_STATUS_NONE,
+        }
+    }
+}
+
+/// Map a resolved key to the registry status string (value discarded).
+#[cfg(not(target_arch = "wasm32"))]
+fn key_status_str(key: &ironhermes_core::voice_http::VoiceKey) -> &'static str {
+    use crate::voice_registry::{KEY_STATUS_FOUND, KEY_STATUS_NONE, KEY_STATUS_NOT_FOUND};
+    use ironhermes_core::voice_http::VoiceKey;
+    match key {
+        VoiceKey::None => KEY_STATUS_NONE,
+        VoiceKey::NotFound => KEY_STATUS_NOT_FOUND,
+        VoiceKey::Found(_) => KEY_STATUS_FOUND,
+    }
+}
+
+/// Resolve every configured key reference to a status (D-02). Only the
+/// namespaced [`resolve_voice_key`](ironhermes_core::voice_http::resolve_voice_key)
+/// reads a reference; the secret value is dropped here.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn voice_key_statuses(
+    config: &ironhermes_core::config::Config,
+) -> VoiceKeyStatuses {
+    use ironhermes_core::voice_http::{resolve_voice_key, voice_vault_config};
+    let vault = voice_vault_config(config);
+    let tts_compat = resolve_voice_key(
+        config.tts.openai_compatible.api_key_ref.as_deref(),
+        vault.as_ref(),
+    )
+    .await;
+    let stt_compat = resolve_voice_key(
+        config.stt.openai_compatible.api_key_ref.as_deref(),
+        vault.as_ref(),
+    )
+    .await;
+    let realtime = resolve_realtime_key(config).await;
+    VoiceKeyStatuses {
+        tts_compat: key_status_str(&tts_compat),
+        stt_compat: key_status_str(&stt_compat),
+        realtime: key_status_str(&realtime),
+    }
+}
+
+/// Phase 54.7 Plan 06 (D-02, Pitfall 9, T-54.7-70): the ONE realtime key rule.
+///
+/// - A typed `realtime.api_key_ref` resolves through the namespaced
+///   `resolve_voice_key` (a `VOICE_KEY_*` env var or a `secret/voice/*` vault
+///   entry; anything else is `NotFound` before any read).
+/// - With no reference, the OpenAI provider key (`providers.openai.api_key_env`,
+///   else `OPENAI_API_KEY`) is used ONLY when `realtime.base_url` is the
+///   api.openai.com default -- the key never travels to a custom address.
+/// - With no reference and a custom `base_url`, there is no key.
+///
+/// The key status here, `test_realtime` (plan 07) and `mint_realtime_for`
+/// (plan 11) all call this, so the three can never disagree.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn resolve_realtime_key(
+    config: &ironhermes_core::config::Config,
+) -> ironhermes_core::voice_http::VoiceKey {
+    use ironhermes_core::voice_http::{
+        resolve_builtin_env_key, resolve_voice_key, voice_vault_config, VoiceKey,
+    };
+    let typed = config
+        .realtime
+        .api_key_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    if let Some(reference) = typed {
+        return resolve_voice_key(Some(reference), voice_vault_config(config).as_ref()).await;
+    }
+    if config.realtime.is_openai_default_base_url() {
+        let env_name = config
+            .providers
+            .get("openai")
+            .and_then(|p| p.api_key_env.as_deref())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or("OPENAI_API_KEY");
+        return resolve_builtin_env_key(env_name);
+    }
+    VoiceKey::None
+}
+
+/// Wire error for a rejected voice field: `voice_invalid:{field}:{code}`. The
+/// client maps `code` back to UI-SPEC copy with `FieldError::from_code`.
+#[cfg(not(target_arch = "wasm32"))]
+fn voice_invalid(field: &str, code: &str) -> ServerFnError {
+    ServerFnError::new(format!("voice_invalid:{field}:{code}"))
+}
+
+/// Run a registry validator over an optional payload string (trimmed).
+#[cfg(not(target_arch = "wasm32"))]
+fn check_voice_field(
+    field: &str,
+    value: &Option<String>,
+    rule: impl Fn(&str) -> Result<(), crate::voice_registry::FieldError>,
+) -> Result<(), ServerFnError> {
+    if let Some(v) = value {
+        rule(v.trim()).map_err(|e| voice_invalid(field, e.code()))?;
+    }
+    Ok(())
+}
+
+/// Phase 54.7 Plan 15 (D-16, T-54.7-64): refuse an identity-target payload that
+/// also sets a global field -- an endpoint, a key reference, STT, the voice
+/// service, VAD, wake word, anything not named `identity_*`. Derived from the
+/// payload's own serialization, so a global field added later is refused here
+/// without anyone remembering to list it. The wire code is
+/// `voice_invalid:{field}:identity_global_field`.
+#[cfg(not(target_arch = "wasm32"))]
+fn reject_global_fields_for_identity(payload: &VoiceWritePayload) -> Result<(), ServerFnError> {
+    // Fail closed: a payload that cannot be inspected is not accepted.
+    let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(payload) else {
+        return Err(voice_invalid("payload", "identity_global_field"));
+    };
+    match fields
+        .iter()
+        .find(|(name, value)| !name.starts_with("identity_") && !value.is_null())
+    {
+        Some((name, _)) => Err(voice_invalid(name, "identity_global_field")),
+        None => Ok(()),
+    }
+}
+
+/// Phase 54.7 Plan 15 (D-16): an identity format must be one the identity's
+/// provider lists in the registry (`voice_invalid:identity_tts_format:format`).
+#[cfg(not(target_arch = "wasm32"))]
+fn check_identity_format(format: &str, provider: &str) -> Result<(), ServerFnError> {
+    let listed = crate::voice_registry::tts_provider(provider)
+        .is_some_and(|spec| spec.formats.contains(&format.trim()));
+    if listed {
+        Ok(())
+    } else {
+        Err(voice_invalid("identity_tts_format", "format"))
+    }
 }
 
 /// Phase 36.17.10 Plan 01: Validate that numeric and string fields in the
 /// payload are within acceptable ranges before any config mutation.
 /// Ranges from UI-SPEC Surface 4.
 #[cfg(not(target_arch = "wasm32"))]
-fn validate_voice_payload(payload: &VoiceWritePayload) -> Result<(), ServerFnError> {
+pub(crate) fn validate_voice_payload(payload: &VoiceWritePayload) -> Result<(), ServerFnError> {
+    // Phase 54.7 Plan 15 (D-16, T-54.7-64): an identity-target save carries
+    // identity fields only. Checked first so no other rule can mask it.
+    if payload.identity_slug.is_some() {
+        reject_global_fields_for_identity(payload)?;
+    }
     if let Some(rms) = payload.web_silence_threshold_rms {
         if !(0.5..=50.0).contains(&rms) {
             return Err(ServerFnError::new(format!(
@@ -2171,14 +2966,131 @@ fn validate_voice_payload(payload: &VoiceWritePayload) -> Result<(), ServerFnErr
             )));
         }
     }
+    // Phase 54.7 (Pitfall 11): provider ids are checked against the shared
+    // registry -- an unknown provider string is rejected, never merged.
     if let Some(ref provider) = payload.stt_provider {
         if provider.len() > 64 {
             return Err(ServerFnError::new("stt_provider too long (max 64 chars)"));
+        }
+        if crate::voice_registry::stt_provider(provider).is_none() {
+            return Err(voice_invalid("stt_provider", "unknown_provider"));
         }
     }
     if let Some(ref provider) = payload.tts_provider {
         if provider.len() > 64 {
             return Err(ServerFnError::new("tts_provider too long (max 64 chars)"));
+        }
+        if crate::voice_registry::tts_provider(provider).is_none() {
+            return Err(voice_invalid("tts_provider", "unknown_provider"));
+        }
+    }
+    // Phase 54.7 (D-04): OpenAI-compatible TTS block -- the shared registry
+    // rules, byte for byte what the browser already showed.
+    {
+        use crate::voice_registry as vr;
+        check_voice_field("tts_compat_base_url", &payload.tts_compat_base_url, |v| {
+            vr::validate_base_url(v, false)
+        })?;
+        check_voice_field(
+            "tts_compat_path",
+            &payload.tts_compat_path,
+            vr::validate_endpoint_path,
+        )?;
+        check_voice_field(
+            "tts_compat_key_ref",
+            &payload.tts_compat_key_ref,
+            vr::validate_key_ref,
+        )?;
+        check_voice_field(
+            "tts_compat_model",
+            &payload.tts_compat_model,
+            vr::validate_model_id,
+        )?;
+        check_voice_field(
+            "tts_compat_voice",
+            &payload.tts_compat_voice,
+            vr::validate_voice_id,
+        )?;
+        // OpenAI-compatible STT block.
+        check_voice_field("stt_compat_base_url", &payload.stt_compat_base_url, |v| {
+            vr::validate_base_url(v, false)
+        })?;
+        check_voice_field(
+            "stt_compat_path",
+            &payload.stt_compat_path,
+            vr::validate_endpoint_path,
+        )?;
+        check_voice_field(
+            "stt_compat_key_ref",
+            &payload.stt_compat_key_ref,
+            vr::validate_key_ref,
+        )?;
+        check_voice_field(
+            "stt_compat_model",
+            &payload.stt_compat_model,
+            vr::validate_model_id,
+        )?;
+        // Per-provider TTS fields (D-09).
+        check_voice_field(
+            "tts_openai_model",
+            &payload.tts_openai_model,
+            vr::validate_model_id,
+        )?;
+        check_voice_field(
+            "tts_openai_voice",
+            &payload.tts_openai_voice,
+            vr::validate_voice_id,
+        )?;
+        check_voice_field(
+            "tts_elevenlabs_model",
+            &payload.tts_elevenlabs_model,
+            vr::validate_model_id,
+        )?;
+        check_voice_field(
+            "tts_elevenlabs_voice",
+            &payload.tts_elevenlabs_voice,
+            vr::validate_voice_id,
+        )?;
+        // Realtime block (D-13). An empty base_url means the OpenAI default.
+        if let Some(ref provider) = payload.realtime_provider {
+            if vr::realtime_provider(provider).is_none() {
+                return Err(voice_invalid("realtime_provider", "unknown_provider"));
+            }
+        }
+        check_voice_field("realtime_base_url", &payload.realtime_base_url, |v| {
+            vr::validate_base_url(v, false)
+        })?;
+        check_voice_field(
+            "realtime_key_ref",
+            &payload.realtime_key_ref,
+            vr::validate_key_ref,
+        )?;
+        check_voice_field(
+            "realtime_model",
+            &payload.realtime_model,
+            vr::validate_model_id,
+        )?;
+        check_voice_field(
+            "realtime_voice",
+            &payload.realtime_voice,
+            vr::validate_voice_id,
+        )?;
+        check_voice_field(
+            "realtime_transcription_model",
+            &payload.realtime_transcription_model,
+            vr::validate_transcription_model,
+        )?;
+    }
+    // Phase 54.7 (D-15): the voice family, and the interruption modes the
+    // snapshot advertises (`open_mic` is retired as a selectable value).
+    if let Some(ref service) = payload.voice_service {
+        if !VOICE_SERVICES.contains(&service.as_str()) {
+            return Err(voice_invalid("voice_service", "unknown_service"));
+        }
+    }
+    if let Some(ref mode) = payload.barge_in_mode {
+        if !BARGE_IN_MODES.contains(&mode.as_str()) {
+            return Err(voice_invalid("barge_in_mode", "unsupported_mode"));
         }
     }
     // Phase 40.5 Plan 03 (T-40.5-03-01/T-40.5-03-03/T-40.5-03-05):
@@ -2200,19 +3112,45 @@ fn validate_voice_payload(payload: &VoiceWritePayload) -> Result<(), ServerFnErr
                 "identity_slug '{slug}' is not a known identity"
             )));
         }
-        // T-40.5-03-03: voice id length cap (64 chars).
-        if let Some(ref voice) = payload.identity_tts_voice {
-            if voice.len() > 64 {
-                return Err(ServerFnError::new(
-                    "identity_tts_voice too long (max 64 chars)",
-                ));
+        // Phase 54.7 Plan 15 (D-16, T-54.7-66): identity provider / model /
+        // voice / format / realtime values go through the SAME registry rules
+        // as the global fields. This replaces the bare 64-char length caps
+        // (T-40.5-03-03): validate_voice_id keeps that limit and adds the
+        // charset.
+        {
+            use crate::voice_registry as vr;
+            if let Some(ref provider) = payload.identity_tts_provider {
+                if vr::tts_provider(provider).is_none() {
+                    return Err(voice_invalid("identity_tts_provider", "unknown_provider"));
+                }
             }
-        }
-        if let Some(ref voice) = payload.identity_realtime_voice {
-            if voice.len() > 64 {
-                return Err(ServerFnError::new(
-                    "identity_realtime_voice too long (max 64 chars)",
-                ));
+            check_voice_field(
+                "identity_tts_model",
+                &payload.identity_tts_model,
+                vr::validate_model_id,
+            )?;
+            check_voice_field(
+                "identity_tts_voice",
+                &payload.identity_tts_voice,
+                vr::validate_voice_id,
+            )?;
+            check_voice_field(
+                "identity_realtime_voice",
+                &payload.identity_realtime_voice,
+                vr::validate_voice_id,
+            )?;
+            check_voice_field(
+                "identity_realtime_model",
+                &payload.identity_realtime_model,
+                vr::validate_model_id,
+            )?;
+            // The format belongs to the provider the identity ends up on; when
+            // the payload names it, check here, otherwise validate_merged_voice
+            // checks against the stored one.
+            if let (Some(format), Some(provider)) =
+                (&payload.identity_tts_format, &payload.identity_tts_provider)
+            {
+                check_identity_format(format, provider)?;
             }
         }
         // T-40.5-03-05: appearance field range checks.
@@ -2255,7 +3193,10 @@ fn validate_voice_payload(payload: &VoiceWritePayload) -> Result<(), ServerFnErr
 /// Maps: tts_edge_voice → config.tts.edge.voice, tts_edge_format →
 /// config.tts.edge.output_format (TtsConfig has no top-level voice/format).
 #[cfg(not(target_arch = "wasm32"))]
-fn merge_voice_payload(config: &mut ironhermes_core::config::Config, payload: &VoiceWritePayload) {
+pub(crate) fn merge_voice_payload(
+    config: &mut ironhermes_core::config::Config,
+    payload: &VoiceWritePayload,
+) {
     if let Some(v) = payload.web_silence_threshold_rms {
         config.voice.web_silence_threshold_rms = v;
     }
@@ -2287,18 +3228,127 @@ fn merge_voice_payload(config: &mut ironhermes_core::config::Config, payload: &V
     if let Some(ref v) = payload.tts_edge_format {
         config.tts.edge.output_format = v.clone();
     }
+    // Phase 54.7 Plan 06 (D-01/D-03): `tts.openai_compatible`. `path` and
+    // `key_ref` are optional, so an empty string clears them back to None.
+    {
+        let oc = &mut config.tts.openai_compatible;
+        if let Some(ref v) = payload.tts_compat_base_url {
+            oc.base_url = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.tts_compat_path {
+            oc.path = non_empty_trimmed(v);
+        }
+        if let Some(ref v) = payload.tts_compat_key_ref {
+            oc.api_key_ref = non_empty_trimmed(v);
+        }
+        if let Some(ref v) = payload.tts_compat_model {
+            oc.model = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.tts_compat_voice {
+            oc.voice = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.tts_compat_format {
+            oc.format = v.trim().to_string();
+        }
+    }
+    // Phase 54.7 Plan 06 (D-01/D-03): `stt.openai_compatible`.
+    {
+        let oc = &mut config.stt.openai_compatible;
+        if let Some(ref v) = payload.stt_compat_base_url {
+            oc.base_url = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.stt_compat_path {
+            oc.path = non_empty_trimmed(v);
+        }
+        if let Some(ref v) = payload.stt_compat_key_ref {
+            oc.api_key_ref = non_empty_trimmed(v);
+        }
+        if let Some(ref v) = payload.stt_compat_model {
+            oc.model = v.trim().to_string();
+        }
+    }
+    // Phase 54.7 Plan 06 (D-09): per-provider TTS blocks, never crossed.
+    {
+        let openai = &mut config.tts.openai;
+        if let Some(ref v) = payload.tts_openai_model {
+            openai.model = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.tts_openai_voice {
+            openai.voice = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.tts_openai_format {
+            openai.format = v.trim().to_string();
+        }
+        let eleven = &mut config.tts.elevenlabs;
+        if let Some(ref v) = payload.tts_elevenlabs_model {
+            eleven.model_id = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.tts_elevenlabs_voice {
+            eleven.voice_id = v.trim().to_string();
+        }
+    }
     if let Some(v) = payload.auto_tts {
         config.voice.auto_tts = v;
     }
     // Phase 36.17.12 Plan 01 (T-36.17.12-01-01): Parse barge_in_mode string into
     // BargeInMode enum via serde round-trip. Unknown/garbage strings are silently
     // ignored (no assignment, no error) — only valid snake_case variants reach config.
+    // Phase 54.7 (D-15): only a mode the snapshot advertises is written; open_mic
+    // is never mapped back into the config.
     if let Some(ref v) = payload.barge_in_mode {
-        use ironhermes_core::config::BargeInMode;
-        let parsed: Result<BargeInMode, _> =
+        if BARGE_IN_MODES.contains(&v.as_str()) {
+            use ironhermes_core::config::BargeInMode;
+            let parsed: Result<BargeInMode, _> =
+                serde_json::from_value(serde_json::Value::String(v.clone()));
+            if let Ok(mode) = parsed {
+                config.voice.barge_in_mode = mode;
+            }
+        }
+    }
+    // Phase 54.7 Plan 06 (D-13): the top-level `realtime:` block. An empty
+    // base_url stores the OpenAI default; an empty optional field clears it.
+    {
+        let rt = &mut config.realtime;
+        if let Some(ref v) = payload.realtime_provider {
+            rt.provider = v.trim().to_string();
+        }
+        if let Some(ref v) = payload.realtime_base_url {
+            let t = v.trim();
+            rt.base_url = if t.is_empty() {
+                ironhermes_core::config::REALTIME_DEFAULT_BASE_URL.to_string()
+            } else {
+                t.to_string()
+            };
+        }
+        if let Some(ref v) = payload.realtime_key_ref {
+            rt.api_key_ref = non_empty_trimmed(v);
+        }
+        if let Some(ref v) = payload.realtime_model {
+            rt.model = non_empty_trimmed(v);
+        }
+        if let Some(ref v) = payload.realtime_voice {
+            rt.voice = non_empty_trimmed(v);
+        }
+        if let Some(ref v) = payload.realtime_transcription_model {
+            rt.transcription_model = non_empty_trimmed(v);
+        }
+    }
+    // Phase 54.7 Plan 06 (D-13/D-15, one-way): selecting the voice family also
+    // retires the legacy state -- the three `voice.realtime_*` keys are cleared
+    // (their values already live in `realtime:` through the load-time fold) and a
+    // legacy `open_mic` becomes `push_to_interrupt`.
+    if let Some(ref v) = payload.voice_service {
+        use ironhermes_core::config::{BargeInMode, VoiceService};
+        let parsed: Result<VoiceService, _> =
             serde_json::from_value(serde_json::Value::String(v.clone()));
-        if let Ok(mode) = parsed {
-            config.voice.barge_in_mode = mode;
+        if let Ok(service) = parsed {
+            config.voice.service = Some(service);
+            config.voice.realtime_model = None;
+            config.voice.realtime_voice = None;
+            config.voice.realtime_transcription_model = None;
+            if config.voice.barge_in_mode == BargeInMode::OpenMic {
+                config.voice.barge_in_mode = BargeInMode::PushToInterrupt;
+            }
         }
     }
     if let Some(v) = payload.wake_word_enabled {
@@ -2315,14 +3365,27 @@ fn merge_voice_payload(config: &mut ironhermes_core::config::Config, payload: &V
         use ironhermes_core::config::{IdentityAppearance, IdentityRecord};
         let rec: &mut IdentityRecord = config.identities.entry(slug.clone()).or_default();
         // Write voice fields when Some.
+        // WR-11: validation runs on the TRIMMED value, so the stored value must be
+        // trimmed too -- a padded id would pass the save gate and then fail the
+        // realtime gate (or reach the provider verbatim) at use time.
         if let Some(ref v) = payload.identity_tts_provider {
-            rec.voice.free_mode_tts_provider = Some(v.clone());
+            rec.voice.free_mode_tts_provider = Some(v.trim().to_string());
         }
         if let Some(ref v) = payload.identity_tts_voice {
-            rec.voice.free_mode_tts_voice = Some(v.clone());
+            rec.voice.free_mode_tts_voice = Some(v.trim().to_string());
         }
         if let Some(ref v) = payload.identity_realtime_voice {
-            rec.voice.realtime_voice = Some(v.clone());
+            rec.voice.realtime_voice = Some(v.trim().to_string());
+        }
+        // Phase 54.7 Plan 15 (D-16): model and format ride the same record.
+        if let Some(ref v) = payload.identity_tts_model {
+            rec.voice.free_mode_tts_model = Some(v.trim().to_string());
+        }
+        if let Some(ref v) = payload.identity_tts_format {
+            rec.voice.free_mode_tts_format = Some(v.trim().to_string());
+        }
+        if let Some(ref v) = payload.identity_realtime_model {
+            rec.voice.realtime_model = Some(v.trim().to_string());
         }
         // D-17: write appearance fields when any appearance field is Some.
         let has_appearance = payload.identity_appearance_style.is_some()
@@ -2349,15 +3412,151 @@ fn merge_voice_payload(config: &mut ironhermes_core::config::Config, payload: &V
     }
 }
 
+/// `Some(trimmed)` for a non-empty value, `None` for an empty one (the
+/// "empty clears the optional field" rule).
+#[cfg(not(target_arch = "wasm32"))]
+fn non_empty_trimmed(v: &str) -> Option<String> {
+    let t = v.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Phase 54.7 Plan 06 (T-54.7-71): reject a CHANGED format the provider's
+/// registry does not list. A value equal to what is already stored passes
+/// unchecked, so a hand-typed legacy format (an Edge
+/// `audio-24khz-48kbitrate-mono-mp3`, an OpenAI `flac`) can never make an
+/// unrelated save fail -- the panel echoes stored values on every save.
+#[cfg(not(target_arch = "wasm32"))]
+fn check_format_change(
+    field: &str,
+    incoming: &str,
+    stored_value: &str,
+    provider: &str,
+) -> Result<(), ServerFnError> {
+    let v = incoming.trim();
+    if v == stored_value.trim() {
+        return Ok(());
+    }
+    let listed = crate::voice_registry::tts_provider(provider)
+        .map(|spec| spec.formats.contains(&v))
+        .unwrap_or(false);
+    if listed {
+        Ok(())
+    } else {
+        Err(voice_invalid(field, "format"))
+    }
+}
+
+/// Apply `check_format_change` to every format field a save payload carries.
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_format_changes(
+    stored: &ironhermes_core::config::Config,
+    payload: &VoiceWritePayload,
+) -> Result<(), ServerFnError> {
+    let check = |field: &str,
+                 incoming: &Option<String>,
+                 stored_value: &str,
+                 provider: &str|
+     -> Result<(), ServerFnError> {
+        match incoming {
+            Some(v) => check_format_change(field, v, stored_value, provider),
+            None => Ok(()),
+        }
+    };
+    check(
+        "tts_compat_format",
+        &payload.tts_compat_format,
+        &stored.tts.openai_compatible.format,
+        "openai_compatible",
+    )?;
+    check(
+        "tts_openai_format",
+        &payload.tts_openai_format,
+        &stored.tts.openai.format,
+        "openai",
+    )?;
+    // Edge stores a provider-native string the provider ignores (RESEARCH
+    // Pitfall 6); the panel echoes it back, so only a changed value is checked.
+    check(
+        "tts_edge_format",
+        &payload.tts_edge_format,
+        &stored.tts.edge.output_format,
+        "edge",
+    )
+}
+
+/// Phase 54.7 Plan 06 / 15: post-merge cross-field rules. A provider that
+/// needs an address cannot be selected with an empty one, and (plan 15, D-16)
+/// the identity a save WRITES must end up on a provider this server has
+/// configured and a format that provider lists.
+///
+/// The identity rules are scoped (plan-checker issue): they run only for the
+/// identity named by `payload.identity_slug`, and the provider-usability rule
+/// only when that same payload SETS `identity_tts_provider`. A global save, a
+/// realtime-only identity save and every other identity -- including the
+/// seeded elevenlabs personas on a Kokoro-only server -- are never judged.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn validate_merged_voice(
+    config: &ironhermes_core::config::Config,
+    payload: &VoiceWritePayload,
+) -> Result<(), ServerFnError> {
+    if let Some(slug) = payload.identity_slug.as_deref() {
+        let record_provider = config
+            .identities
+            .get(slug)
+            .and_then(|r| r.voice.free_mode_tts_provider.as_deref());
+        if payload.identity_tts_provider.is_some() {
+            if let Some(provider) = record_provider {
+                // The same set the snapshot advertises as `tts_providers_usable`.
+                if !usable_tts_providers(config).iter().any(|id| id == provider) {
+                    return Err(voice_invalid("identity_tts_provider", "provider_unusable"));
+                }
+            }
+        }
+        if let Some(format) = payload.identity_tts_format.as_deref() {
+            // The provider the identity ends up on: its own, else the global one.
+            check_identity_format(format, record_provider.unwrap_or(&config.tts.provider))?;
+        }
+    }
+    if config.tts.provider == "openai_compatible"
+        && config.tts.openai_compatible.base_url.trim().is_empty()
+    {
+        return Err(voice_invalid("tts_compat_base_url", "base_url_empty"));
+    }
+    if config.stt.provider == "openai_compatible"
+        && config.stt.openai_compatible.base_url.trim().is_empty()
+    {
+        return Err(voice_invalid("stt_compat_base_url", "base_url_empty"));
+    }
+    Ok(())
+}
+
+/// Phase 54.7 Plan 06: the whole payload-to-config step. Ordered so that a
+/// format rule sees the STORED values, the merge sees a validated payload, and
+/// the cross-field rules see the merged result. `update_voice_config`, plan
+/// 08's panel-payload save test and plan 10's D-18 harness all drive this.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn apply_voice_payload(
+    config: &mut ironhermes_core::config::Config,
+    payload: &VoiceWritePayload,
+) -> Result<(), ServerFnError> {
+    validate_format_changes(config, payload)?;
+    merge_voice_payload(config, payload);
+    validate_merged_voice(config, payload)
+}
+
 /// Phase 36.17.10 Plan 01 (T-36.17.10-01-02, T-36.17.10-01-04): Build a
 /// VoiceConfigSnapshot from a freshly loaded Config. Secret field values are
 /// never included — only their presence is noted by label name.
 #[cfg(not(target_arch = "wasm32"))]
-fn build_voice_snapshot(config: &ironhermes_core::config::Config) -> VoiceConfigSnapshot {
+pub(crate) fn build_voice_snapshot(
+    config: &ironhermes_core::config::Config,
+    keys: &VoiceKeyStatuses,
+) -> VoiceConfigSnapshot {
     // Determine the active STT model for display (derived from provider selection).
     let stt_model = match config.stt.provider.as_str() {
         "groq" => config.stt.groq.model.clone(),
         "openai" => config.stt.openai.model.clone(),
+        "openai_compatible" => config.stt.openai_compatible.model.clone(),
         _ => config.stt.groq.model.clone(), // "auto": default to groq model for display
     };
 
@@ -2395,7 +3594,8 @@ fn build_voice_snapshot(config: &ironhermes_core::config::Config) -> VoiceConfig
     // Build identity_overrides: for each known identity resolve the effective
     // voice settings (identity override OR global fallback) without exposing secrets.
     let global_tts_provider = config.tts.provider.clone();
-    let global_realtime_voice = config.voice.realtime_voice.clone();
+    let global_realtime_voice = config.realtime.voice().to_string();
+    let global_realtime_model = config.realtime.model().to_string();
     let identity_overrides: Vec<IdentityOverride> = identity_list
         .iter()
         .map(|(slug, _)| {
@@ -2411,11 +3611,22 @@ fn build_voice_snapshot(config: &ironhermes_core::config::Config) -> VoiceConfig
                 .identities
                 .get(slug.as_str())
                 .and_then(|r| r.appearance.clone());
+            // Phase 54.7 Plan 15 (D-16): the identity's own model / format and
+            // the resolved realtime model.
+            let record_voice = config.identities.get(slug.as_str()).map(|r| &r.voice);
+            let free_mode_model = record_voice.and_then(|v| v.free_mode_tts_model.clone());
+            let free_mode_format = record_voice.and_then(|v| v.free_mode_tts_format.clone());
+            let realtime_model = record_voice
+                .and_then(|v| v.realtime_model.clone())
+                .unwrap_or_else(|| global_realtime_model.clone());
             IdentityOverride {
                 slug: slug.clone(),
                 free_mode_provider: provider,
                 free_mode_voice: voice,
+                free_mode_model,
+                free_mode_format,
                 realtime_voice: realtime,
+                realtime_model,
                 appearance_style: appearance.as_ref().and_then(|a| a.style.clone()),
                 appearance_base_hue: appearance.as_ref().and_then(|a| a.base_hue),
                 appearance_size: appearance.as_ref().and_then(|a| a.size),
@@ -2451,7 +3662,129 @@ fn build_voice_snapshot(config: &ironhermes_core::config::Config) -> VoiceConfig
         secret_fields_present,
         identity_list,
         identity_overrides,
+        tts_compat_base_url: config.tts.openai_compatible.base_url.clone(),
+        tts_compat_path: config
+            .tts
+            .openai_compatible
+            .path
+            .clone()
+            .unwrap_or_default(),
+        tts_compat_key_ref: config
+            .tts
+            .openai_compatible
+            .api_key_ref
+            .clone()
+            .unwrap_or_default(),
+        tts_compat_model: config.tts.openai_compatible.model.clone(),
+        tts_compat_voice: config.tts.openai_compatible.voice.clone(),
+        tts_compat_format: config.tts.openai_compatible.format.clone(),
+        tts_compat_key_status: keys.tts_compat.to_string(),
+        stt_compat_base_url: config.stt.openai_compatible.base_url.clone(),
+        stt_compat_path: config
+            .stt
+            .openai_compatible
+            .path
+            .clone()
+            .unwrap_or_default(),
+        stt_compat_key_ref: config
+            .stt
+            .openai_compatible
+            .api_key_ref
+            .clone()
+            .unwrap_or_default(),
+        stt_compat_model: config.stt.openai_compatible.model.clone(),
+        stt_compat_key_status: keys.stt_compat.to_string(),
+        tts_openai_model: config.tts.openai.model.clone(),
+        tts_openai_voice: config.tts.openai.voice.clone(),
+        tts_openai_format: config.tts.openai.format.clone(),
+        tts_elevenlabs_model: config.tts.elevenlabs.model_id.clone(),
+        tts_elevenlabs_voice: config.tts.elevenlabs.voice_id.clone(),
+        voice_service: config.voice.effective_service().as_str().to_string(),
+        legacy_voice_keys_present: config.voice.legacy_realtime_keys_present(),
+        barge_in_modes: BARGE_IN_MODES.iter().map(|m| (*m).to_string()).collect(),
+        realtime_provider: config.realtime.provider.clone(),
+        realtime_base_url: config.realtime.base_url.clone(),
+        realtime_key_ref: config.realtime.api_key_ref.clone().unwrap_or_default(),
+        realtime_model: config.realtime.model().to_string(),
+        realtime_voice: config.realtime.voice().to_string(),
+        realtime_transcription_model: config.realtime.transcription_model().to_string(),
+        realtime_key_status: keys.realtime.to_string(),
+        tts_providers_usable: usable_tts_providers(config),
     }
+}
+
+/// Phase 54.7 Plan 15 (D-16): the TTS registry ids a server can actually use
+/// right now -- registered AND `is_available()` (Edge always, ElevenLabs /
+/// OpenAI when their key is in the environment, OpenAI-compatible when a Base
+/// URL is saved). Registry order. Both the snapshot and the identity
+/// usability rule in [`validate_merged_voice`] call this, so what the panel
+/// lists and what the server accepts can never disagree. Ids only: no key
+/// value leaves this function.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn usable_tts_providers(config: &ironhermes_core::config::Config) -> Vec<String> {
+    let registry = ironhermes_tools::tts::build_tts_registry(&config.tts);
+    crate::voice_registry::TTS_PROVIDERS
+        .iter()
+        .filter(|spec| registry.get(spec.id).is_some_and(|p| p.is_available()))
+        .map(|spec| spec.id.to_string())
+        .collect()
+}
+
+/// WR-12: `payload` without the provider / model / voice fields that merely echo
+/// what `stored` already holds (compared trimmed). The panel sends all providers'
+/// values on every save; judging an unchanged, hidden value would reject the save
+/// with an error naming a field the user cannot see. Changed values are kept and
+/// validated in full, so this never lets a NEW bad value through. Identity-target
+/// payloads are returned untouched (their fields are always user-edited).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn drop_unchanged_choice_fields(
+    stored: &ironhermes_core::config::Config,
+    payload: &VoiceWritePayload,
+) -> VoiceWritePayload {
+    let mut out = payload.clone();
+    if payload.identity_slug.is_some() {
+        return out;
+    }
+    // `stored` lists every spelling of the current value (raw and effective).
+    fn drop_if_same(field: &mut Option<String>, stored: &[&str]) {
+        if field
+            .as_deref()
+            .is_some_and(|v| stored.iter().any(|s| s.trim() == v.trim()))
+        {
+            *field = None;
+        }
+    }
+    let tts = &stored.tts;
+    let rt = &stored.realtime;
+    drop_if_same(&mut out.stt_provider, &[&stored.stt.provider]);
+    drop_if_same(&mut out.tts_provider, &[&tts.provider]);
+    drop_if_same(&mut out.tts_compat_model, &[&tts.openai_compatible.model]);
+    drop_if_same(&mut out.tts_compat_voice, &[&tts.openai_compatible.voice]);
+    drop_if_same(
+        &mut out.stt_compat_model,
+        &[&stored.stt.openai_compatible.model],
+    );
+    drop_if_same(&mut out.tts_openai_model, &[&tts.openai.model]);
+    drop_if_same(&mut out.tts_openai_voice, &[&tts.openai.voice]);
+    drop_if_same(&mut out.tts_elevenlabs_model, &[&tts.elevenlabs.model_id]);
+    drop_if_same(&mut out.tts_elevenlabs_voice, &[&tts.elevenlabs.voice_id]);
+    drop_if_same(&mut out.realtime_provider, &[&rt.provider]);
+    drop_if_same(
+        &mut out.realtime_model,
+        &[rt.model.as_deref().unwrap_or(""), rt.model()],
+    );
+    drop_if_same(
+        &mut out.realtime_voice,
+        &[rt.voice.as_deref().unwrap_or(""), rt.voice()],
+    );
+    drop_if_same(
+        &mut out.realtime_transcription_model,
+        &[
+            rt.transcription_model.as_deref().unwrap_or(""),
+            rt.transcription_model(),
+        ],
+    );
+    out
 }
 
 /// Phase 36.17.10 Plan 01: Write voice settings from the browser to config.yaml.
@@ -2466,20 +3799,29 @@ fn build_voice_snapshot(config: &ironhermes_core::config::Config) -> VoiceConfig
 /// so they are never touched during the merge step (T-36.17.10-01-01).
 #[server]
 pub async fn update_voice_config(payload: VoiceWritePayload) -> Result<(), ServerFnError> {
-    // Step 1: validate
-    validate_voice_payload(&payload)?;
+    // RR-05 (WR-06): serialise the root load-modify-save; no `.await` below.
+    let _root_write = crate::server::profile_activation_api::lock_root_config_write();
 
-    // Step 2: fresh disk read (NOT app_state.config — that is the startup snapshot)
+    // Step 1: fresh disk read (NOT app_state.config — that is the startup snapshot)
     let mut config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+
+    // Step 2: validate. WR-12: the panel sends every provider's model/voice on
+    // every save, so a stray value already on disk for an UNSELECTED provider
+    // (hand-edited, or from before the charset gate) must not block the save with
+    // an error on a hidden field. A field that merely echoes its stored value is
+    // not a change and is not re-judged; any changed value is fully validated.
+    let payload = drop_unchanged_choice_fields(&config, &payload);
+    validate_voice_payload(&payload)?;
 
     // Step 3: gate — web config write is disabled unless operator opts in
     if !config.security.web_config_write_enabled {
         return Err(ServerFnError::new("Config writes are disabled"));
     }
 
-    // Step 4: merge web-safe fields, then atomic save
-    merge_voice_payload(&mut config, &payload);
+    // Step 4: format rule -> merge -> cross-field rule, then atomic save
+    // (Phase 54.7 Plan 06: apply_voice_payload is the one path tests drive).
+    apply_voice_payload(&mut config, &payload)?;
     config
         .save()
         .map_err(|e| ServerFnError::new(format!("Config save failed: {e}")))?;
@@ -2495,11 +3837,12 @@ pub async fn update_voice_config(payload: VoiceWritePayload) -> Result<(), Serve
 pub async fn get_voice_config() -> Result<VoiceConfigSnapshot, ServerFnError> {
     let config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
-    Ok(build_voice_snapshot(&config))
+    let keys = voice_key_statuses(&config).await;
+    Ok(build_voice_snapshot(&config, &keys))
 }
 
 /// Phase 41.2 Plan 02 (D-06): the base64-audio return contract for
-/// `synth_voice_sample`, consumed by Plan 04's `TestVoiceButton` client.
+/// `synth_voice_test`, consumed by the shared `TestVoiceButton` client.
 /// Same base64-in-JSON transport `attach_file` uses (kanban_api.rs:807),
 /// mirrored in the encode direction.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
@@ -2508,88 +3851,334 @@ pub struct VoiceSampleAudio {
     pub mime: String,
 }
 
-/// Phase 41.2 Plan 02 (D-06): audition a short TTS sample for `identity_slug`'s
-/// currently-configured free-mode voice. This is the "Test voice" server seam —
-/// it reuses `auto_speak_reply`'s exact synth pipeline (ws.rs:2229-2309:
-/// `is_known_identity` gate -> `Config::load()` -> `effective_tts_config_for_identity`
-/// -> `build_tts_registry` -> `provider.synthesize`) but returns the resulting
-/// bytes as the fn's value instead of dispatching a WS `AudioOut` frame — a
-/// `#[server]` fn cannot push a WS frame back to the browser.
+/// Phase 54.7 Plan 16 (D-17): the UNSAVED TTS form values a Test voice button
+/// auditions. Every field is optional text; there is deliberately NO text/input
+/// field -- the server always synthesizes the fixed `SAMPLE_TEXT`, so the
+/// button can never be used to drive arbitrary TTS spend. Compiled on both
+/// targets (the client builds it from the form).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct TtsTestSettings {
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub path: Option<String>,
+    pub key_ref: Option<String>,
+    pub model: Option<String>,
+    pub voice: Option<String>,
+    pub format: Option<String>,
+}
+
+/// D-06 discretion: the fixed short audition phrase. No client-supplied text
+/// param exists on any Test-voice server fn (excessive-TTS-spend DoS closed).
+#[cfg(not(target_arch = "wasm32"))]
+const SAMPLE_TEXT: &str = "This is how I sound.";
+
+/// The audio read cap: a misbehaving TTS server cannot make the web server
+/// buffer and base64 an unbounded file.
+#[cfg(not(target_arch = "wasm32"))]
+const SAMPLE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Phase 54.7 Plan 16 (D-17): the TTS config a Test voice request synthesizes
+/// with. `slug` selects the Global target (`None`) or a known identity;
+/// `settings` (the unsaved form values) apply only when `write_enabled` -- on
+/// a read-only install they are ignored so Test voice cannot be pointed at an
+/// arbitrary address (T-54.7-27).
+#[cfg(not(target_arch = "wasm32"))]
+fn tts_config_for_test(
+    config: &ironhermes_core::config::Config,
+    slug: Option<&str>,
+    settings: Option<&TtsTestSettings>,
+    write_enabled: bool,
+) -> Result<ironhermes_core::config::TtsConfig, ServerFnError> {
+    // Reject an unknown/tampered slug before it can drive provider/config
+    // resolution at all.
+    let mut effective = match slug {
+        Some(slug) => {
+            if !crate::components::hermes_app::avatar_logic::is_known_identity(slug) {
+                return Err(ServerFnError::new("unknown identity"));
+            }
+            config.effective_tts_config_for_identity(Some(slug))
+        }
+        None => config.tts.clone(),
+    };
+    if write_enabled {
+        if let Some(settings) = settings {
+            // Validate BEFORE applying: the same rules and wire codes as a save.
+            validate_tts_test_settings(&effective, &config.tts, settings)?;
+            apply_tts_test_settings(&mut effective, settings);
+        }
+    }
+    Ok(effective)
+}
+
+/// The save-path rules (plan 06), run over the unsaved form values. `effective`
+/// is the config the values apply onto; `saved` is the stored global block, so
+/// a format that equals either one passes (legacy-safe rule, T-54.7-71).
+/// Fields the selected provider does not use are ignored by the apply step and
+/// are not validated.
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_tts_test_settings(
+    effective: &ironhermes_core::config::TtsConfig,
+    saved: &ironhermes_core::config::TtsConfig,
+    settings: &TtsTestSettings,
+) -> Result<(), ServerFnError> {
+    use crate::voice_registry as vr;
+
+    let provider = match settings.provider.as_deref().map(str::trim) {
+        Some(p) => {
+            if vr::tts_provider(p).is_none() {
+                return Err(voice_invalid("tts_provider", "unknown_provider"));
+            }
+            p.to_string()
+        }
+        None => effective.provider.clone(),
+    };
+    // A changed format must be a registry format; one equal to the stored (or
+    // effective) value passes so a hand-typed legacy value never blocks a test.
+    let format = |field: &str, eff: &str, stored: &str| -> Result<(), ServerFnError> {
+        match settings.format.as_deref() {
+            Some(v) if v.trim() != stored.trim() => check_format_change(field, v, eff, &provider),
+            _ => Ok(()),
+        }
+    };
+    match provider.as_str() {
+        "openai_compatible" => {
+            check_voice_field("tts_compat_base_url", &settings.base_url, |v| {
+                vr::validate_base_url(v, false)
+            })?;
+            check_voice_field(
+                "tts_compat_path",
+                &settings.path,
+                vr::validate_endpoint_path,
+            )?;
+            check_voice_field(
+                "tts_compat_key_ref",
+                &settings.key_ref,
+                vr::validate_key_ref,
+            )?;
+            check_voice_field("tts_compat_model", &settings.model, vr::validate_model_id)?;
+            check_voice_field("tts_compat_voice", &settings.voice, vr::validate_voice_id)?;
+            format(
+                "tts_compat_format",
+                &effective.openai_compatible.format,
+                &saved.openai_compatible.format,
+            )?;
+            // An openai_compatible provider needs an address.
+            let base_url = settings
+                .base_url
+                .as_deref()
+                .unwrap_or(&effective.openai_compatible.base_url);
+            vr::validate_base_url(base_url, true)
+                .map_err(|e| voice_invalid("tts_compat_base_url", e.code()))?;
+        }
+        "openai" => {
+            check_voice_field("tts_openai_model", &settings.model, vr::validate_model_id)?;
+            check_voice_field("tts_openai_voice", &settings.voice, vr::validate_voice_id)?;
+            format(
+                "tts_openai_format",
+                &effective.openai.format,
+                &saved.openai.format,
+            )?;
+        }
+        "elevenlabs" => {
+            check_voice_field(
+                "tts_elevenlabs_model",
+                &settings.model,
+                vr::validate_model_id,
+            )?;
+            check_voice_field(
+                "tts_elevenlabs_voice",
+                &settings.voice,
+                vr::validate_voice_id,
+            )?;
+        }
+        "edge" => {
+            format(
+                "tts_edge_format",
+                &effective.edge.output_format,
+                &saved.edge.output_format,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Apply the form values onto the block the provider id selects. A `None`
+/// field leaves the block's value alone; `path` and `key_ref` are optional in
+/// the config, so an empty string clears them.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_tts_test_settings(
+    effective: &mut ironhermes_core::config::TtsConfig,
+    settings: &TtsTestSettings,
+) {
+    let trimmed = |v: &Option<String>| v.as_deref().map(|s| s.trim().to_string());
+    if let Some(provider) = trimmed(&settings.provider) {
+        effective.provider = provider;
+    }
+    let (model, voice, format) = (
+        trimmed(&settings.model),
+        trimmed(&settings.voice),
+        trimmed(&settings.format),
+    );
+    match effective.provider.as_str() {
+        "openai_compatible" => {
+            let oc = &mut effective.openai_compatible;
+            if let Some(v) = trimmed(&settings.base_url) {
+                oc.base_url = v;
+            }
+            if let Some(v) = &settings.path {
+                oc.path = non_empty_trimmed(v);
+            }
+            if let Some(v) = &settings.key_ref {
+                oc.api_key_ref = non_empty_trimmed(v);
+            }
+            if let Some(v) = model {
+                oc.model = v;
+            }
+            if let Some(v) = voice {
+                oc.voice = v;
+            }
+            if let Some(v) = format {
+                oc.format = v;
+            }
+        }
+        "openai" => {
+            let o = &mut effective.openai;
+            if let Some(v) = model {
+                o.model = v;
+            }
+            if let Some(v) = voice {
+                o.voice = v;
+            }
+            if let Some(v) = format {
+                o.format = v;
+            }
+        }
+        "elevenlabs" => {
+            let e = &mut effective.elevenlabs;
+            if let Some(v) = model {
+                e.model_id = v;
+            }
+            if let Some(v) = voice {
+                e.voice_id = v;
+            }
+        }
+        "edge" => {
+            let e = &mut effective.edge;
+            if let Some(v) = voice {
+                e.voice = v;
+            }
+            if let Some(v) = format {
+                e.output_format = v;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Map a provider failure to the wire contract `voice_test:{category}`. The
+/// category is from the fixed `VoiceErrorCategory` vocabulary; the error text,
+/// URL, key and response body never cross the boundary.
+#[cfg(not(target_arch = "wasm32"))]
+fn voice_test_error(err: &anyhow::Error) -> ServerFnError {
+    let category = err
+        .downcast_ref::<ironhermes_core::voice_http::VoiceHttpError>()
+        .map(|e| e.category.as_str())
+        .unwrap_or("unexpected response");
+    ServerFnError::new(format!("voice_test:{category}"))
+}
+
+/// Phase 54.7 Plan 16: the Test-voice synth pipeline, shared by
+/// `synth_voice_test` (plan 15 deleted the legacy `synth_voice_sample`
+/// wrapper; the identity Test voice calls `synth_voice_test`). Builds the
+/// registry through the vault-aware builder (so a namespaced `secret/voice/*`
+/// reference resolves), names the file with `audio_format::extension_for` and
+/// types the result with `audio_format::mime_for_path`. Never writes config.
+#[cfg(not(target_arch = "wasm32"))]
+async fn synth_voice_sample_impl(
+    config: &ironhermes_core::config::Config,
+    slug: Option<&str>,
+    settings: Option<&TtsTestSettings>,
+    audio_dir: &std::path::Path,
+) -> Result<VoiceSampleAudio, ServerFnError> {
+    use ironhermes_tools::tts::audio_format;
+
+    let effective = tts_config_for_test(
+        config,
+        slug,
+        settings,
+        config.security.web_config_write_enabled,
+    )?;
+    let registry = ironhermes_tools::tts::build_tts_registry_with_vault(
+        &effective,
+        ironhermes_core::voice_http::voice_vault_config(config),
+    );
+    let provider = registry
+        .get(&effective.provider)
+        .ok_or_else(|| ServerFnError::new("TTS provider not registered"))?;
+
+    std::fs::create_dir_all(audio_dir)
+        .map_err(|e| ServerFnError::new(format!("audio_cache dir: {e}")))?;
+    let output_path = audio_dir.join(format!(
+        "{}.{}",
+        uuid::Uuid::new_v4(),
+        audio_format::extension_for(&effective)
+    ));
+
+    let written = provider
+        .synthesize(SAMPLE_TEXT, &output_path)
+        .await
+        .map_err(|e| voice_test_error(&e))?;
+    let size = std::fs::metadata(&written)
+        .map_err(|e| ServerFnError::new(format!("audio read failed: {e}")))?
+        .len();
+    if size > SAMPLE_MAX_BYTES {
+        // WR-10: an oversize sample must not stay in audio_cache.
+        let _ = std::fs::remove_file(&written);
+        return Err(ServerFnError::new("voice_test:unexpected response"));
+    }
+    let bytes = std::fs::read(&written)
+        .map_err(|e| ServerFnError::new(format!("audio read failed: {e}")))?;
+
+    use base64::Engine as _;
+    Ok(VoiceSampleAudio {
+        audio_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime: audio_format::mime_for_path(&written).to_string(),
+    })
+}
+
+/// Phase 54.7 Plan 16 (D-17): audition the CURRENT (possibly unsaved) TTS
+/// settings. `identity_slug: None` is the Global target; `Some(slug)` an
+/// identity. `settings` apply only when config writes are enabled, are
+/// validated like a save, and are never persisted. The fn accepts NO
+/// client-supplied text; the server synthesizes the fixed `SAMPLE_TEXT`.
 ///
-/// Deliberately NOT gated by `web_config_write_enabled` (RESEARCH anti-pattern):
-/// this performs no config write, only a read + synth + return, so audition
-/// must keep working on read-only installs — gating it there would make Test
-/// Voice silently inert exactly where D-06's "audition before saving" intent
-/// matters most.
-///
-/// Security (threat_model T-41.2-02/T-41.2-03): `identity_slug` is validated
-/// via `avatar_logic::is_known_identity` BEFORE any provider/config
-/// resolution — a crafted/tampered slug is rejected early and never drives
-/// provider selection (same defense-in-depth `auto_speak_reply` applies).
-/// The fn accepts NO client-supplied sample text; the server always
-/// synthesizes a fixed short phrase, closing the oversized-text /
-/// excessive-TTS-spend DoS vector entirely.
+/// Errors: `unknown identity`, `voice_invalid:{field}:{code}` (settings),
+/// `voice_test:{category}` (provider failure).
 #[server]
-pub async fn synth_voice_sample(identity_slug: String) -> Result<VoiceSampleAudio, ServerFnError> {
+pub async fn synth_voice_test(
+    identity_slug: Option<String>,
+    settings: Option<TtsTestSettings>,
+) -> Result<VoiceSampleAudio, ServerFnError> {
     #[cfg(feature = "server")]
     {
-        // Reject an unknown/tampered slug before it can drive provider/config
-        // resolution at all (do NOT fall through to provider resolution here).
-        let validated = crate::components::hermes_app::avatar_logic::is_known_identity(
-            &identity_slug,
-        )
-        .then_some(identity_slug.as_str());
-        let validated = match validated {
-            Some(slug) => slug,
-            None => return Err(ServerFnError::new("unknown identity")),
-        };
-
         let config = ironhermes_core::config::Config::load()
             .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
-        let effective_tts = config.effective_tts_config_for_identity(Some(validated));
-        let tts_registry = ironhermes_tools::tts::build_tts_registry(&effective_tts);
-        let provider = tts_registry
-            .get(&effective_tts.provider)
-            .ok_or_else(|| ServerFnError::new("TTS provider not registered"))?;
-
-        // D-06 discretion: a fixed short audition phrase. No client-supplied
-        // text param exists on this fn — see the DoS rationale above.
-        const SAMPLE_TEXT: &str = "This is how I sound.";
-
         let audio_dir = ironhermes_core::constants::get_hermes_home().join("audio_cache");
-        std::fs::create_dir_all(&audio_dir)
-            .map_err(|e| ServerFnError::new(format!("audio_cache dir: {e}")))?;
-        let ext = if effective_tts.provider == "elevenlabs"
-            && effective_tts.elevenlabs.output_format == "opus"
-        {
-            "opus"
-        } else {
-            "mp3"
-        };
-        let output_path = audio_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
-
-        let written_path = provider
-            .synthesize(SAMPLE_TEXT, &output_path)
-            .await
-            .map_err(|e| ServerFnError::new(format!("TTS synthesis failed: {e}")))?;
-        let bytes = std::fs::read(&written_path)
-            .map_err(|e| ServerFnError::new(format!("audio read failed: {e}")))?;
-
-        use base64::Engine as _;
-        Ok(VoiceSampleAudio {
-            audio_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
-            mime: if ext == "opus" {
-                "audio/ogg".to_string()
-            } else {
-                "audio/mpeg".to_string()
-            },
-        })
+        synth_voice_sample_impl(
+            &config,
+            identity_slug.as_deref(),
+            settings.as_ref(),
+            &audio_dir,
+        )
+        .await
     }
     #[cfg(not(feature = "server"))]
     {
-        let _ = identity_slug;
+        let _ = (identity_slug, settings);
         Err(ServerFnError::new(
-            "synth_voice_sample unavailable without `server` feature",
+            "synth_voice_test unavailable without `server` feature",
         ))
     }
 }
@@ -2600,31 +4189,7 @@ mod update_voice_config_tests {
     use ironhermes_core::config::Config;
 
     fn empty_payload() -> VoiceWritePayload {
-        VoiceWritePayload {
-            web_silence_threshold_rms: None,
-            silence_duration: None,
-            max_recording_seconds: None,
-            beep_enabled: None,
-            stt_provider: None,
-            stt_groq_model: None,
-            stt_openai_model: None,
-            tts_provider: None,
-            tts_edge_voice: None,
-            tts_edge_format: None,
-            auto_tts: None,
-            barge_in_mode: None,
-            wake_word_enabled: None,
-            wake_word_phrase: None,
-            // Phase 40.5 identity fields — None in the global-path tests.
-            identity_slug: None,
-            identity_tts_provider: None,
-            identity_tts_voice: None,
-            identity_realtime_voice: None,
-            identity_appearance_style: None,
-            identity_base_hue: None,
-            identity_size: None,
-            identity_glow: None,
-        }
+        VoiceWritePayload::default()
     }
 
     /// T-36.17.10-01-04: The write gate must fail closed when
@@ -2708,6 +4273,7 @@ mod update_voice_config_tests {
             identity_base_hue: Some(280),
             identity_size: Some(1.0),
             identity_glow: Some(0.5),
+            ..Default::default()
         };
         let full_json = serde_json::to_string(&full_payload).expect("serialize full payload");
         assert!(
@@ -2720,16 +4286,37 @@ mod update_voice_config_tests {
         );
         // Silence unused binding warning
         let _ = json;
+
+        // Phase 54.7 Plan 06 (D-02): every field NAME -- not just the ones this
+        // test happens to populate -- may not hold a secret. A key field is a
+        // `*_key_ref` reference; nothing else may mention api_key/token/secret.
+        let keys_json = serde_json::to_value(VoiceWritePayload::default()).expect("keys");
+        for key in keys_json.as_object().expect("object").keys() {
+            let lower = key.to_ascii_lowercase();
+            let is_reference = lower.ends_with("_key_ref");
+            for needle in ["api_key", "token", "secret", "password"] {
+                assert!(
+                    !lower.contains(needle),
+                    "payload field {key} must not look like a secret holder"
+                );
+            }
+            if lower.contains("key") {
+                assert!(
+                    is_reference,
+                    "payload field {key} mentions a key but is not a *_key_ref reference"
+                );
+            }
+        }
     }
 
     /// T-36.17.10-01-02: VoiceConfigSnapshot serializes without any secret field.
     #[test]
     fn voice_config_snapshot_has_no_secret_field_values() {
-        use super::build_voice_snapshot;
+        use super::{build_voice_snapshot, VoiceKeyStatuses};
         let mut config = Config::default();
         // ModelConfig.api_key is Option<String> — set it as Some to simulate a present key
         config.model.api_key = Some("secret-value".to_string());
-        let snapshot = build_voice_snapshot(&config);
+        let snapshot = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
         let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
         assert!(
             !json.contains("secret-value"),
@@ -2745,33 +4332,39 @@ mod update_voice_config_tests {
         );
     }
 
-    /// T-36.17.12-01-01: merge_voice_payload correctly parses "open_mic" into
-    /// BargeInMode::OpenMic and assigns it to config.voice.barge_in_mode.
+    /// T-36.17.12-01-01 (rewritten by Phase 54.7 D-15): `open_mic` used to
+    /// round-trip through the payload. D-15 retired it as a selectable value --
+    /// the snapshot lists `barge_in_modes == ["push_to_interrupt"]` and the panel
+    /// only ever sends a listed value -- so the server now rejects `open_mic`.
     #[test]
-    fn barge_in_mode_merge_open_mic_round_trips() {
+    fn barge_in_mode_open_mic_is_rejected_after_d15() {
         use ironhermes_core::config::BargeInMode;
-        let mut config = ironhermes_core::config::Config::default();
-        // Default must be PushToInterrupt
-        assert_eq!(config.voice.barge_in_mode, BargeInMode::PushToInterrupt);
-
         let mut payload = empty_payload();
         payload.barge_in_mode = Some("open_mic".into());
-        merge_voice_payload(&mut config, &payload);
-        assert_eq!(
-            config.voice.barge_in_mode,
-            BargeInMode::OpenMic,
-            "open_mic string must parse to BargeInMode::OpenMic"
+        let err = validate_voice_payload(&payload).expect_err("open_mic must be rejected");
+        assert!(
+            err.to_string().contains("voice_invalid:barge_in_mode"),
+            "unexpected error: {err}"
         );
+
+        payload.barge_in_mode = Some("push_to_interrupt".into());
+        assert!(validate_voice_payload(&payload).is_ok());
+
+        // Even a direct merge never writes open_mic back into the config.
+        let mut config = ironhermes_core::config::Config::default();
+        payload.barge_in_mode = Some("open_mic".into());
+        merge_voice_payload(&mut config, &payload);
+        assert_eq!(config.voice.barge_in_mode, BargeInMode::PushToInterrupt);
     }
 
     /// T-36.17.12-01-02: build_voice_snapshot serializes OpenMic as "open_mic".
     #[test]
     fn barge_in_mode_snapshot_serializes_open_mic() {
-        use super::build_voice_snapshot;
+        use super::{build_voice_snapshot, VoiceKeyStatuses};
         use ironhermes_core::config::{BargeInMode, Config};
         let mut config = Config::default();
         config.voice.barge_in_mode = BargeInMode::OpenMic;
-        let snapshot = build_voice_snapshot(&config);
+        let snapshot = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
         assert_eq!(
             snapshot.barge_in_mode, "open_mic",
             "BargeInMode::OpenMic must serialize to \"open_mic\" in snapshot"
@@ -2781,11 +4374,11 @@ mod update_voice_config_tests {
     /// T-36.17.12-01-03: snapshot serializes PushToInterrupt as "push_to_interrupt".
     #[test]
     fn barge_in_mode_snapshot_serializes_push_to_interrupt() {
-        use super::build_voice_snapshot;
+        use super::{build_voice_snapshot, VoiceKeyStatuses};
         use ironhermes_core::config::{BargeInMode, Config};
         let mut config = Config::default();
         config.voice.barge_in_mode = BargeInMode::PushToInterrupt;
-        let snapshot = build_voice_snapshot(&config);
+        let snapshot = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
         assert_eq!(
             snapshot.barge_in_mode, "push_to_interrupt",
             "BargeInMode::PushToInterrupt must serialize to \"push_to_interrupt\""
@@ -2857,35 +4450,451 @@ mod update_voice_config_tests {
     }
 }
 
-/// Phase 41.2 Plan 02 (D-06): proves `synth_voice_sample`'s slug-validation
-/// gate before touching provider/config resolution. The network-dependent
-/// synth path itself cannot run natively without a live TTS provider, so
-/// these tests exercise the extractable gate logic
-/// (`avatar_logic::is_known_identity`) that `synth_voice_sample` calls
-/// before any provider selection — proving a tampered slug never reaches
-/// provider resolution.
+/// Phase 41.2 Plan 02 (D-06) / Phase 54.7 Plan 16: the identity Test voice
+/// seam. These call `synth_voice_sample_impl`, the pipeline `synth_voice_test`
+/// wraps.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod synth_voice_sample_tests {
-    use crate::components::hermes_app::avatar_logic::is_known_identity;
+    use super::synth_voice_sample_impl;
+    use ironhermes_core::config::Config;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// T-41.2-02: an unknown/tampered identity slug must be rejected by the
-    /// same gate `synth_voice_sample` applies before `effective_tts_config_for_identity`.
-    #[test]
-    fn synth_voice_sample_rejects_unknown_slug() {
-        assert!(
-            !is_known_identity("not_a_real_identity"),
-            "an unknown slug must fail is_known_identity — synth_voice_sample's \
-             validated-slug branch must yield None/reject for it"
-        );
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(f)
     }
 
-    /// A known ORB_PRESET_REGISTRY slug must pass the gate so a legitimate
-    /// audition request is never blocked by the security check.
+    /// T-41.2-02: an unknown/tampered identity slug is rejected before any
+    /// provider or network work -- the audio dir is never even created.
+    #[test]
+    fn synth_voice_sample_rejects_unknown_slug() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audio_dir = dir.path().join("never_created");
+        let err = block_on(synth_voice_sample_impl(
+            &Config::default(),
+            Some("not_a_real_identity"),
+            None,
+            &audio_dir,
+        ))
+        .err()
+        .expect("unknown slug must fail")
+        .to_string();
+        assert!(err.contains("unknown identity"), "got: {err}");
+        assert!(!audio_dir.exists(), "rejected before any provider work");
+    }
+
+    /// WR-10: a sample over the cap is refused AND its file is deleted from
+    /// audio_cache (the early return used to leave it on disk).
+    #[test]
+    fn oversize_sample_is_rejected_and_deleted() {
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/audio/speech"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_bytes(vec![1u8; super::SAMPLE_MAX_BYTES as usize + 1]),
+                )
+                .mount(&server)
+                .await;
+            let mut config = Config::default();
+            config.tts.provider = "openai_compatible".into();
+            config.tts.openai_compatible.base_url = format!("{}/v1", server.uri());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let err = synth_voice_sample_impl(&config, None, None, dir.path())
+                .await
+                .err()
+                .expect("an oversize sample must be refused")
+                .to_string();
+            assert!(err.contains("unexpected response"), "got: {err}");
+            let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+            assert!(left.is_empty(), "oversize audio must be deleted: {left:?}");
+        });
+    }
+
+    /// A known ORB_PRESET_REGISTRY slug passes the gate and synthesizes through
+    /// the saved global provider (no identity record -> global block).
     #[test]
     fn synth_voice_sample_accepts_known_slug() {
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/audio/speech"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"OK-AUDIO".to_vec()))
+                .mount(&server)
+                .await;
+            let mut config = Config::default();
+            config.tts.provider = "openai_compatible".into();
+            config.tts.openai_compatible.base_url = format!("{}/v1", server.uri());
+            config.identities.remove("orb_classic");
+            let dir = tempfile::tempdir().expect("tempdir");
+            let sample = synth_voice_sample_impl(&config, Some("orb_classic"), None, dir.path())
+                .await
+                .expect("known slug synthesizes");
+            assert_eq!(sample.mime, "audio/mpeg");
+        });
+    }
+}
+
+// =============================================================================
+// Phase 54.7 Plan 16 Task 2: validation, write gate, identity target and the
+// fixed-phrase guarantees of Test voice.
+// =============================================================================
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod synth_voice_test_guard_tests {
+    use super::{tts_config_for_test, TtsTestSettings, SAMPLE_TEXT};
+    use ironhermes_core::config::{Config, IdentityRecord};
+
+    fn edge_config() -> Config {
+        let mut config = Config::default();
+        config.security.web_config_write_enabled = true;
+        config.tts.provider = "edge".into();
+        config
+    }
+
+    fn compat(base_url: &str) -> TtsTestSettings {
+        TtsTestSettings {
+            provider: Some("openai_compatible".into()),
+            base_url: Some(base_url.into()),
+            ..Default::default()
+        }
+    }
+
+    fn err_text(r: Result<ironhermes_core::config::TtsConfig, super::ServerFnError>) -> String {
+        r.expect_err("expected an error").to_string()
+    }
+
+    #[test]
+    fn synth_settings_apply_only_when_writes_enabled() {
+        let config = edge_config();
+        let settings = compat("http://127.0.0.1:8880/v1");
+
+        let open = tts_config_for_test(&config, None, Some(&settings), true).expect("open");
+        assert_eq!(open.provider, "openai_compatible");
+        assert_eq!(open.openai_compatible.base_url, "http://127.0.0.1:8880/v1");
+
+        // Gate closed: the settings are ignored entirely (SSRF control), even
+        // ones that would fail validation.
+        let closed = tts_config_for_test(&config, None, Some(&settings), false).expect("closed");
+        assert_eq!(closed.provider, "edge", "saved config wins");
+        assert_eq!(closed.openai_compatible.base_url, "");
+        let invalid = compat("ftp://nope");
+        assert!(tts_config_for_test(&config, None, Some(&invalid), false).is_ok());
+    }
+
+    #[test]
+    fn synth_settings_are_validated_like_a_save() {
+        let config = edge_config();
+
+        let e = err_text(tts_config_for_test(
+            &config,
+            None,
+            Some(&compat("ftp://x")),
+            true,
+        ));
         assert!(
-            is_known_identity("orb_classic"),
-            "orb_classic is a registered ORB_PRESET_REGISTRY id and must pass is_known_identity"
+            e.contains("voice_invalid:tts_compat_base_url:base_url_scheme"),
+            "got: {e}"
+        );
+
+        let bogus = TtsTestSettings {
+            provider: Some("bogus".into()),
+            ..Default::default()
+        };
+        let e = err_text(tts_config_for_test(&config, None, Some(&bogus), true));
+        assert!(e.contains("unknown_provider"), "got: {e}");
+
+        let mut s = compat("http://127.0.0.1:8880/v1");
+        s.key_ref = Some("OPENAI_API_KEY".into());
+        let e = err_text(tts_config_for_test(&config, None, Some(&s), true));
+        assert!(
+            e.contains("voice_invalid:tts_compat_key_ref:key_ref_namespace"),
+            "got: {e}"
+        );
+
+        // A changed format must be a registry format.
+        let mut s = compat("http://127.0.0.1:8880/v1");
+        s.format = Some("flac".into());
+        let e = err_text(tts_config_for_test(&config, None, Some(&s), true));
+        assert!(
+            e.contains("voice_invalid:tts_compat_format:format"),
+            "got: {e}"
+        );
+
+        // An openai_compatible provider needs an address.
+        let bare = TtsTestSettings {
+            provider: Some("openai_compatible".into()),
+            ..Default::default()
+        };
+        let e = err_text(tts_config_for_test(&config, None, Some(&bare), true));
+        assert!(
+            e.contains("voice_invalid:tts_compat_base_url:base_url_empty"),
+            "got: {e}"
+        );
+
+        // Legacy-safe rule: a format EQUAL to the stored value passes.
+        let mut legacy = edge_config();
+        legacy.tts.openai.format = "flac".into();
+        legacy.tts.edge.output_format = "audio-24khz-48kbitrate-mono-mp3".into();
+        let openai = TtsTestSettings {
+            provider: Some("openai".into()),
+            format: Some("flac".into()),
+            ..Default::default()
+        };
+        assert!(tts_config_for_test(&legacy, None, Some(&openai), true).is_ok());
+        let edge = TtsTestSettings {
+            provider: Some("edge".into()),
+            format: Some("audio-24khz-48kbitrate-mono-mp3".into()),
+            ..Default::default()
+        };
+        assert!(tts_config_for_test(&legacy, None, Some(&edge), true).is_ok());
+        // ...but a different unlisted one does not.
+        let changed = TtsTestSettings {
+            provider: Some("openai".into()),
+            format: Some("aac".into()),
+            ..Default::default()
+        };
+        assert!(tts_config_for_test(&legacy, None, Some(&changed), true).is_err());
+    }
+
+    #[test]
+    fn synth_identity_target_applies_identity_then_settings() {
+        let mut config = edge_config();
+        let mut record = IdentityRecord::default();
+        record.voice.free_mode_tts_provider = Some("edge".into());
+        record.voice.free_mode_tts_voice = Some("en-GB-IdentityNeural".into());
+        config.identities.insert("orb_classic".into(), record);
+
+        let from_identity =
+            tts_config_for_test(&config, Some("orb_classic"), None, true).expect("identity");
+        assert_eq!(from_identity.edge.voice, "en-GB-IdentityNeural");
+
+        let settings = TtsTestSettings {
+            provider: Some("edge".into()),
+            voice: Some("en-US-FormNeural".into()),
+            ..Default::default()
+        };
+        let both = tts_config_for_test(&config, Some("orb_classic"), Some(&settings), true)
+            .expect("identity + settings");
+        assert_eq!(both.edge.voice, "en-US-FormNeural", "the form value wins");
+        assert_eq!(
+            config.tts.edge.voice, "en-US-AriaNeural",
+            "saved global untouched"
+        );
+
+        let e = err_text(tts_config_for_test(
+            &config,
+            Some("not_a_real_identity"),
+            None,
+            true,
+        ));
+        assert!(e.contains("unknown identity"), "got: {e}");
+    }
+
+    /// Slice of this file's source from `header` to the next top-level item.
+    fn item_text<'a>(src: &'a str, header: &str) -> &'a str {
+        let start = src.find(header).expect("header present");
+        let rest = &src[start + header.len()..];
+        let end = ["\n#[", "\n///", "\nfn ", "\nasync fn ", "\npub "]
+            .iter()
+            .filter_map(|m| rest.find(m))
+            .min()
+            .unwrap_or(rest.len());
+        &src[start..start + header.len() + end]
+    }
+
+    #[test]
+    fn synth_settings_never_change_the_sample_text() {
+        let src = include_str!("api.rs");
+        let body = item_text(src, "async fn synth_voice_sample_impl(");
+        assert_eq!(
+            body.matches(".synthesize(").count(),
+            1,
+            "exactly one synthesize call"
+        );
+        assert!(
+            body.contains(".synthesize(SAMPLE_TEXT,"),
+            "the only synthesized string is the SAMPLE_TEXT constant"
+        );
+        assert_eq!(SAMPLE_TEXT, "This is how I sound.");
+        // TtsTestSettings carries no text/input field.
+        let keys: std::collections::BTreeSet<String> =
+            serde_json::to_value(TtsTestSettings::default())
+                .expect("ser")
+                .as_object()
+                .expect("object")
+                .keys()
+                .cloned()
+                .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            "provider", "base_url", "path", "key_ref", "model", "voice", "format",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn synth_test_never_saves() {
+        let src = include_str!("api.rs");
+        let forbidden = [[".sa", "ve()"].concat(), [".save", "_to("].concat()];
+        for header in [
+            "async fn synth_voice_sample_impl(",
+            "fn tts_config_for_test(",
+            "fn apply_tts_test_settings(",
+            "fn validate_tts_test_settings(",
+        ] {
+            let body = item_text(src, header);
+            assert!(
+                body.len() > 100,
+                "{header}: slice looks wrong ({})",
+                body.len()
+            );
+            for f in &forbidden {
+                assert!(!body.contains(f.as_str()), "{header} must not contain {f}");
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Phase 54.7 Plan 16: Test voice auditions UNSAVED TTS settings (D-17).
+// Every test drives `tts_config_for_test` / `synth_voice_sample_impl` directly
+// with an in-memory Config, a tempdir audio dir and a wiremock base URL.
+// =============================================================================
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod synth_voice_test_tests {
+    use super::{synth_voice_sample_impl, tts_config_for_test, TtsTestSettings};
+    use ironhermes_core::config::Config;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    fn kokoro_settings(server_uri: &str, format: &str) -> TtsTestSettings {
+        TtsTestSettings {
+            provider: Some("openai_compatible".into()),
+            base_url: Some(format!("{server_uri}/v1")),
+            model: Some("mlx-community/Kokoro-82M-bf16".into()),
+            voice: Some("af_heart".into()),
+            format: Some(format.into()),
+            ..Default::default()
+        }
+    }
+
+    fn write_open_config() -> Config {
+        let mut config = Config::default();
+        config.security.web_config_write_enabled = true;
+        config.tts.provider = "edge".into();
+        config
+    }
+
+    #[test]
+    fn synth_test_settings_reach_compat_server() {
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/audio/speech"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"FAKE-MP3-BYTES".to_vec()))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cfg_path = dir.path().join("config.yaml");
+            let config = write_open_config();
+            config.save_to(&cfg_path).expect("save fixture");
+            let before = std::fs::read(&cfg_path).expect("read yaml");
+            let audio_dir = dir.path().join("audio_cache");
+            std::fs::create_dir_all(&audio_dir).expect("audio dir");
+
+            let settings = kokoro_settings(&server.uri(), "mp3");
+            let sample = synth_voice_sample_impl(&config, None, Some(&settings), &audio_dir)
+                .await
+                .expect("synth");
+
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&sample.audio_b64)
+                .expect("b64");
+            assert_eq!(bytes, b"FAKE-MP3-BYTES");
+            assert_eq!(sample.mime, "audio/mpeg");
+
+            let received = server.received_requests().await.expect("recording on");
+            assert_eq!(received.len(), 1, "exactly one TTS request");
+            let body: serde_json::Value = received[0].body_json().expect("json body");
+            assert_eq!(body["input"], "This is how I sound.");
+            assert_eq!(body["model"], "mlx-community/Kokoro-82M-bf16");
+            assert_eq!(body["voice"], "af_heart");
+
+            assert_eq!(
+                std::fs::read(&cfg_path).expect("reread yaml"),
+                before,
+                "Test voice must never touch the config on disk"
+            );
+            assert_eq!(config.tts.provider, "edge", "in-memory config unchanged");
+        });
+    }
+
+    #[test]
+    fn synth_uses_vault_aware_builder_and_audio_format() {
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/audio/speech"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"RIFF-FAKE-WAV".to_vec()))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = write_open_config();
+            let settings = kokoro_settings(&server.uri(), "wav");
+            let sample = synth_voice_sample_impl(&config, None, Some(&settings), dir.path())
+                .await
+                .expect("synth");
+            assert_eq!(sample.mime, "audio/wav");
+            let wavs = std::fs::read_dir(dir.path())
+                .expect("read dir")
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "wav"))
+                .count();
+            assert_eq!(wavs, 1, "the file is named with the audio_format extension");
+
+            // A provider 401 surfaces as the fixed category, never a body or key.
+            let rejecting = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(401).set_body_string("secret-body-text"))
+                .mount(&rejecting)
+                .await;
+            let settings = kokoro_settings(&rejecting.uri(), "mp3");
+            let err = synth_voice_sample_impl(&config, None, Some(&settings), dir.path())
+                .await
+                .err()
+                .expect("401 must fail")
+                .to_string();
+            assert!(err.contains("voice_test:key rejected"), "got: {err}");
+            assert!(!err.contains("secret-body-text"), "body leaked: {err}");
+        });
+    }
+
+    #[test]
+    fn synth_global_target_needs_no_slug() {
+        let mut config = write_open_config();
+        config.tts.edge.voice = "en-GB-RyanNeural".into();
+        let effective = tts_config_for_test(&config, None, None, true).expect("global target");
+        assert_eq!(
+            serde_json::to_value(&effective).expect("ser"),
+            serde_json::to_value(&config.tts).expect("ser"),
+            "no slug and no settings serves the saved global TtsConfig"
         );
     }
 }
@@ -2898,7 +4907,8 @@ mod synth_voice_sample_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod voice_identity_tests_40_5_03 {
     use super::{
-        build_voice_snapshot, merge_voice_payload, validate_voice_payload, VoiceWritePayload,
+        build_voice_snapshot, merge_voice_payload, validate_voice_payload, VoiceKeyStatuses,
+        VoiceWritePayload,
     };
     use ironhermes_core::config::Config;
 
@@ -2906,29 +4916,8 @@ mod voice_identity_tests_40_5_03 {
     /// Fields identity_slug through identity_glow do not exist yet → RED.
     fn identity_payload(slug: Option<&str>) -> VoiceWritePayload {
         VoiceWritePayload {
-            web_silence_threshold_rms: None,
-            silence_duration: None,
-            max_recording_seconds: None,
-            beep_enabled: None,
-            stt_provider: None,
-            stt_groq_model: None,
-            stt_openai_model: None,
-            tts_provider: None,
-            tts_edge_voice: None,
-            tts_edge_format: None,
-            auto_tts: None,
-            barge_in_mode: None,
-            wake_word_enabled: None,
-            wake_word_phrase: None,
-            // Phase 40.5 identity fields — not yet on struct (RED gate).
             identity_slug: slug.map(|s| s.to_string()),
-            identity_tts_provider: None,
-            identity_tts_voice: None,
-            identity_realtime_voice: None,
-            identity_appearance_style: None,
-            identity_base_hue: None,
-            identity_size: None,
-            identity_glow: None,
+            ..Default::default()
         }
     }
 
@@ -2997,6 +4986,61 @@ mod voice_identity_tests_40_5_03 {
         );
     }
 
+    /// Phase 54.7 Plan 15 (D-16): an identity's TTS model and format are saved
+    /// into `identities.<slug>.voice`, come back in the snapshot's
+    /// `IdentityOverride`, and are applied by the TTS path.
+    #[test]
+    fn identity_model_and_format_round_trip() {
+        let mut config = Config::default();
+        let mut p = identity_payload(Some("orb_bloom"));
+        p.identity_tts_provider = Some("openai".to_string());
+        p.identity_tts_model = Some("tts-1-hd".to_string());
+        p.identity_tts_format = Some("opus".to_string());
+        p.identity_realtime_model = Some("gpt-realtime-2".to_string());
+        validate_voice_payload(&p).expect("a registry model and format validate");
+        merge_voice_payload(&mut config, &p);
+
+        let voice = &config.identities.get("orb_bloom").expect("orb_bloom").voice;
+        assert_eq!(voice.free_mode_tts_model.as_deref(), Some("tts-1-hd"));
+        assert_eq!(voice.free_mode_tts_format.as_deref(), Some("opus"));
+        assert_eq!(voice.realtime_model.as_deref(), Some("gpt-realtime-2"));
+
+        let snapshot = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
+        let ov = snapshot
+            .identity_overrides
+            .iter()
+            .find(|o| o.slug == "orb_bloom")
+            .expect("orb_bloom override in the snapshot");
+        assert_eq!(ov.free_mode_model.as_deref(), Some("tts-1-hd"));
+        assert_eq!(ov.free_mode_format.as_deref(), Some("opus"));
+        assert_eq!(ov.realtime_model, "gpt-realtime-2");
+
+        // An identity that sets nothing inherits: no model/format, the global
+        // realtime model.
+        let plain = snapshot
+            .identity_overrides
+            .iter()
+            .find(|o| o.slug == "orb_classic")
+            .expect("orb_classic override in the snapshot");
+        assert_eq!(plain.free_mode_model, None);
+        assert_eq!(plain.free_mode_format, None);
+        assert_eq!(plain.realtime_model, config.realtime.model());
+
+        // The TTS path applies them onto the matching provider block, and the
+        // global block stays untouched.
+        let effective = config.effective_tts_config_for_identity(Some("orb_bloom"));
+        assert_eq!(effective.openai.format, "opus");
+        assert_eq!(effective.openai.model, "tts-1-hd");
+        assert_ne!(config.tts.openai.format, "opus");
+
+        // The snapshot advertises provider ids only (never a key value).
+        assert!(
+            snapshot.tts_providers_usable.iter().any(|id| id == "edge"),
+            "Edge needs no key and is always usable: {:?}",
+            snapshot.tts_providers_usable
+        );
+    }
+
     /// D-17: merge writes appearance fields into config.identities[slug].appearance
     /// and the result survives a serde_yaml round-trip.
     #[test]
@@ -3059,7 +5103,7 @@ mod voice_identity_tests_40_5_03 {
     fn snapshot_excludes_secrets_with_identity_fields() {
         let mut config = Config::default();
         config.model.api_key = Some("super-secret-key".to_string());
-        let snapshot = build_voice_snapshot(&config);
+        let snapshot = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
         let json = serde_json::to_string(&snapshot).expect("serialize");
         assert!(
             !json.contains("super-secret-key"),
@@ -3148,6 +5192,341 @@ pub async fn cancel_turn(session_id: String) -> Result<(), ServerFnError> {
         });
     }
     Ok(())
+}
+
+// =============================================================================
+// Phase 54.7 Plan 15 Task 2 (D-16): server rules for an identity-target save.
+// An identity may shape voice (provider, model, voice, format; realtime voice
+// and model) and nothing else -- never an endpoint, a key reference, STT or a
+// global setting -- and only among providers this server has configured.
+// =============================================================================
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod identity_rules_547_15 {
+    use super::{apply_voice_payload, validate_voice_payload, VoiceWritePayload};
+    use ironhermes_core::config::Config;
+
+    fn identity(slug: &str) -> VoiceWritePayload {
+        VoiceWritePayload {
+            identity_slug: Some(slug.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn err_of(result: Result<(), dioxus::prelude::ServerFnError>) -> String {
+        result.expect_err("must be rejected").to_string()
+    }
+
+    /// `Config::default()` carries no identities (the shipped personas are
+    /// merged in when a config file loads), so seed them the same way.
+    fn seeded(mut config: Config) -> Config {
+        for (slug, record) in ironhermes_core::config::default_seed_identities() {
+            config.identities.entry(slug).or_insert(record);
+        }
+        config
+    }
+
+    /// Run `body` with the provider key env vars unset (restored afterwards),
+    /// serialized with every other env-touching test.
+    fn with_no_provider_keys<R>(body: impl FnOnce() -> R) -> R {
+        let _guard = crate::server::test_support::env_lock();
+        let names = ["ELEVENLABS_API_KEY", "OPENAI_API_KEY"];
+        let saved: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
+        // SAFETY: serialized by env_lock(); restored below.
+        unsafe {
+            for n in names {
+                std::env::remove_var(n);
+            }
+        }
+        let out = body();
+        unsafe {
+            for (n, v) in names.iter().zip(saved) {
+                if let Some(v) = v {
+                    std::env::set_var(n, v);
+                }
+            }
+        }
+        out
+    }
+
+    /// A Kokoro-only server: the seeded orb_bloom / groovy identities default
+    /// to ElevenLabs, which has no key here.
+    fn kokoro_only_config() -> Config {
+        let mut config = seeded(Config::default());
+        config.tts.provider = "openai_compatible".into();
+        config.tts.openai_compatible.base_url = "http://tts.lan:8880/v1".into();
+        config
+    }
+
+    /// D-16 / T-54.7-64: an identity-target payload that also sets any global
+    /// field is refused, field by field.
+    #[test]
+    fn identity_payload_rejects_global_only_fields() {
+        let cases: Vec<(&str, VoiceWritePayload)> = vec![
+            (
+                "tts_compat_base_url",
+                VoiceWritePayload {
+                    tts_compat_base_url: Some("http://evil.lan/v1".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "tts_compat_key_ref",
+                VoiceWritePayload {
+                    tts_compat_key_ref: Some("VOICE_KEY_X".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "stt_compat_base_url",
+                VoiceWritePayload {
+                    stt_compat_base_url: Some("http://stt.lan/v1".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "stt_provider",
+                VoiceWritePayload {
+                    stt_provider: Some("groq".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "realtime_base_url",
+                VoiceWritePayload {
+                    realtime_base_url: Some("http://rt.lan/v1".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "realtime_key_ref",
+                VoiceWritePayload {
+                    realtime_key_ref: Some("VOICE_KEY_RT".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "voice_service",
+                VoiceWritePayload {
+                    voice_service: Some("realtime".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "tts_provider",
+                VoiceWritePayload {
+                    tts_provider: Some("edge".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "tts_openai_model",
+                VoiceWritePayload {
+                    tts_openai_model: Some("tts-1".into()),
+                    ..identity("orb_bloom")
+                },
+            ),
+            (
+                "auto_tts",
+                VoiceWritePayload {
+                    auto_tts: Some(true),
+                    ..identity("orb_bloom")
+                },
+            ),
+        ];
+        for (field, payload) in cases {
+            let msg = err_of(validate_voice_payload(&payload));
+            assert!(
+                msg.contains(&format!("voice_invalid:{field}:identity_global_field")),
+                "{field} must be refused for an identity target: {msg}"
+            );
+        }
+        // The appearance fields an identity save legitimately carries are not
+        // "global" -- they pass.
+        let mut ok = identity("orb_bloom");
+        ok.identity_appearance_style = Some("bloom".into());
+        ok.identity_base_hue = Some(280);
+        validate_voice_payload(&ok).expect("identity appearance is an identity field");
+        // And the same global field without an identity slug is untouched.
+        let global = VoiceWritePayload {
+            tts_compat_base_url: Some("http://tts.lan:8880/v1".into()),
+            ..Default::default()
+        };
+        validate_voice_payload(&global).expect("a global save may set its endpoint");
+    }
+
+    /// D-16 / T-54.7-65: an identity may only pick a provider this server has
+    /// configured; an unknown id is refused before any merge.
+    #[test]
+    fn identity_provider_must_be_configured() {
+        with_no_provider_keys(|| {
+            let payload = VoiceWritePayload {
+                identity_tts_provider: Some("openai_compatible".into()),
+                ..identity("orb_bloom")
+            };
+            validate_voice_payload(&payload).expect("a registry id passes the pure rules");
+
+            // No saved Base URL: not configured.
+            let mut config = Config::default();
+            config.tts.openai_compatible.base_url = String::new();
+            let msg = err_of(apply_voice_payload(&mut config, &payload));
+            assert!(
+                msg.contains("voice_invalid:identity_tts_provider:provider_unusable"),
+                "{msg}"
+            );
+
+            // A saved Base URL makes it configured.
+            let mut config = Config::default();
+            config.tts.openai_compatible.base_url = "http://tts.lan:8880/v1".into();
+            apply_voice_payload(&mut config, &payload).expect("configured provider accepted");
+            assert_eq!(
+                config.identities["orb_bloom"]
+                    .voice
+                    .free_mode_tts_provider
+                    .as_deref(),
+                Some("openai_compatible")
+            );
+
+            // An unknown id never reaches the merge.
+            let unknown = VoiceWritePayload {
+                identity_tts_provider: Some("not_a_provider".into()),
+                ..identity("orb_bloom")
+            };
+            let msg = err_of(validate_voice_payload(&unknown));
+            assert!(
+                msg.contains("voice_invalid:identity_tts_provider:unknown_provider"),
+                "{msg}"
+            );
+        });
+    }
+
+    /// D-16 / T-54.7-66: identity model, voice, format and realtime values go
+    /// through the same rules as the global fields.
+    #[test]
+    fn identity_values_use_shared_rules() {
+        let bad_model = VoiceWritePayload {
+            identity_tts_model: Some("a\"b".into()),
+            ..identity("orb_bloom")
+        };
+        assert!(err_of(validate_voice_payload(&bad_model))
+            .contains("voice_invalid:identity_tts_model:model_charset"));
+
+        let bad_voice = VoiceWritePayload {
+            identity_realtime_voice: Some("a/b".into()),
+            ..identity("orb_bloom")
+        };
+        assert!(err_of(validate_voice_payload(&bad_voice))
+            .contains("voice_invalid:identity_realtime_voice:voice_charset"));
+
+        let bad_tts_voice = VoiceWritePayload {
+            identity_tts_voice: Some("v".repeat(65)),
+            ..identity("orb_bloom")
+        };
+        assert!(err_of(validate_voice_payload(&bad_tts_voice))
+            .contains("voice_invalid:identity_tts_voice:voice_charset"));
+
+        let bad_format = VoiceWritePayload {
+            identity_tts_provider: Some("openai".into()),
+            identity_tts_format: Some("flac".into()),
+            ..identity("orb_bloom")
+        };
+        assert!(err_of(validate_voice_payload(&bad_format))
+            .contains("voice_invalid:identity_tts_format:format"));
+
+        // A format that does not belong to the identity's CURRENT provider is
+        // refused even when the payload does not restate the provider.
+        let mut config = seeded(Config::default());
+        config
+            .identities
+            .get_mut("orb_bloom")
+            .expect("seeded")
+            .voice
+            .free_mode_tts_provider = Some("edge".into());
+        let restated = VoiceWritePayload {
+            identity_tts_format: Some("opus".into()),
+            ..identity("orb_bloom")
+        };
+        validate_voice_payload(&restated).expect("provider unknown to the pure rules");
+        let msg = err_of(apply_voice_payload(&mut config, &restated));
+        assert!(
+            msg.contains("voice_invalid:identity_tts_format:format"),
+            "{msg}"
+        );
+
+        let bad_rt_model = VoiceWritePayload {
+            identity_realtime_model: Some("bad model".into()),
+            ..identity("orb_bloom")
+        };
+        assert!(err_of(validate_voice_payload(&bad_rt_model))
+            .contains("voice_invalid:identity_realtime_model:model_charset"));
+
+        let good = VoiceWritePayload {
+            identity_realtime_model: Some("gpt-realtime-2.1".into()),
+            identity_realtime_voice: Some("marin".into()),
+            identity_tts_provider: Some("openai".into()),
+            identity_tts_model: Some("tts-1-hd".into()),
+            identity_tts_format: Some("opus".into()),
+            ..identity("orb_bloom")
+        };
+        validate_voice_payload(&good).expect("registry values validate");
+    }
+
+    /// Plan-checker issue: the usability rule judges ONLY the identity a save
+    /// writes and ONLY when that save sets its provider. The seeded elevenlabs
+    /// identities on a Kokoro-only server never block another save.
+    #[test]
+    fn identity_usability_check_is_scoped_to_the_written_identity() {
+        with_no_provider_keys(|| {
+            let base = kokoro_only_config();
+            for slug in ["orb_bloom", "groovy"] {
+                assert_eq!(
+                    base.identities[slug]
+                        .voice
+                        .free_mode_tts_provider
+                        .as_deref(),
+                    Some("elevenlabs"),
+                    "positive control: {slug} is seeded on a provider with no key here"
+                );
+            }
+
+            // A global save succeeds.
+            let mut config = base.clone();
+            let global = VoiceWritePayload {
+                auto_tts: Some(true),
+                ..Default::default()
+            };
+            apply_voice_payload(&mut config, &global).expect("a global save is never blocked");
+
+            // An identity save that changes only the realtime voice succeeds.
+            let mut config = base.clone();
+            let rt_only = VoiceWritePayload {
+                identity_realtime_voice: Some("marin".into()),
+                ..identity("orb_bloom")
+            };
+            apply_voice_payload(&mut config, &rt_only)
+                .expect("a realtime-only identity save is never blocked");
+
+            // Moving groovy to the configured provider succeeds.
+            let mut config = base.clone();
+            let to_compat = VoiceWritePayload {
+                identity_tts_provider: Some("openai_compatible".into()),
+                ..identity("groovy")
+            };
+            apply_voice_payload(&mut config, &to_compat)
+                .expect("a configured provider is accepted");
+
+            // Choosing the unusable provider for groovy is refused.
+            let mut config = base.clone();
+            let to_eleven = VoiceWritePayload {
+                identity_tts_provider: Some("elevenlabs".into()),
+                ..identity("groovy")
+            };
+            let msg = err_of(apply_voice_payload(&mut config, &to_eleven));
+            assert!(
+                msg.contains("voice_invalid:identity_tts_provider:provider_unusable"),
+                "{msg}"
+            );
+        });
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -3300,18 +5679,37 @@ mod cancel_turn_tests {
 //     (T-36.17.12-02-05 / T-LOG-LEAK). Only status codes / error categories logged.
 //   - The #[server] macro gates this to the server binary — no extra #[cfg] needed.
 
-/// Phase 36.17.12 Plan 02: Allowed realtime session models (T-36.17.12-02-02 whitelist).
-/// Updated in BUG 3 fix: `gpt-realtime` is the GA OpenAI Realtime API model (2026).
-/// The model is now resolved from `voice.realtime_model` in config.yaml (config-driven,
-/// not hardcoded), then validated here before any network call (T-V5 security control).
+/// Phase 54.7 (D-11): the realtime model / voice gate.
+///
+/// Replaces the fixed whitelists of Phase 36.17.12 Plan 02
+/// (T-36.17.12-02-02 / T-V5). A new model or voice no longer needs a code
+/// change, so the injection control is a CHARSET gate instead of a list:
+/// model `[A-Za-z0-9._:/-]{1,128}` with no `..` and no leading `/`, voice
+/// `[A-Za-z0-9._:-]{1,64}`. The rules live in
+/// `ironhermes_core::voice_endpoint`, shared with the settings save path.
+///
+/// The transcription model is deliberately NOT gated here (WR-08): minting
+/// never sends it. It reaches the provider only through
+/// `realtime_session_config_for`, which applies the same charset gate and
+/// falls back to a default with a warning, so a hand-edited stray value
+/// degrades that one setting instead of disabling realtime (and triggering
+/// the D-07 turn-based fallback) outright.
+///
+/// It runs BEFORE any key resolution or network call (T-54.7-47). Validated
+/// values are only ever placed into JSON through `serde_json::json!`, never
+/// into a URL. The error text never echoes the rejected value: an operator
+/// can paste a secret into the wrong field, and the message is logged.
 #[cfg(not(target_arch = "wasm32"))]
-const REALTIME_ALLOWED_MODELS: &[&str] = &["gpt-realtime"];
-
-/// Phase 36.17.12 Plan 02: Allowed voices for realtime sessions (T-36.17.12-02-02 whitelist).
-#[cfg(not(target_arch = "wasm32"))]
-const REALTIME_ALLOWED_VOICES: &[&str] = &[
-    "alloy", "shimmer", "echo", "verse", "ash", "ballad", "coral", "sage",
-];
+pub(crate) fn validate_realtime_values(model: &str, voice: &str) -> Result<(), ServerFnError> {
+    use ironhermes_core::voice_endpoint::{validate_model_id, validate_voice_id};
+    if validate_model_id(model).is_err() {
+        return Err(ServerFnError::new("Unknown model -- realtime unavailable"));
+    }
+    if validate_voice_id(voice).is_err() {
+        return Err(ServerFnError::new("Unknown voice -- realtime unavailable"));
+    }
+    Ok(())
+}
 
 // =============================================================================
 // Phase 40.5 Plan 03 Task 3 — Per-identity realtime voice resolution (D-12)
@@ -3331,8 +5729,9 @@ const REALTIME_ALLOWED_VOICES: &[&str] = &[
 /// Unknown or malformed slugs are rejected with a `ServerFnError` before any
 /// network call or config lookup.
 ///
-/// The REALTIME_ALLOWED_VOICES whitelist is applied by the CALLER (`issue_realtime_token`)
-/// as a defense-in-depth check after this function returns (T-40.5-03-03).
+/// The D-11 charset gate (`validate_realtime_values`) is applied by the CALLER
+/// (`resolve_realtime_selection`) after this function returns, as a
+/// defense-in-depth check on the resolved value (T-40.5-03-03).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn resolve_realtime_voice(
     config: &ironhermes_core::config::Config,
@@ -3340,7 +5739,7 @@ pub(crate) fn resolve_realtime_voice(
 ) -> Result<String, ServerFnError> {
     use crate::components::hermes_app::avatar_logic::is_known_identity;
 
-    let global_voice = config.voice.realtime_voice.clone();
+    let global_voice = config.realtime.voice().to_string();
 
     let Some(s) = slug else {
         return Ok(global_voice);
@@ -3366,6 +5765,54 @@ pub(crate) fn resolve_realtime_voice(
         .and_then(|rec| rec.voice.realtime_voice.clone());
 
     Ok(identity_voice.unwrap_or(global_voice))
+}
+
+/// Phase 54.7 (D-16): resolve the realtime model for a session -- the
+/// identity's `realtime_model` when set, else `realtime.model()`.
+///
+/// Mirrors `resolve_realtime_voice`: the same charset + known-identity gates
+/// run on the slug before any config lookup (T-40.5-03-01), and the resolved
+/// value is gated by `validate_realtime_values` by the caller.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn resolve_realtime_model(
+    config: &ironhermes_core::config::Config,
+    slug: Option<&str>,
+) -> Result<String, ServerFnError> {
+    use crate::components::hermes_app::avatar_logic::is_known_identity;
+
+    let global_model = config.realtime.model().to_string();
+    let Some(s) = slug else {
+        return Ok(global_model);
+    };
+    if s.len() > 64 || !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(ServerFnError::new(
+            "Invalid identity slug — rejected (T-40.5-03-01)".to_string(),
+        ));
+    }
+    if !is_known_identity(s) {
+        return Err(ServerFnError::new(
+            "Unknown identity — realtime model unavailable (T-40.5-03-01)".to_string(),
+        ));
+    }
+    let identity_model = config
+        .identities
+        .get(s)
+        .and_then(|rec| rec.voice.realtime_model.clone());
+    Ok(identity_model.unwrap_or(global_model))
+}
+
+/// Resolve and GATE the realtime (model, voice) for a session (D-11/D-16).
+/// Pure: no key resolution and no network, so callers can run it first and
+/// reject a bad value before doing any expensive or networked work.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn resolve_realtime_selection(
+    config: &ironhermes_core::config::Config,
+    slug: Option<&str>,
+) -> Result<(String, String), ServerFnError> {
+    let model = resolve_realtime_model(config, slug)?;
+    let voice = resolve_realtime_voice(config, slug)?;
+    validate_realtime_values(&model, &voice)?;
+    Ok((model, voice))
 }
 
 // =============================================================================
@@ -3394,10 +5841,20 @@ pub enum RealtimeTurnSignal {
 /// WRITE key to `realtime_save_transcript`.  The server validates this key and
 /// calls `ensure_web_session` for it so the FK constraint is satisfied before
 /// any transcript write attempt.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct IssueRealtimeTokenResult {
-    /// Short-lived OpenAI ephemeral token for the WebRTC session.
-    pub token: String,
+    /// Short-lived ephemeral token for the WebRTC session. `None` on the
+    /// keyless path (Phase 54.7 D-12): the server skipped minting and the
+    /// browser authenticates with `session_json` instead.
+    pub token: Option<String>,
+    /// Phase 54.7 (D-10/D-12): the URL the browser POSTs its SDP offer to,
+    /// `{realtime.base_url}/realtime/calls`. The browser never builds this
+    /// itself (UI-SPEC Interaction Rule 4).
+    pub calls_url: String,
+    /// Phase 54.7 (D-12): the full realtime session JSON (model, voice,
+    /// instructions, tools). `Some` only on the keyless path, where the
+    /// browser sends it as the `session` multipart part next to the SDP offer.
+    pub session_json: Option<String>,
     /// UUID assigned by the server at mint time (used as heartbeat/end key).
     pub turn_id: String,
     /// Realtime session id (derived from turn_id; returned for internal use).
@@ -3405,6 +5862,24 @@ pub struct IssueRealtimeTokenResult {
     /// The user's real chat session key (`"agent:main:web:dm:{uuid}"`) —
     /// the WRITE key for `realtime_save_transcript` (D-04 RC-1).
     pub chat_session_id: String,
+}
+
+// IN-01: the token is a credential and `session_json` carries the agent's
+// instructions and tools -- neither may reach a `{:?}` rendering.
+impl std::fmt::Debug for IssueRealtimeTokenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IssueRealtimeTokenResult")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("calls_url", &self.calls_url)
+            .field(
+                "session_json_len",
+                &self.session_json.as_ref().map(String::len),
+            )
+            .field("turn_id", &self.turn_id)
+            .field("session_id", &self.session_id)
+            .field("chat_session_id", &self.chat_session_id)
+            .finish()
+    }
 }
 
 /// Pure, testable helper: decide the cooperative-cancel signal for a given
@@ -3458,6 +5933,18 @@ pub fn realtime_signal_for(cancel: &tokio_util::sync::CancellationToken) -> Real
 /// either. Only byte-length instrumentation (never content) is permitted, and
 /// only at the two existing measurement boundaries (`realtime_session_config`'s
 /// warn and the client's data-channel-open log).
+/// Voice-session directive: anything time-sensitive must be looked up, never
+/// answered from training data. Without it the realtime model answered a bare
+/// "get me the latest news" with no tool call at all (2026-10-15 00:06Z), while
+/// an explicit "use web_search ..." prompt in the next session worked.
+#[cfg(not(target_arch = "wasm32"))]
+const REALTIME_CURRENT_INFO_DIRECTIVE: &str = "CURRENT-INFORMATION DIRECTIVE: \
+    Your built-in knowledge is out of date. For news, current events, weather, \
+    prices, scores, releases, or anything that may have changed recently, you MUST \
+    call web_search (or web_answer) before answering, then summarize the results \
+    aloud. Never answer such questions from memory, and never say you cannot \
+    browse — you can, through these tools.";
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn build_realtime_instructions_and_tools() -> (String, Vec<serde_json::Value>) {
     let app_state = crate::server::state::global_app_state();
@@ -3503,7 +5990,8 @@ async fn build_realtime_instructions_and_tools() -> (String, Vec<serde_json::Val
         acknowledge that you are doing so — for example: \"I'll look into that \
         while we keep talking\" or \"I'm on it, give me a moment.\" Do not go \
         silent while background work runs. Continue the conversation naturally \
-        while async tasks complete in the background."
+        while async tasks complete in the background.\n\n\
+        {REALTIME_CURRENT_INFO_DIRECTIVE}"
     );
 
     // ── D-02: Serialize the full ToolRegistry tool set ────────────────────────
@@ -3533,31 +6021,150 @@ async fn build_realtime_instructions_and_tools() -> (String, Vec<serde_json::Val
     (instructions, tools)
 }
 
-/// Pure, testable builder for the POST body sent to
-/// `/v1/realtime/client_secrets`. Split out from `issue_realtime_token` so the
-/// shape can be asserted without any network call, mirroring the existing
-/// `build_realtime_session_json` seam.
+/// What `mint_realtime_for` hands back to `issue_realtime_token` (Phase 54.7
+/// D-10/D-12). The request body is built by the realtime provider's
+/// `build_session` / `build_mint_request`, not here.
 #[cfg(not(target_arch = "wasm32"))]
-fn build_realtime_token_request_json(
-    model: &str,
-    voice: &str,
-    instructions: &str,
-    tools: &[serde_json::Value],
-) -> serde_json::Value {
-    serde_json::json!({
-        "session": {
-            "type": "realtime",
-            "model": model,
-            "instructions": instructions,
-            "tools": tools,
-            "tool_choice": "auto",
-            "audio": { "output": { "voice": voice } }
-        }
+pub(crate) struct MintedRealtime {
+    /// Ephemeral client secret; `None` when minting was skipped (keyless).
+    pub token: Option<String>,
+    /// `{realtime.base_url}/realtime/calls` -- where the browser sends its SDP.
+    pub calls_url: String,
+    /// The full session JSON, set only on the keyless path.
+    pub session_json: Option<String>,
+}
+
+// The token is a credential: keep it out of any `{:?}` rendering.
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for MintedRealtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedRealtime")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("calls_url", &self.calls_url)
+            .field(
+                "session_json_len",
+                &self.session_json.as_ref().map(String::len),
+            )
+            .finish()
+    }
+}
+
+/// The configured realtime provider, or a typed error for an unknown id.
+#[cfg(not(target_arch = "wasm32"))]
+fn configured_realtime_provider(
+    config: &ironhermes_core::config::Config,
+) -> Result<Box<dyn ironhermes_tools::realtime::RealtimeProvider>, ServerFnError> {
+    ironhermes_tools::realtime::realtime_provider(&config.realtime.provider).ok_or_else(|| {
+        ServerFnError::new("realtime provider not supported -- realtime unavailable")
     })
 }
 
-/// Phase 36.17.12 Plan 02: Exchange the server-side OPENAI_API_KEY for a short-lived
+/// `{realtime.base_url}/realtime/calls` for the configured provider (D-10).
+/// Pure: no network, no key.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn realtime_calls_url_for(
+    config: &ironhermes_core::config::Config,
+) -> Result<String, ServerFnError> {
+    let provider = configured_realtime_provider(config)?;
+    provider
+        .calls_url(&config.realtime)
+        .map(|u| u.to_string())
+        .map_err(|_| ServerFnError::new("realtime address invalid -- realtime unavailable"))
+}
+
+/// Phase 54.7 (D-10/D-12): build the realtime session through the provider and
+/// mint an ephemeral client secret at `{base_url}/realtime/client_secrets`.
+///
+/// Extracted from `issue_realtime_token` so it is testable against a mock
+/// server without `AppState`. It runs BEFORE concurrency permits and turn
+/// registration (T-54.7-51): a failed mint registers nothing.
+///
+/// Key rule: `resolve_realtime_key` (plan 06) -- a typed namespaced reference,
+/// or the OpenAI provider key only for the api.openai.com default.
+/// - `Found`    -> mint; the browser gets the ephemeral token.
+/// - `NotFound` -> typed error (the D-07 turn-based fallback trigger). This
+///   covers the default base_url with no OpenAI key AND a typed reference that
+///   does not resolve: neither may silently become a keyless session.
+/// - `None`     -> keyless (D-12): nothing is minted; the result carries the
+///   full session JSON for the browser's multipart calls POST. Reached only for
+///   a custom base_url with no `realtime.api_key_ref`.
+///
+/// Open Question 2: the keyless multipart path follows the OpenAI unified
+/// interface and is UAT-unverified against a non-OpenAI compatible server.
+///
+/// T-LOG-LEAK: the key, the minted token and response bodies are never logged;
+/// only the fixed failure category is.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn mint_realtime_for(
+    config: &ironhermes_core::config::Config,
+    identity: Option<&str>,
+    instructions: &str,
+    tools: &[serde_json::Value],
+) -> Result<MintedRealtime, ServerFnError> {
+    use ironhermes_core::voice_http::VoiceKey;
+
+    let provider = configured_realtime_provider(config)?;
+    // D-11/D-16: resolve the identity-aware model + voice and run the charset
+    // gate BEFORE any key resolution or network call (T-54.7-47).
+    let (model, voice) = resolve_realtime_selection(config, identity)?;
+    let session = provider.build_session(&model, &voice, instructions, tools);
+    let calls_url = realtime_calls_url_for(config)?;
+
+    match resolve_realtime_key(config).await {
+        VoiceKey::Found(key) => {
+            let body = provider.build_mint_request(&session);
+            let minted = provider
+                .mint(&config.realtime, Some(&key), &body)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        error_category = e.category.as_str(),
+                        "Realtime token request failed"
+                    );
+                    ServerFnError::new(format!("realtime mint failed: {}", e.category.as_str()))
+                })?;
+            let token = minted
+                .token
+                .ok_or_else(|| ServerFnError::new("No token in response"))?;
+            Ok(MintedRealtime {
+                token: Some(token),
+                calls_url,
+                session_json: None,
+            })
+        }
+        VoiceKey::None => {
+            // D-12 keyless path: a custom base_url with no key reference. Mint
+            // nothing (no request leaves the host) and let the browser send the
+            // FULL session -- instructions and tools included -- next to its SDP
+            // offer. That POST is plain HTTPS, so the SCTP size limit that moved
+            // these fields into the mint request (Pitfall 5) does not apply.
+            // Only the custom-base path reaches here: resolve_realtime_key never
+            // returns None for the api.openai.com default (Pitfall 9).
+            Ok(MintedRealtime {
+                token: None,
+                calls_url,
+                session_json: Some(session.to_string()),
+            })
+        }
+        VoiceKey::NotFound => {
+            // T-LOG-LEAK: no key material and no variable name in the log line.
+            tracing::info!(
+                "realtime key not found -- realtime unavailable (D-07 fallback trigger)"
+            );
+            Err(ServerFnError::new(
+                "realtime key not found -- realtime unavailable",
+            ))
+        }
+    }
+}
+
+/// Phase 36.17.12 Plan 02: Exchange the server-side realtime key for a short-lived
 /// ephemeral token for a WebRTC-direct realtime session (D-04/D-05).
+///
+/// Phase 54.7 (D-10/D-12): the mint goes to `{realtime.base_url}/realtime/client_secrets`
+/// through the configured realtime provider (`mint_realtime_for`), and the result
+/// carries `calls_url` (`{base_url}/realtime/calls`) for the browser's direct SDP
+/// POST. The OpenAI provider key is used only for the api.openai.com default.
 ///
 /// Phase 39.1 Plan 07 (R39.1-10): additionally acquires a ConcurrencyLayer permit
 /// pair (per-session cap + global ceiling) and registers a `TurnEntry{surface:
@@ -3568,8 +6175,8 @@ fn build_realtime_token_request_json(
 ///
 /// Security contract:
 /// - `model` is resolved from `voice.realtime_model` in config.yaml (BUG 3 fix:
-///   config-driven, not browser-supplied) then whitelist-validated BEFORE any
-///   network call. `voice` is whitelist-validated the same way.
+///   config-driven, not browser-supplied) then charset-gated BEFORE any
+///   network call (D-11, `validate_realtime_values`). `voice` is gated the same way.
 /// - The permanent API key is read server-side only and is never serialized into
 ///   any browser-reachable value.
 /// - On absent key: returns a typed `ServerFnError` (no panic) — the caller (Plan 03)
@@ -3592,101 +6199,30 @@ pub async fn issue_realtime_token(
     // T-40.5-03-01: slug is validated server-side by resolve_realtime_voice.
     active_identity: Option<String>,
 ) -> Result<IssueRealtimeTokenResult, ServerFnError> {
-    // Step 1: Load config to resolve the realtime model, voice, and key env var name.
-    // Model AND voice are resolved here (server-side, config-driven) — never trust
-    // browser-supplied values. This satisfies the config-driven requirement and T-V5.
+    // Step 1: Load config. Model, voice, key and addresses are all resolved
+    // server-side from saved config -- never from browser-supplied values.
     let config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
 
-    // Resolve the realtime model from voice.realtime_model (default: "gpt-realtime").
-    // Resolve the realtime voice with per-identity override (D-12): identity override
-    // wins over global config.voice.realtime_voice when set.
-    let model = config.voice.realtime_model.clone();
-    let voice = resolve_realtime_voice(&config, active_identity.as_deref())?;
-
-    // Step 2: Whitelist validation — reject unknown model/voice BEFORE any network call
-    // (T-36.17.12-02-02 / T-V5). This makes the validation tests offline/hermetic.
-    if !REALTIME_ALLOWED_MODELS.contains(&model.as_str()) {
-        return Err(ServerFnError::new(format!(
-            "Unknown model '{}' — realtime unavailable",
-            model
-        )));
-    }
-    if !REALTIME_ALLOWED_VOICES.contains(&voice.as_str()) {
-        return Err(ServerFnError::new(format!(
-            "Unknown voice '{}' — realtime unavailable",
-            voice
-        )));
-    }
-
-    // Step 3: Resolve the env var name that holds the OpenAI API key.
-    // Prefer providers["openai"].api_key_env if set, fall back to "OPENAI_API_KEY".
-    let key_env = config
-        .providers
-        .get("openai")
-        .and_then(|p| p.api_key_env.as_deref())
-        .unwrap_or("OPENAI_API_KEY");
-    // T-LOG-LEAK: log only the env var NAME, never the key value.
-    let api_key = std::env::var(key_env).map_err(|_| {
-        tracing::info!(
-            env_var = key_env,
-            "OPENAI_API_KEY not set — realtime unavailable (D-07 fallback trigger)"
-        );
-        ServerFnError::new("OPENAI_API_KEY not set — realtime unavailable")
-    })?;
-
-    // Step 3.5 (avatar-not-hearing-voice follow-up — see block comment above
+    // Step 2 (avatar-not-hearing-voice follow-up -- see block comment above
     // build_realtime_instructions_and_tools): build instructions + tools ONCE
-    // here so they travel in this request instead of the browser's
-    // session.update, which is what previously pushed that message 1.83x over
-    // Chrome's SCTP maxMessageSize.
+    // here so they travel in the mint request (or, keyless, the browser's calls
+    // POST) instead of the data-channel session.update, which is what
+    // previously pushed that message 1.83x over Chrome's SCTP maxMessageSize.
+    //
+    // The D-11 gate runs first (it is pure and cheap) so a bad model or voice is
+    // rejected before the expensive prompt build. mint_realtime_for gates again.
+    resolve_realtime_selection(&config, active_identity.as_deref())?;
     let (instructions, tools) = build_realtime_instructions_and_tools().await;
 
-    // Step 4: Exchange permanent key for an ephemeral token via POST to
-    // /v1/realtime/client_secrets. Verified against OpenAI Realtime WebRTC docs
-    // (A2/A3 from RESEARCH.md — endpoint and response field confirmed current).
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://api.openai.com/v1/realtime/client_secrets")
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&build_realtime_token_request_json(
-            &model,
-            &voice,
-            &instructions,
-            &tools,
-        ))
-        .send()
-        .await
-        .map_err(|e| {
-            // T-LOG-LEAK: log only error category, not the request body or api_key.
-            tracing::warn!(error_category = "network", "Realtime token request failed");
-            ServerFnError::new(format!("Token request failed: {e}"))
-        })?;
-
-    // Step 5: Parse the response and extract the ephemeral token.
-    // T-LOG-LEAK: log only status code, not the response body (body contains the token).
-    let status = resp.status();
-    if !status.is_success() {
-        tracing::warn!(http_status = %status, "Realtime token endpoint returned error");
-        return Err(ServerFnError::new(format!(
-            "Token endpoint returned status {status}"
-        )));
-    }
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        tracing::warn!(
-            error_category = "parse",
-            "Realtime token response parse failed"
-        );
-        ServerFnError::new(format!("Token parse failed: {e}"))
-    })?;
-
-    // Extract the ephemeral token value (field: "value" per OpenAI Realtime API docs).
-    let token = body["value"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| ServerFnError::new("No token in response"))?;
+    // Step 3 (Phase 54.7 D-10/D-12): mint through the configured realtime
+    // provider at `{realtime.base_url}/realtime/client_secrets`. Any failure is
+    // a typed error, which voice mode turns into the D-07 turn-based fallback.
+    let MintedRealtime {
+        token,
+        calls_url,
+        session_json,
+    } = mint_realtime_for(&config, active_identity.as_deref(), &instructions, &tools).await?;
 
     // ── Phase 39.1 Plan 07 (R39.1-10): register realtime turn ────────────────
     // AFTER successful token fetch (so a failed mint registers nothing),
@@ -3766,6 +6302,8 @@ pub async fn issue_realtime_token(
 
     Ok(IssueRealtimeTokenResult {
         token,
+        calls_url,
+        session_json,
         turn_id: turn_id.to_string(),
         session_id,
         chat_session_id,
@@ -3793,14 +6331,11 @@ const REALTIME_ALLOWED_NOISE_REDUCTION: &[&str] = &["near_field", "far_field", "
 #[cfg(not(target_arch = "wasm32"))]
 const REALTIME_ALLOWED_VAD_MODES: &[&str] = &["semantic_vad", "server_vad"];
 
-/// Allowed input-transcription models ("off" disables). Server-side validation.
+/// Phase 54.7 (D-11): the fallback input-transcription model when the stored
+/// value fails the charset gate. (`off` is a valid stored value that disables
+/// transcription; it is not a fallback.)
 #[cfg(not(target_arch = "wasm32"))]
-const REALTIME_ALLOWED_TRANSCRIPTION: &[&str] = &[
-    "gpt-4o-mini-transcribe",
-    "gpt-4o-transcribe",
-    "whisper-1",
-    "off",
-];
+const REALTIME_FALLBACK_TRANSCRIPTION: &str = "gpt-4o-mini-transcribe";
 
 /// BUG 5 / Phase 39.3 Plan 01, revised by the avatar-not-hearing-voice follow-up:
 /// Pure, hermetic builder for the GA-shaped Realtime `session` object JSON sent
@@ -3899,35 +6434,7 @@ fn build_realtime_session_json(
 pub async fn realtime_session_config() -> Result<String, ServerFnError> {
     let config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
-    let v = &config.voice;
-
-    let noise_reduction =
-        if REALTIME_ALLOWED_NOISE_REDUCTION.contains(&v.realtime_noise_reduction.as_str()) {
-            v.realtime_noise_reduction.as_str()
-        } else {
-            "far_field"
-        };
-    let vad_mode = if REALTIME_ALLOWED_VAD_MODES.contains(&v.realtime_vad_mode.as_str()) {
-        v.realtime_vad_mode.as_str()
-    } else {
-        "semantic_vad"
-    };
-    let threshold = v.realtime_vad_threshold.clamp(0.0, 1.0);
-    let transcription_model =
-        if REALTIME_ALLOWED_TRANSCRIPTION.contains(&v.realtime_transcription_model.as_str()) {
-            v.realtime_transcription_model.as_str()
-        } else {
-            "gpt-4o-mini-transcribe"
-        };
-
-    let session_json = build_realtime_session_json(
-        noise_reduction,
-        vad_mode,
-        threshold,
-        v.realtime_vad_silence_ms,
-        v.realtime_vad_prefix_ms,
-        transcription_model,
-    );
+    let session_json = realtime_session_config_for(&config);
 
     // DIAGNOSTIC (Avatar-mode regression follow-up, left in place per the
     // avatar-not-hearing-voice debug session so a live reading still confirms
@@ -3942,6 +6449,53 @@ pub async fn realtime_session_config() -> Result<String, ServerFnError> {
     );
 
     Ok(session_json)
+}
+
+/// Pure body of `realtime_session_config` (Phase 54.7 D-11): the audio/VAD
+/// session JSON for `config`, testable without `Config::load`.
+///
+/// The input-transcription model comes from `realtime.transcription_model()`
+/// through the same charset gate as `validate_realtime_values`; an invalid
+/// stored value falls back to `gpt-4o-mini-transcribe` with a warning that
+/// names only the field, never the value.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn realtime_session_config_for(config: &ironhermes_core::config::Config) -> String {
+    let v = &config.voice;
+
+    let noise_reduction =
+        if REALTIME_ALLOWED_NOISE_REDUCTION.contains(&v.realtime_noise_reduction.as_str()) {
+            v.realtime_noise_reduction.as_str()
+        } else {
+            "far_field"
+        };
+    let vad_mode = if REALTIME_ALLOWED_VAD_MODES.contains(&v.realtime_vad_mode.as_str()) {
+        v.realtime_vad_mode.as_str()
+    } else {
+        "semantic_vad"
+    };
+    let threshold = v.realtime_vad_threshold.clamp(0.0, 1.0);
+    let stored_transcription = config.realtime.transcription_model();
+    let transcription_model =
+        if ironhermes_core::voice_endpoint::validate_transcription_model(stored_transcription)
+            .is_ok()
+        {
+            stored_transcription
+        } else {
+            tracing::warn!(
+                field = "realtime.transcription_model",
+                "invalid stored value; using the default transcription model"
+            );
+            REALTIME_FALLBACK_TRANSCRIPTION
+        };
+
+    build_realtime_session_json(
+        noise_reduction,
+        vad_mode,
+        threshold,
+        v.realtime_vad_silence_ms,
+        v.realtime_vad_prefix_ms,
+        transcription_model,
+    )
 }
 
 // =============================================================================
@@ -3991,6 +6545,16 @@ pub async fn realtime_session_end(turn_id: String) -> Result<(), ServerFnError> 
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         approvals.retain(|_call_id, p| p.turn_id != uuid.to_string());
+    }
+
+    // 49.8-08 (D-10/D-16): a realtime turn ending normally is a real session
+    // boundary for voice2voice — stop the robot and cancel any goals.
+    // Awaited, and bounded by end_session_stop's own session-end timeout
+    // (see ironhermes_tools::ros2::session), so an unreachable bridge can
+    // never wedge this endpoint's response.
+    let ros2_report = ironhermes_tools::ros2::end_session_stop(app_state.runtime.registry()).await;
+    if ros2_report != "nothing to stop" {
+        tracing::info!(report = %ros2_report, "realtime_session_end: ros2 session-end stop");
     }
 
     Ok(())
@@ -4054,6 +6618,15 @@ pub async fn realtime_heartbeat(turn_id: String) -> Result<RealtimeTurnSignal, S
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 approvals.retain(|_call_id, p| p.turn_id != uuid.to_string());
+            }
+            // 49.8-08 (D-10/D-16): the heartbeat observing Cancelled IS the
+            // realtime turn's session boundary — stop the robot and cancel
+            // any goals here rather than waiting for realtime_session_end,
+            // which a torn-down client may never call.
+            let ros2_report =
+                ironhermes_tools::ros2::end_session_stop(app_state.runtime.registry()).await;
+            if ros2_report != "nothing to stop" {
+                tracing::info!(report = %ros2_report, "realtime_heartbeat cancelled: ros2 session-end stop");
             }
         }
     }
@@ -4120,6 +6693,16 @@ pub async fn realtime_prune(stale_secs: Option<u64>) -> Result<serde_json::Value
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             approvals.retain(|_call_id, p| p.turn_id != uuid.to_string());
+        }
+    }
+
+    // 49.8-08 (D-10/D-16): pruning at least one abandoned realtime session is
+    // a real session boundary — stop the robot and cancel any goals. Skipped
+    // entirely when nothing was pruned (no boundary crossed).
+    if count > 0 {
+        let ros2_report = ironhermes_tools::ros2::end_session_stop(app_state.runtime.registry()).await;
+        if ros2_report != "nothing to stop" {
+            tracing::info!(report = %ros2_report, "realtime_prune: ros2 session-end stop");
         }
     }
 
@@ -4265,7 +6848,10 @@ fn log_realtime_tool_call_to_trajectory(
 /// Result type returned by `realtime_tool_call` and `realtime_approve`.
 ///
 /// Three variants encode the three outcomes of the approval gate:
-/// - `Output`: tool executed successfully; `output` is the tool's string result.
+/// - `Output`: the tool was dispatched; `output` is the string to hand the model as
+///   the `function_call_output`. That is the tool's own result on success, or a
+///   `realtime_tool_error_output` payload (`{"error":"tool_failed",...}`) when the
+///   tool itself returned `Err` — a failing tool is NOT an HTTP 500.
 /// - `ApprovalPending`: gate requires approval; call is held in
 ///   `AppState.realtime_approvals` keyed by `call_id`. Browser must render an
 ///   approval card and call `realtime_approve` to resolve.
@@ -4295,7 +6881,7 @@ pub enum RealtimeToolResult {
 /// - `turn_live`: the turn UUID is in the registry and its token is NOT cancelled.
 /// - `tool_known`: the `name` is present in the active ToolRegistry definitions.
 /// - `args_valid`: `arguments` parses as valid JSON.
-/// - `needs_approval`: `should_prompt_for_approval(config_yolo)` returned true.
+/// - `needs_approval`: `should_prompt_for_approval(<the web session's DefconLevel>)` returned true.
 ///
 /// Returns an `Action` that the caller translates into a concrete `RealtimeToolResult`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -4334,6 +6920,117 @@ pub fn decide_realtime_tool_action(
     }
 }
 
+/// The DEFCON level a realtime tool call is judged at: the level of the web session that
+/// owns the turn, read live (D-21), or the process default when the turn's session id is
+/// unknown or is not a safe session id (so a hostile id creates no registry entry).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn realtime_session_level(
+    session_id: Option<&str>,
+) -> ironhermes_core::config::DefconLevel {
+    use ironhermes_core::defcon::session_defcon;
+    match session_id.and_then(ironhermes_core::safe_session_id) {
+        Some(id) => session_defcon().handle_for(id).get(),
+        None => session_defcon().process_default(),
+    }
+}
+
+/// Whether a realtime tool call must be held for approval (D-03 / D-21): the web session's
+/// level decides, through the one `should_prompt_for_approval` rule.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn realtime_needs_approval(session_id: Option<&str>) -> bool {
+    ironhermes_tools::approval::should_prompt_for_approval(realtime_session_level(session_id))
+}
+
+/// Longest `reason` (in bytes) a tool-failure payload forwards to the model.
+///
+/// The payload rides the WebRTC data channel (SCTP `maxMessageSize` can be as low
+/// as 64 KiB — see `realtime_session.rs`) and tool errors can embed whole upstream
+/// response bodies, so the reason is bounded. 600 bytes is far more than a voice
+/// model can use and far less than any transport limit.
+const REALTIME_TOOL_ERROR_REASON_MAX_BYTES: usize = 600;
+
+/// Build the `function_call_output` string for a realtime tool call that FAILED.
+///
+/// Target-independent on purpose: the server uses it when a tool returns `Err`
+/// (`kind = "tool_failed"`), and the browser uses it when the relay itself failed
+/// (`kind = "server_error"`) — so the model always gets the same, self-describing
+/// shape: WHICH tool, WHY, and a hint that it can recover. The previous behavior
+/// was a constant `{"error":"server_error"}` with none of the three, which left a
+/// voice model with nothing to act on (debug session web-extract-hangs-60s,
+/// round 2: `web_answer` exhausted its provider chain -> HTTP 500 -> model silent).
+///
+/// `reason` is truncated on a char boundary to
+/// [`REALTIME_TOOL_ERROR_REASON_MAX_BYTES`]. The result is always valid JSON.
+pub fn realtime_tool_error_output(kind: &str, tool: Option<&str>, reason: &str) -> String {
+    let mut end = reason.len().min(REALTIME_TOOL_ERROR_REASON_MAX_BYTES);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut reason_out = reason[..end].to_string();
+    if end < reason.len() {
+        reason_out.push('\u{2026}');
+    }
+    serde_json::json!({
+        "error": kind,
+        "tool": tool,
+        "reason": reason_out,
+        "hint": "The tool call failed and returned no result. Do not repeat the identical \
+                 call. Try a different tool or approach, or tell the user plainly that it \
+                 could not be completed.",
+    })
+    .to_string()
+}
+
+/// What one dispatched realtime tool call produced, ready to hand to the model.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+pub(crate) struct RealtimeDispatch {
+    /// The `function_call_output` string: the tool's own output on success, or a
+    /// [`realtime_tool_error_output`] payload on failure.
+    pub output: String,
+    /// `true` when the tool itself returned `Ok`. Drives the black-box
+    /// `tool_completed.success` flag and gates trajectory logging (a failure payload
+    /// is not a tool result).
+    pub ok: bool,
+}
+
+/// Dispatch one realtime tool call through the registry (D-02).
+///
+/// Single seam shared by `realtime_tool_call` (auto-approved path) and
+/// `realtime_approve` (approved path) so the failure contract lives in ONE place
+/// and is unit-testable without a global `AppState`.
+///
+/// **Failure contract:** a tool that returns `Err` (including "tool not found" and
+/// "tool not available") is NOT a transport failure. It is converted into a
+/// model-readable `function_call_output` payload and returned as a normal
+/// `Output`, so the browser relays it to the model (HTTP 200) and the model can
+/// recover — e.g. fall back from `web_answer` to `web_search` + `web_extract`.
+/// Returning the `Err` as a `ServerFnError` (HTTP 500) is what this replaced.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+pub(crate) async fn dispatch_realtime_tool(
+    registry: &ironhermes_tools::ToolRegistry,
+    name: &str,
+    args: serde_json::Value,
+) -> RealtimeDispatch {
+    match registry.dispatch(name, args).await {
+        Ok(output) => RealtimeDispatch { output, ok: true },
+        Err(e) => {
+            // The 500 this replaced also produced a tower_http ERROR line; keep the
+            // failure visible server-side now that the response is a 200.
+            tracing::warn!(
+                tool = %name,
+                error = %e,
+                "realtime tool call failed; returning an error payload to the model"
+            );
+            RealtimeDispatch {
+                output: realtime_tool_error_output("tool_failed", Some(name), &e.to_string()),
+                ok: false,
+            }
+        }
+    }
+}
+
 /// Relay a realtime `function_call` DataChannel event through the approval gate
 /// (D-03) and, if auto-approved, dispatch via `ToolRegistry` (D-02).
 ///
@@ -4342,9 +7039,10 @@ pub fn decide_realtime_tool_action(
 ///    `TurnRegistry` — stale/forged relays are rejected before any gate check.
 /// 2. `name` must be present in `ToolRegistry.get_definitions(None)` — EoP mitigation.
 /// 3. `arguments` must parse as valid JSON — input-validation gate.
-/// 4. `should_prompt_for_approval(config.autonomous.yolo)` is called unconditionally;
-///    if true, the call is held as `ApprovalPending` — the tool is NOT dispatched.
-///    If false (yolo=true), the call is dispatched immediately.
+/// 4. `should_prompt_for_approval(<the web session's live DefconLevel>)` is called
+///    unconditionally; if true (levels 1-3), the call is held as `ApprovalPending` — the
+///    tool is NOT dispatched. If false (level 4-5, an audited bypass surface), the call is
+///    dispatched immediately.
 ///
 /// **Two-call pattern (OQ#1 resolution):** this fn never blocks inside one HTTP
 /// request for approval input. `ApprovalPending` is returned immediately; the
@@ -4401,8 +7099,13 @@ pub async fn realtime_tool_call(
         .map_err(|e| ServerFnError::new(format!("malformed arguments JSON: {e}")))?;
 
     // --- D-03: approval gate ---
-    let needs_approval =
-        ironhermes_tools::approval::should_prompt_for_approval(app_state.config().autonomous.yolo);
+    // D-21: the web session that owns this turn decides, at its live level.
+    let turn_session = app_state
+        .turn_registry
+        .get_one(uuid)
+        .await
+        .map(|summary| summary.session_id);
+    let needs_approval = realtime_needs_approval(turn_session.as_deref());
 
     if needs_approval {
         // Hold: insert PendingApproval, return immediately (two-call pattern).
@@ -4452,11 +7155,25 @@ pub async fn realtime_tool_call(
     };
 
     // --- D-02: auto-approved — dispatch through ToolRegistry ---
-    let output = {
+    let RealtimeDispatch {
+        output,
+        ok: tool_ok,
+    } = {
         let registry = app_state.runtime.registry().read().await;
-        registry.dispatch(&name, args_parsed.clone()).await
-    }
-    .map_err(|e| ServerFnError::new(format!("tool dispatch error: {e}")))?;
+        dispatch_realtime_tool(&registry, &name, args_parsed.clone()).await
+    };
+
+    // One INFO line per completed realtime tool call (name/outcome/latency only — never
+    // args or output). Before this, a successful realtime tool call left NO line in
+    // web.log, so "did the avatar actually reach web_extract?" could only be inferred
+    // from the absence of errors.
+    tracing::info!(
+        tool = %name,
+        call_id = %call_id,
+        ok = tool_ok,
+        latency_ms = bb_tool_start.elapsed().as_millis() as u64,
+        "realtime tool call completed"
+    );
 
     // --- Phase 39.2: emit tool_completed after dispatch ---
     #[cfg(not(target_arch = "wasm32"))]
@@ -4474,7 +7191,7 @@ pub async fn realtime_tool_call(
                 "tool_name": &name,
                 "call_id": &call_id,
                 "surface": "realtime",
-                "success": true,
+                "success": tool_ok,
                 "result_hash": result_hash,
                 "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
             }),
@@ -4485,22 +7202,29 @@ pub async fn realtime_tool_call(
     // Resolve the tool from the registry and apply redact_args before logging, mirroring
     // the text-chat path (agent_loop.rs L2491-2497). Guard scope is kept tight: acquired,
     // used for redact_args, then dropped before the synchronous log call.
-    let redacted_args = {
-        let registry_guard = app_state.runtime.registry().read().await;
-        if let Some(t) = registry_guard.get(&name) {
-            t.redact_args(&args_parsed)
-        } else {
-            args_parsed.clone()
-        }
-    };
-    log_realtime_tool_call_to_trajectory(
-        &app_state.realtime_trajectory_writer,
-        &name,
-        &redacted_args,
-        &output,
-        &turn_id,
-        &call_id,
-    );
+    //
+    // Only for calls whose tool succeeded: the trajectory entry written here carries
+    // `error: None` and `result: Some(output)`, so logging a failure payload would record
+    // a failed call as a successful one. Failures are surfaced by the WARN in
+    // `dispatch_realtime_tool` and `success: false` in the black-box event above.
+    if tool_ok {
+        let redacted_args = {
+            let registry_guard = app_state.runtime.registry().read().await;
+            if let Some(t) = registry_guard.get(&name) {
+                t.redact_args(&args_parsed)
+            } else {
+                args_parsed.clone()
+            }
+        };
+        log_realtime_tool_call_to_trajectory(
+            &app_state.realtime_trajectory_writer,
+            &name,
+            &redacted_args,
+            &output,
+            &turn_id,
+            &call_id,
+        );
+    }
 
     Ok(RealtimeToolResult::Output { output })
 }
@@ -4511,7 +7235,46 @@ pub async fn realtime_tool_call(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod realtime_tool_call_tests {
-    use super::{decide_realtime_tool_action, RealtimeToolAction};
+    use super::{RealtimeToolAction, decide_realtime_tool_action, realtime_needs_approval};
+    use ironhermes_core::config::DefconLevel;
+    use ironhermes_core::defcon::session_defcon;
+
+    /// D-21: the realtime approval hold follows the web session's own level, read at each
+    /// call. Two sessions at different levels are judged differently under the SAME process
+    /// default, and a session that is unknown or not a safe id gets the process default.
+    #[test]
+    fn web_realtime_tool_uses_session_level() {
+        let lax = "s-realtime-lax";
+        let strict = "s-realtime-strict";
+        let registry = session_defcon();
+        let previous_default = registry.process_default();
+        registry.set_process_default(DefconLevel::THREE);
+
+        registry.set_session_level(lax, DefconLevel::FIVE);
+        registry.set_session_level(strict, DefconLevel::ONE);
+        assert!(
+            !realtime_needs_approval(Some(lax)),
+            "a session at DEFCON 5 bypasses the approval hold"
+        );
+        assert!(
+            realtime_needs_approval(Some(strict)),
+            "a session at DEFCON 1 holds for approval even though the process default is 3"
+        );
+
+        // The level is read live: tightening the lax session takes effect on the next call.
+        registry.set_session_level(lax, DefconLevel::THREE);
+        assert!(realtime_needs_approval(Some(lax)));
+
+        // No session, or a session id that is not safe: the process default decides.
+        assert!(realtime_needs_approval(None));
+        registry.set_process_default(DefconLevel::FIVE);
+        assert!(!realtime_needs_approval(None));
+        assert!(!realtime_needs_approval(Some("not/a/safe/id")));
+
+        registry.forget(lax);
+        registry.forget(strict);
+        registry.set_process_default(previous_default);
+    }
 
     /// Test 1 (yolo=true / auto-approved): gate says Dispatch.
     #[test]
@@ -4599,6 +7362,370 @@ mod realtime_tool_call_tests {
             }
             other => panic!("Expected Reject for unknown tool, got {other:?}"),
         }
+    }
+}
+
+// =============================================================================
+// Debug session web-extract-hangs-60s (round 2): a failing realtime tool must
+// reach the model as a function_call_output payload it can act on — never as an
+// HTTP 500 that the browser can only turn into an opaque `server_error`.
+// =============================================================================
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod realtime_dispatch_tests {
+    use super::dispatch_realtime_tool;
+    use async_trait::async_trait;
+    use ironhermes_core::ToolSchema;
+    use ironhermes_tools::{Tool, ToolRegistry};
+
+    /// A tool whose `execute` returns the given result — the shape of
+    /// `web_answer` when its whole provider chain is exhausted.
+    struct ScriptedTool {
+        name: &'static str,
+        result: Result<&'static str, &'static str>,
+    }
+
+    #[async_trait]
+    impl Tool for ScriptedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "scripted test tool"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                self.name,
+                "scripted test tool",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            match self.result {
+                Ok(s) => Ok(s.to_string()),
+                Err(e) => Err(anyhow::anyhow!(e)),
+            }
+        }
+    }
+
+    fn registry_with(tool: ScriptedTool) -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(tool));
+        reg
+    }
+
+    /// THE regression: `web_answer` with every provider exhausted returned `Err`,
+    /// which `realtime_tool_call` used to propagate with `?` as a `ServerFnError`
+    /// (HTTP 500, 2026-10-10T22:00:01Z). The browser could then only send the
+    /// constant `{"error":"server_error"}`, so the model never learned WHICH tool
+    /// failed, WHY, or that a different tool would work.
+    #[tokio::test]
+    async fn failing_tool_yields_model_readable_output_not_a_server_error() {
+        let reg = registry_with(ScriptedTool {
+            name: "web_answer",
+            result: Err("web_answer: no provider in the configured chain returned an answer \
+                         (perplexity: no key configured; exa: Exa answer response carried no output)"),
+        });
+
+        // The seam is infallible: a tool failure comes back as a function_call_output
+        // payload (HTTP 200), never as a ServerFnError (HTTP 500).
+        let d =
+            dispatch_realtime_tool(&reg, "web_answer", serde_json::json!({"query": "news"})).await;
+        assert!(
+            !d.ok,
+            "the dispatch outcome must record that the tool failed"
+        );
+
+        let v: serde_json::Value =
+            serde_json::from_str(&d.output).expect("failure payload must be valid JSON");
+        assert_eq!(v["error"], "tool_failed");
+        assert_eq!(
+            v["tool"], "web_answer",
+            "model must learn WHICH tool failed"
+        );
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no provider in the configured chain"),
+            "model must learn WHY it failed; got {v}"
+        );
+        assert!(
+            !v["hint"].as_str().unwrap_or_default().is_empty(),
+            "payload must tell the model it can recover (different tool / tell the user)"
+        );
+    }
+
+    /// Control: a tool that succeeds is passed through verbatim — the fix must not
+    /// wrap or alter happy-path output.
+    #[tokio::test]
+    async fn successful_tool_output_passes_through_verbatim() {
+        let reg = registry_with(ScriptedTool {
+            name: "web_search",
+            result: Ok("1. Example headline - https://example.com/a"),
+        });
+        let d = dispatch_realtime_tool(&reg, "web_search", serde_json::json!({})).await;
+        assert!(d.ok);
+        assert_eq!(d.output, "1. Example headline - https://example.com/a");
+    }
+
+    /// A tool name the registry does not know is also a model-recoverable failure
+    /// (e.g. a stale tool list in the realtime session), not a 500.
+    #[tokio::test]
+    async fn unknown_tool_is_reported_to_the_model_not_a_server_error() {
+        let reg = ToolRegistry::new();
+        let d = dispatch_realtime_tool(&reg, "no_such_tool", serde_json::json!({})).await;
+        assert!(!d.ok);
+        let v: serde_json::Value = serde_json::from_str(&d.output).expect("valid JSON");
+        assert_eq!(v["error"], "tool_failed");
+        assert_eq!(v["tool"], "no_such_tool");
+    }
+
+    /// Boundary: the payload rides the WebRTC data channel (SCTP maxMessageSize can be
+    /// as low as 64 KiB — see realtime_session.rs), and tool errors can embed whole
+    /// upstream response bodies. The reason must be bounded, valid JSON, and cut on a
+    /// char boundary (multi-byte input must not panic or corrupt the payload).
+    #[tokio::test]
+    async fn oversized_multibyte_failure_reason_is_truncated_safely() {
+        // 3-byte chars; 5000 of them = 15 000 bytes.
+        let huge: &'static str = Box::leak("\u{20ac}".repeat(5000).into_boxed_str());
+        let reg = registry_with(ScriptedTool {
+            name: "big_error",
+            result: Err(huge),
+        });
+        let d = dispatch_realtime_tool(&reg, "big_error", serde_json::json!({})).await;
+        assert!(
+            d.output.len() < 2_048,
+            "failure payload must be bounded, got {} bytes",
+            d.output.len()
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&d.output).expect("valid JSON after truncation");
+        assert_eq!(v["error"], "tool_failed");
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with('\u{2026}'),
+            "a truncated reason must say so"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Server-side probe: the realtime relay reaches the REAL web_extract tool.
+    // -------------------------------------------------------------------------
+    //
+    // The web_extract nested-semaphore fix (crates/ironhermes-tools) was never
+    // exercised through the realtime surface: after the operator restarted the dx
+    // server there were no web_search / web_extract calls at all, because the model
+    // chose `web_answer` and that call died as an HTTP 500. This drives the SAME
+    // seam `realtime_tool_call` uses (`dispatch_realtime_tool` -> `ToolRegistry::dispatch`,
+    // i.e. availability check + guardrails + `run_bounded`) with the production-shaped
+    // call: 4 news-homepage-sized pages (== extract.max_parallel_summaries) with LLM
+    // processing on. Pre-fix every URL ended as `extraction_timeout` (the whole
+    // per-URL deadline); with an instant mock summarizer a pass here can only mean
+    // the relay path reaches web_extract and the permit deadlock is gone.
+    //
+    // Fully isolated: IRONHERMES_HOME is a tempdir (never ~/.ironhermes), provider
+    // keys are unset so the keyless local fetcher is used, the "site" is a loopback
+    // listener on an ephemeral port, and nothing binds :8080.
+
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use ironhermes_core::{SkillRegistry, SummarizationClientHandle};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serialises the env-mutating probe (the crate runs with --test-threads=1, but
+    /// the lock keeps the test correct if that ever changes).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Restores a process env var on drop.
+    struct EnvRestore {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// Instant mock summarizer that records how many LLM calls were made.
+    struct CountingSummarizer {
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl SummarizationClientHandle for CountingSummarizer {
+        async fn summarize_call(
+            &self,
+            _system_prompt: String,
+            _user_prompt: String,
+            _max_tokens: u32,
+        ) -> anyhow::Result<String> {
+            *self.calls.lock().unwrap() += 1;
+            Ok("MOCK_SUMMARY".to_string())
+        }
+    }
+
+    /// Loopback HTTP "news site": `/pageN` answers after `delay` with a ~9K-char
+    /// article. The delay is a real fetch latency so all N URL tasks hold their fetch
+    /// permit at the same moment, like a real batch (see the tools-crate tests for the
+    /// scheduling-skew rationale).
+    async fn spawn_news_site(delay: Duration, words: usize) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("/page0");
+                    let idx: usize = path.trim_start_matches("/page").parse().unwrap_or(0);
+                    tokio::time::sleep(delay).await;
+                    let body = format!(
+                        "<html><body><article><p>{}</p></article></body></html>",
+                        format!("page{idx} ").repeat(words)
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\
+                         connection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// The voice directive must name the lookup tools the realtime model can
+    /// actually call, or a bare "latest news" request goes unanswered.
+    #[test]
+    fn realtime_current_info_directive_names_web_lookup_tools() {
+        for tool in ["web_search", "web_answer"] {
+            assert!(
+                crate::server::api::REALTIME_CURRENT_INFO_DIRECTIVE.contains(tool),
+                "directive must name `{tool}`"
+            );
+        }
+        assert!(crate::server::api::REALTIME_CURRENT_INFO_DIRECTIVE.contains("news"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn realtime_relay_reaches_web_extract_with_batch_equal_to_permit_count() {
+        let _g = ENV_LOCK.lock().await;
+        let _f = EnvRestore::unset("FIRECRAWL_API_KEY");
+        let _e = EnvRestore::unset("EXA_API_KEY");
+        let _t = EnvRestore::unset("TAVILY_API_KEY");
+        let _ssrf = EnvRestore::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "extract:\n  max_parallel_summaries: 4\n  per_url_timeout_secs: 10\n",
+        )
+        .expect("write isolated config.yaml");
+        let _home = EnvRestore::set("IRONHERMES_HOME", home.path().to_str().expect("utf8 path"));
+
+        let addr = spawn_news_site(Duration::from_millis(1000), 1500).await;
+        let urls: Vec<String> = (0..4).map(|i| format!("http://{addr}/page{i}")).collect();
+
+        let counter = Arc::new(CountingSummarizer {
+            calls: Mutex::new(0),
+        });
+        let handle: Arc<dyn SummarizationClientHandle> = counter.clone();
+        let skills = Arc::new(SkillRegistry::load_with_paths(&[]));
+        let mut reg = ToolRegistry::new();
+        reg.register_web_extract_tool(handle, skills);
+
+        let started = Instant::now();
+        let d = dispatch_realtime_tool(
+            &reg,
+            "web_extract",
+            serde_json::json!({ "urls": urls, "use_llm_processing": true }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            d.ok,
+            "web_extract must be reachable through the realtime dispatch seam; got failure payload: {}",
+            d.output
+        );
+        let results: Vec<serde_json::Value> =
+            serde_json::from_str(&d.output).expect("web_extract returns a JSON array of results");
+        assert_eq!(results.len(), 4, "one result per URL");
+        for (i, r) in results.iter().enumerate() {
+            assert!(
+                r["error"].is_null(),
+                "URL {i} must succeed; an `extraction_timeout` here is the nested-semaphore \
+                 deadlock (4 URLs == 4 permits): {r}"
+            );
+            assert_eq!(r["content"].as_str(), Some("MOCK_SUMMARY"), "URL {i}: {r}");
+        }
+        assert_eq!(
+            *counter.calls.lock().unwrap(),
+            4,
+            "one summarizer call per URL"
+        );
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "4 parallel 1s fetches + instant summaries must finish in a few seconds, took {elapsed:?} \
+             (the pre-fix failure mode burns the whole per-URL deadline)"
+        );
+    }
+
+    /// The client reuses `realtime_tool_error_output` for transport-level failures
+    /// (`kind = "server_error"`, tool known from the originating function_call). It must
+    /// produce the same self-describing shape, and a short reason must pass through
+    /// untouched (no spurious ellipsis).
+    #[test]
+    fn error_output_shape_is_stable_for_client_transport_failures() {
+        let out = super::realtime_tool_error_output(
+            "server_error",
+            Some("web_extract"),
+            "error sending request for url",
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["error"], "server_error");
+        assert_eq!(v["tool"], "web_extract");
+        assert_eq!(v["reason"], "error sending request for url");
+        assert!(!v["hint"].as_str().unwrap_or_default().is_empty());
+
+        // Tool unknown (e.g. a malformed function_call item) -> `tool` is null, not absent.
+        let out = super::realtime_tool_error_output("server_error", None, "x");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert!(v["tool"].is_null());
     }
 }
 
@@ -4705,34 +7832,39 @@ pub async fn realtime_approve(
         }
     }
 
-    let output = {
+    // Same failure contract as `realtime_tool_call`: a tool `Err` becomes a
+    // model-readable `Output` payload (HTTP 200), never a `ServerFnError` (HTTP 500).
+    let RealtimeDispatch {
+        output,
+        ok: tool_ok,
+    } = {
         let registry = app_state.runtime.registry().read().await;
-        registry
-            .dispatch(&pending.tool_name, args_parsed.clone())
-            .await
-    }
-    .map_err(|e| ServerFnError::new(format!("tool dispatch error: {e}")))?;
+        dispatch_realtime_tool(&registry, &pending.tool_name, args_parsed.clone()).await
+    };
 
     // --- D-04: log to trajectory with redacted args (T-LOG-LEAK fix — parity with agent_loop.rs).
     // Resolve the tool from the registry and apply redact_args before logging, mirroring
     // the text-chat path (agent_loop.rs L2491-2497). Guard scope is kept tight: acquired,
     // used for redact_args, then dropped before the synchronous log call.
-    let redacted_args = {
-        let registry_guard = app_state.runtime.registry().read().await;
-        if let Some(t) = registry_guard.get(&pending.tool_name) {
-            t.redact_args(&args_parsed)
-        } else {
-            args_parsed.clone()
-        }
-    };
-    log_realtime_tool_call_to_trajectory(
-        &app_state.realtime_trajectory_writer,
-        &pending.tool_name,
-        &redacted_args,
-        &output,
-        &turn_id,
-        &call_id,
-    );
+    // Success-only — see the matching note in `realtime_tool_call`.
+    if tool_ok {
+        let redacted_args = {
+            let registry_guard = app_state.runtime.registry().read().await;
+            if let Some(t) = registry_guard.get(&pending.tool_name) {
+                t.redact_args(&args_parsed)
+            } else {
+                args_parsed.clone()
+            }
+        };
+        log_realtime_tool_call_to_trajectory(
+            &app_state.realtime_trajectory_writer,
+            &pending.tool_name,
+            &redacted_args,
+            &output,
+            &turn_id,
+            &call_id,
+        );
+    }
 
     Ok(RealtimeToolResult::Output { output })
 }
@@ -5206,54 +8338,47 @@ mod realtime_approve_tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod realtime_token_tests {
-    use super::REALTIME_ALLOWED_MODELS;
-    use super::REALTIME_ALLOWED_VOICES;
     use super::build_realtime_session_json;
-    use super::build_realtime_token_request_json;
 
-    // Helper: run whitelist validation inline (mirrors the server fn's first two checks).
-    // This is offline/hermetic — no reqwest, no env var, no network call.
-    fn validate_model_voice(model: &str, voice: &str) -> Result<(), String> {
-        if !REALTIME_ALLOWED_MODELS.contains(&model) {
-            return Err(format!("Unknown model '{model}' — realtime unavailable"));
-        }
-        if !REALTIME_ALLOWED_VOICES.contains(&voice) {
-            return Err(format!("Unknown voice '{voice}' — realtime unavailable"));
-        }
-        Ok(())
+    /// The mint request body, built by the real realtime provider (Phase 54.7
+    /// D-10): `build_mint_request(build_session(..))`.
+    fn build_realtime_token_request_json(
+        model: &str,
+        voice: &str,
+        instructions: &str,
+        tools: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let provider = ironhermes_tools::realtime::realtime_provider("openai_compatible")
+            .expect("openai_compatible provider exists");
+        provider.build_mint_request(&provider.build_session(model, voice, instructions, tools))
     }
 
-    /// T-36.17.12-02-V1: Bogus model is rejected with Err BEFORE any network call
-    /// (test is offline/hermetic — whitelist check runs before reqwest).
+    // Phase 54.7 (D-11): the three fixed whitelists became the charset gate;
+    // these tests call the real `validate_realtime_values` that
+    // `mint_realtime_for` runs, not a test-local copy of it.
+
+    /// T-36.17.12-02-V1: a model outside the charset is rejected with Err BEFORE
+    /// any network call (offline/hermetic -- the gate runs before reqwest).
     #[test]
     fn realtime_token_validation_bogus_model() {
-        let result = validate_model_voice("bogus-model", "shimmer");
-        assert!(
-            result.is_err(),
-            "Bogus model must be rejected by whitelist validation"
-        );
-        let msg = result.unwrap_err();
+        let result =
+            super::validate_realtime_values("bogus\"model", "shimmer");
+        let msg = result.expect_err("bad model must be rejected").to_string();
         assert!(
             msg.contains("Unknown model"),
             "Error must mention 'Unknown model', got: {msg}"
         );
-        // Security: error must not contain any api_key material
         assert!(
             !msg.contains("sk-"),
             "Error message must not leak key material: {msg}"
         );
     }
 
-    /// T-36.17.12-02-V2: Bogus voice (with valid model) is rejected with Err BEFORE
-    /// any network call (test is offline/hermetic).
+    /// T-36.17.12-02-V2: a voice outside the charset (valid model) is rejected.
     #[test]
     fn realtime_token_validation_bogus_voice() {
-        let result = validate_model_voice("gpt-realtime", "bogus-voice");
-        assert!(
-            result.is_err(),
-            "Bogus voice must be rejected by whitelist validation"
-        );
-        let msg = result.unwrap_err();
+        let result = super::validate_realtime_values("gpt-realtime", "bogus voice");
+        let msg = result.expect_err("bad voice must be rejected").to_string();
         assert!(
             msg.contains("Unknown voice"),
             "Error must mention 'Unknown voice', got: {msg}"
@@ -5264,22 +8389,16 @@ mod realtime_token_tests {
         );
     }
 
-    /// T-36.17.12-02-V3: Valid model+voice combo passes whitelist (offline/hermetic).
-    /// BUG 3 fix: updated from `gpt-realtime-2` to `gpt-realtime` (GA model name, 2026).
+    /// T-36.17.12-02-V3: the historical combos still pass the gate.
     #[test]
-    fn realtime_token_validation_valid_combo_passes_whitelist() {
-        assert!(
-            validate_model_voice("gpt-realtime", "alloy").is_ok(),
-            "gpt-realtime + alloy must pass whitelist"
-        );
-        assert!(
-            validate_model_voice("gpt-realtime", "shimmer").is_ok(),
-            "gpt-realtime + shimmer must pass whitelist"
-        );
-        assert!(
-            validate_model_voice("gpt-realtime", "echo").is_ok(),
-            "gpt-realtime + echo must pass whitelist"
-        );
+    fn realtime_token_validation_valid_combo_passes_gate() {
+        for voice in ["alloy", "shimmer", "echo"] {
+            assert!(
+                super::validate_realtime_values("gpt-realtime", voice)
+                    .is_ok(),
+                "gpt-realtime + {voice} must pass the gate"
+            );
+        }
     }
 
     // ── BUG 5: GA session.update JSON shape (offline/hermetic) ───────────────
@@ -5372,43 +8491,6 @@ mod realtime_token_tests {
         assert!(
             off_v["audio"]["input"]["transcription"].is_null(),
             "off must serialize transcription as null: {off}"
-        );
-    }
-
-    /// T-36.17.12-02-NK: Missing OPENAI_API_KEY yields Err (typed ServerFnError,
-    /// no panic) and the error string does not contain any key material.
-    ///
-    /// Uses a scoped env-var guard to ensure the var is unset during the test
-    /// without affecting other concurrent tests (uses a unique var name).
-    #[test]
-    fn realtime_token_no_key() {
-        // Use a unique env var name that cannot conflict with real env (randomised per-test).
-        let unique_var = "IRONHERMES_TEST_MISSING_REALTIME_KEY_36_17_12";
-        // Ensure it is not set.
-        std::env::remove_var(unique_var);
-
-        // Simulate the key-resolution + absence check from the server fn.
-        // In the real fn: key_env = unique_var (mocked), api_key = std::env::var(key_env).
-        let result: Result<String, String> = std::env::var(unique_var)
-            .map_err(|_| "OPENAI_API_KEY not set — realtime unavailable".to_string());
-
-        assert!(result.is_err(), "Missing key must yield Err (no panic)");
-
-        let msg = result.unwrap_err();
-        // Typed error (no panic) — error message is descriptive
-        assert!(
-            msg.contains("not set"),
-            "Error must mention 'not set', got: {msg}"
-        );
-        // Security: error must not contain any api_key material
-        assert!(
-            !msg.contains("sk-"),
-            "Error must not leak key material: {msg}"
-        );
-        // The unique_var value itself is not in the error (we log only the status)
-        assert!(
-            !msg.contains(unique_var),
-            "Error must not echo the env var name as key material: {msg}"
         );
     }
 
@@ -5547,14 +8629,14 @@ mod realtime_token_tests {
 // =============================================================================
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod realtime_identity_tests_40_5_03 {
-    use super::{resolve_realtime_voice, REALTIME_ALLOWED_VOICES};
+    use super::{resolve_realtime_model, resolve_realtime_voice, validate_realtime_values};
     use ironhermes_core::config::Config;
 
     /// D-12: identity override wins over global when the identity has realtime_voice set.
     #[test]
     fn realtime_resolves_identity_override() {
         let mut config = Config::default();
-        config.voice.realtime_voice = "shimmer".to_string();
+        config.realtime.voice = Some("shimmer".to_string());
         config
             .identities
             .entry("orb_bloom".to_string())
@@ -5589,27 +8671,57 @@ mod realtime_identity_tests_40_5_03 {
         );
     }
 
-    /// T-40.5-03-03: the resolved voice is still subject to REALTIME_ALLOWED_VOICES
-    /// (defense in depth — the identity override does not bypass the whitelist).
+    /// T-40.5-03-03 (replaces `realtime_override_still_whitelisted`, D-11): the
+    /// resolved voice is still subject to the charset gate (defense in depth --
+    /// the identity override does not bypass it).
     #[test]
-    fn realtime_override_still_whitelisted() {
+    fn realtime_override_still_gated() {
         let mut config = Config::default();
-        // Set orb_bloom's realtime_voice to something NOT in the whitelist.
+        // Set orb_bloom's realtime_voice to something outside the voice charset.
         config
             .identities
             .entry("orb_bloom".to_string())
             .or_default()
             .voice
-            .realtime_voice = Some("definitely_invalid_voice".to_string());
+            .realtime_voice = Some("definitely invalid voice".to_string());
 
         let resolved = resolve_realtime_voice(&config, Some("orb_bloom"))
             .expect("orb_bloom is a known identity");
-        assert_eq!(resolved, "definitely_invalid_voice");
+        assert_eq!(resolved, "definitely invalid voice");
 
-        // REALTIME_ALLOWED_VOICES must NOT contain the invalid value.
+        // The real gate must reject the override.
         assert!(
-            !REALTIME_ALLOWED_VOICES.contains(&resolved.as_str()),
-            "REALTIME_ALLOWED_VOICES must not allow identity-override bypass"
+            validate_realtime_values("gpt-realtime", &resolved).is_err(),
+            "the gate must not allow an identity-override bypass"
+        );
+    }
+
+    /// D-16: the identity's realtime_model wins over the global model.
+    #[test]
+    fn realtime_model_resolves_identity_override() {
+        let mut config = Config::default();
+        config
+            .identities
+            .entry("orb_bloom".to_string())
+            .or_default()
+            .voice
+            .realtime_model = Some("gpt-realtime-2".to_string());
+
+        assert_eq!(
+            resolve_realtime_model(&config, Some("orb_bloom")).expect("known identity"),
+            "gpt-realtime-2"
+        );
+        assert_eq!(
+            resolve_realtime_model(&config, None).expect("None slug always resolves"),
+            config.realtime.model()
+        );
+        assert!(
+            resolve_realtime_model(&config, Some("completely_unknown_slug_xyz")).is_err(),
+            "an unknown identity slug must be rejected"
+        );
+        assert!(
+            resolve_realtime_model(&config, Some("bad slug!")).is_err(),
+            "a malformed identity slug must be rejected"
         );
     }
 }
@@ -6004,29 +9116,46 @@ pub(crate) fn write_per_model_context_length(
 /// - Only `config.model.provider` (the CURRENTLY active provider, read
 ///   AFTER any `payload.provider` update on this same call so a combined
 ///   provider+model save syncs the provider the operator just picked, not
-///   the stale one) is ever touched — never any other entry in
-///   `config.providers`.
+///   the stale one) gets the new pick. The one other entry ever touched is
+///   the provider being LEFT on a provider change, and only when its
+///   existing entry has a blank `default_model`: it is pinned to the old
+///   `model.default` it was running on (WR-09), so switching back does not
+///   resolve an empty model.
 /// - Only fires when `payload.default_model` is `Some`, which the six role
 ///   rows never populate (`CascadeKind::Role` writes only `payload.roles`)
 ///   — a role-only save cannot reach this branch.
-/// - Only mutates an EXISTING overlay (`active.default_model` already
-///   `Some`) — if the active provider has no overlay, `config.model.
-///   default` already resolves correctly on its own and nothing here needs
-///   to change.
+/// - Only mutates an EXISTING `providers.<active>` entry, never creating
+///   one, but ALWAYS syncs it — including when it had no `default_model`
+///   (G-58.3.1-10). `model.default` only reaches the main provider, so
+///   without the pin a later switch away would make this provider resolve
+///   an empty model.
 #[cfg(not(target_arch = "wasm32"))]
 fn merge_models_roles_payload(
     config: &mut ironhermes_core::config::Config,
     payload: &ModelsRolesWritePayload,
 ) {
     if let Some(ref provider) = payload.provider {
+        // WR-09 (G-58.3.1-10): the provider being left loses `model.default`,
+        // so a blank existing entry is pinned to the model it was running on,
+        // same rule as the TUI's `record_switch`.
+        if *provider != config.model.provider && !config.model.default.trim().is_empty() {
+            let running = config.model.default.clone();
+            if let Some(outgoing) = config.providers.get_mut(&config.model.provider) {
+                if outgoing
+                    .default_model
+                    .as_deref()
+                    .is_none_or(|m| m.trim().is_empty())
+                {
+                    outgoing.default_model = Some(running);
+                }
+            }
+        }
         config.model.provider = provider.clone();
     }
     if let Some(ref default_model) = payload.default_model {
         config.model.default = default_model.clone();
         if let Some(active) = config.providers.get_mut(&config.model.provider) {
-            if active.default_model.is_some() {
-                active.default_model = Some(default_model.clone());
-            }
+            active.default_model = Some(default_model.clone());
         }
     }
     // Phase 50.5 (D-14/D-16): the default card's window write, AFTER any
@@ -6106,6 +9235,9 @@ pub async fn update_models_roles_config(
 ) -> Result<(), ServerFnError> {
     // Step 1: validate
     validate_models_roles_payload(&payload)?;
+
+    // RR-05 (WR-06): serialise the root load-modify-save; no `.await` below.
+    let _root_write = crate::server::profile_activation_api::lock_root_config_write();
 
     // Step 2: fresh disk read (NOT app_state.config — that is the startup snapshot)
     let mut config = ironhermes_core::config::Config::load()
@@ -6368,10 +9500,7 @@ mod model_roles {
             "only the currently active provider's overlay may be touched"
         );
         assert_eq!(
-            config
-                .providers
-                .get("openrouter")
-                .and_then(|p| p.default_model.as_deref()),
+            config.providers.get("openrouter").and_then(|p| p.default_model.as_deref()),
             Some("newly-picked-model"),
             "the active provider's overlay must be synced to the new pick"
         );
@@ -6415,31 +9544,126 @@ mod model_roles {
         );
     }
 
-    /// When the active provider carries NO overlay, a default-model write
-    /// must not introduce one — `config.model.default` already resolves
-    /// correctly on its own in that case.
+    /// G-58.3.1-10: an active provider whose existing entry has no
+    /// `default_model` still gets the pick written onto that entry, so it keeps
+    /// its model after the operator switches away (a non-main provider never
+    /// sees `model.default`).
     #[test]
-    fn default_model_write_does_not_introduce_overlay_where_none_existed() {
+    fn default_model_write_pins_existing_entry_without_overlay() {
+        use ironhermes_core::config::ProviderConfig;
+        let entry = |default_model: Option<&str>| ProviderConfig {
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            default_model: default_model.map(str::to_string),
+            ..Default::default()
+        };
         let mut config = Config::default();
-        config.model.provider = "openrouter".to_string();
+        config.model.provider = "unsloth-mac-local".to_string();
         config
             .providers
-            .insert("openrouter".to_string(), ironhermes_core::config::ProviderConfig::default());
+            .insert("unsloth-mac-local".to_string(), entry(None));
+        config
+            .providers
+            .insert("z".to_string(), entry(Some("glm-5")));
 
         let payload = ModelsRolesWritePayload {
-            default_model: Some("newly-picked-model".to_string()),
+            default_model: Some("unsloth/flint-GGUF".to_string()),
             provider: None,
             roles: Vec::new(),
             ..Default::default()
         };
         merge_models_roles_payload(&mut config, &payload);
-
         assert_eq!(
-            config.providers.get("openrouter").and_then(|p| p.default_model.as_deref()),
-            None,
-            "no overlay existed before the write, so none should be introduced"
+            config.providers["unsloth-mac-local"]
+                .default_model
+                .as_deref(),
+            Some("unsloth/flint-GGUF"),
+            "the active provider's existing entry must carry the pick"
         );
-        assert_eq!(config.model.default, "newly-picked-model");
+        assert_eq!(config.model.default, "unsloth/flint-GGUF");
+
+        // Switch the active provider away: the one left behind keeps its model.
+        let switch = ModelsRolesWritePayload {
+            default_model: Some("glm-5".to_string()),
+            provider: Some("z".to_string()),
+            roles: Vec::new(),
+            ..Default::default()
+        };
+        merge_models_roles_payload(&mut config, &switch);
+        let resolver = resolver_for(&config);
+        assert_eq!(
+            resolver
+                .resolve("unsloth-mac-local")
+                .expect("provider resolves")
+                .default_model,
+            "unsloth/flint-GGUF",
+            "the non-main provider must keep the model it was left on"
+        );
+    }
+
+    /// WR-09 (G-58.3.1-10): switching away from a null-default provider with
+    /// NO earlier pinning save still leaves it on the model it was running.
+    /// An outgoing entry that already has a model, or a blank old
+    /// `model.default`, is left alone.
+    #[test]
+    fn provider_switch_pins_the_null_default_provider_being_left() {
+        use ironhermes_core::config::ProviderConfig;
+        let entry = |default_model: Option<&str>| ProviderConfig {
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            default_model: default_model.map(str::to_string),
+            ..Default::default()
+        };
+        let switch_to = |provider: &str, model: &str| ModelsRolesWritePayload {
+            default_model: Some(model.to_string()),
+            provider: Some(provider.to_string()),
+            roles: Vec::new(),
+            ..Default::default()
+        };
+
+        let mut config = Config::default();
+        config.model.provider = "unsloth-mac-local".to_string();
+        config.model.default = "unsloth/flint-GGUF".to_string();
+        config
+            .providers
+            .insert("unsloth-mac-local".to_string(), entry(None));
+        config
+            .providers
+            .insert("z".to_string(), entry(Some("glm-5")));
+
+        merge_models_roles_payload(&mut config, &switch_to("z", "glm-5"));
+        assert_eq!(
+            config.providers["unsloth-mac-local"]
+                .default_model
+                .as_deref(),
+            Some("unsloth/flint-GGUF"),
+            "the provider being left must be pinned to the model it was running"
+        );
+        assert_eq!(
+            resolver_for(&config)
+                .resolve("unsloth-mac-local")
+                .expect("provider resolves")
+                .default_model,
+            "unsloth/flint-GGUF"
+        );
+
+        // Leaving a provider that already has a model never overwrites it.
+        config.model.default = "something-else".to_string();
+        let back = switch_to("unsloth-mac-local", "unsloth/flint-GGUF");
+        merge_models_roles_payload(&mut config, &back);
+        assert_eq!(
+            config.providers["z"].default_model.as_deref(),
+            Some("glm-5")
+        );
+
+        // A blank old model.default pins nothing.
+        let mut blank = Config::default();
+        blank.model.provider = "unsloth-mac-local".to_string();
+        blank.model.default = String::new();
+        blank
+            .providers
+            .insert("unsloth-mac-local".to_string(), entry(None));
+        blank.providers.insert("z".to_string(), entry(None));
+        merge_models_roles_payload(&mut blank, &switch_to("z", "glm-5"));
+        assert_eq!(blank.providers["unsloth-mac-local"].default_model, None);
     }
 
     /// Phase 50.5 (D-14): the default-card branch upserts the sparse
@@ -6867,6 +10091,10 @@ pub async fn update_agent_config(payload: AgentWritePayload) -> Result<(), Serve
     // Step 1: validate
     validate_agent_payload(&payload)?;
 
+    // WR-06: load-modify-save of the root config.yaml is serialised with the menu and
+    // activation writers (no `.await` below, so the guard is never held across one).
+    let _root_write = crate::server::profile_activation_api::lock_root_config_write();
+
     // Step 2: fresh disk read (NOT app_state.config — that is the startup snapshot)
     let mut config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
@@ -7173,6 +10401,9 @@ pub async fn get_kanban_config() -> Result<KanbanConfigSnapshot, ServerFnError> 
 pub async fn update_kanban_config(payload: KanbanWritePayload) -> Result<(), ServerFnError> {
     // Step 1: validate
     validate_kanban_payload(&payload)?;
+
+    // RR-05 (WR-06): serialise the root load-modify-save; no `.await` below.
+    let _root_write = crate::server::profile_activation_api::lock_root_config_write();
 
     // Step 2: fresh disk read (NOT app_state.config — that is the startup snapshot)
     let mut config = ironhermes_core::config::Config::load()
@@ -7611,5 +10842,1093 @@ mod kanban_config {
             validate_kanban_payload(&payload).is_err(),
             "max_in_progress 1_000_000 must be rejected"
         );
+    }
+}
+
+// =============================================================================
+// Phase 54.7 Plan 06: the web save/read path for the new voice settings.
+// Every test here drives the REAL save path (validate_voice_payload ->
+// Config::load_from -> apply_voice_payload -> Config::save_to) against a
+// tempdir config, never the operator's home.
+// =============================================================================
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod voice_547_save_tests {
+    use super::{
+        apply_voice_payload, build_voice_snapshot, validate_voice_payload, voice_key_statuses,
+        VoiceKeyStatuses, VoiceWritePayload,
+    };
+    use ironhermes_core::config::Config;
+    use std::path::{Path, PathBuf};
+
+    fn temp_config() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        (dir, path)
+    }
+
+    /// The same order `update_voice_config` runs, minus the home-dir load and
+    /// the write gate (D-20 keeps those in the server fn itself).
+    fn save_through_real_path(path: &Path, payload: &VoiceWritePayload) -> Result<(), String> {
+        validate_voice_payload(payload).map_err(|e| e.to_string())?;
+        let mut config = Config::load_from(path).map_err(|e| e.to_string())?;
+        apply_voice_payload(&mut config, payload).map_err(|e| e.to_string())?;
+        config.save_to(path).map_err(|e| e.to_string())
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    #[test]
+    fn tts_compat_payload_round_trips_through_config_yaml() {
+        let (_dir, path) = temp_config();
+        let payload = VoiceWritePayload {
+            tts_provider: Some("openai_compatible".into()),
+            tts_compat_base_url: Some("http://tts.lan:8880/v1".into()),
+            tts_compat_path: Some("/audio/speech".into()),
+            tts_compat_model: Some("mlx-community/Kokoro-82M-bf16".into()),
+            tts_compat_voice: Some("af_heart".into()),
+            tts_compat_format: Some("wav".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &payload).expect("save");
+
+        let yaml = std::fs::read_to_string(&path).expect("read yaml");
+        assert!(
+            yaml.contains("openai_compatible:"),
+            "the tts block must be written under tts: {yaml}"
+        );
+
+        let config = Config::load_from(&path).expect("reload");
+        let snap = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
+        assert_eq!(snap.tts_provider, "openai_compatible");
+        assert_eq!(snap.tts_compat_base_url, "http://tts.lan:8880/v1");
+        assert_eq!(snap.tts_compat_path, "/audio/speech");
+        assert_eq!(snap.tts_compat_model, "mlx-community/Kokoro-82M-bf16");
+        assert_eq!(snap.tts_compat_voice, "af_heart");
+        assert_eq!(snap.tts_compat_format, "wav");
+        assert_eq!(snap.tts_compat_key_ref, "");
+    }
+
+    #[test]
+    fn tts_compat_key_status_reports_reference_resolution() {
+        let _guard = crate::server::test_support::env_lock();
+        // SAFETY: serialized by env_lock(); the names are unique to this test.
+        unsafe {
+            std::env::set_var("VOICE_KEY_IH_TEST_547_KS", "fake-value-ks-547");
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_UNSET");
+        }
+
+        let mut config = Config::default();
+        config.tts.openai_compatible.api_key_ref = Some("VOICE_KEY_IH_TEST_547_KS".into());
+        let statuses = block_on(voice_key_statuses(&config));
+        assert_eq!(statuses.tts_compat, "found");
+
+        config.tts.openai_compatible.api_key_ref = Some("VOICE_KEY_IH_TEST_547_UNSET".into());
+        assert_eq!(
+            block_on(voice_key_statuses(&config)).tts_compat,
+            "not_found"
+        );
+
+        config.tts.openai_compatible.api_key_ref = None;
+        assert_eq!(block_on(voice_key_statuses(&config)).tts_compat, "none");
+
+        // The snapshot reports the status string, never the value.
+        config.tts.openai_compatible.api_key_ref = Some("VOICE_KEY_IH_TEST_547_KS".into());
+        let statuses = block_on(voice_key_statuses(&config));
+        let snap = build_voice_snapshot(&config, &statuses);
+        assert_eq!(snap.tts_compat_key_status, "found");
+        assert_eq!(snap.tts_compat_key_ref, "VOICE_KEY_IH_TEST_547_KS");
+        let json = serde_json::to_string(&snap).expect("serialize snapshot");
+        assert!(
+            !json.contains("fake-value-ks-547"),
+            "the key value must never cross the boundary: {json}"
+        );
+
+        // A reference outside the voice namespace is rejected before any load.
+        let bad = VoiceWritePayload {
+            tts_compat_key_ref: Some("OPENAI_API_KEY".into()),
+            ..Default::default()
+        };
+        let err = validate_voice_payload(&bad).expect_err("out-of-namespace reference");
+        assert!(
+            err.to_string()
+                .contains("voice_invalid:tts_compat_key_ref:key_ref_namespace"),
+            "unexpected error: {err}"
+        );
+
+        // SAFETY: still under env_lock().
+        unsafe {
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_KS");
+        }
+    }
+
+    #[test]
+    fn empty_optional_text_clears_the_field() {
+        let (_dir, path) = temp_config();
+        let set = VoiceWritePayload {
+            tts_compat_base_url: Some("http://tts.lan:8880/v1".into()),
+            tts_compat_path: Some("/x".into()),
+            tts_compat_key_ref: Some("VOICE_KEY_IH_TEST_547_CLEAR".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &set).expect("first save");
+        let config = Config::load_from(&path).expect("reload");
+        assert_eq!(config.tts.openai_compatible.path.as_deref(), Some("/x"));
+        assert_eq!(
+            config.tts.openai_compatible.api_key_ref.as_deref(),
+            Some("VOICE_KEY_IH_TEST_547_CLEAR")
+        );
+
+        let clear = VoiceWritePayload {
+            tts_compat_path: Some(String::new()),
+            tts_compat_key_ref: Some(String::new()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &clear).expect("clearing save");
+        let config = Config::load_from(&path).expect("reload");
+        assert_eq!(config.tts.openai_compatible.path, None);
+        assert_eq!(config.tts.openai_compatible.api_key_ref, None);
+    }
+
+    #[test]
+    fn payload_default_has_every_field_none() {
+        let json = serde_json::to_value(VoiceWritePayload::default()).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(!obj.is_empty());
+        for (key, value) in obj {
+            assert!(value.is_null(), "default field {key} must serialize null");
+        }
+        let one: VoiceWritePayload =
+            serde_json::from_str(r#"{"auto_tts":true}"#).expect("serde(default) body");
+        assert_eq!(one.auto_tts, Some(true));
+        assert_eq!(one.tts_compat_base_url, None);
+    }
+
+    // -- Task 2: STT block, per-provider TTS fields, legacy-safe format rule -----
+
+    #[test]
+    fn stt_compat_payload_round_trips_and_requires_base_url() {
+        let (_dir, path) = temp_config();
+        let payload = VoiceWritePayload {
+            stt_provider: Some("openai_compatible".into()),
+            stt_compat_base_url: Some("http://stt.lan:8178".into()),
+            stt_compat_path: Some("/inference".into()),
+            stt_compat_model: Some("whisper-large-v3".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &payload).expect("save");
+        let config = Config::load_from(&path).expect("reload");
+        let snap = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
+        assert_eq!(snap.stt_provider, "openai_compatible");
+        assert_eq!(snap.stt_compat_base_url, "http://stt.lan:8178");
+        assert_eq!(snap.stt_compat_path, "/inference");
+        assert_eq!(snap.stt_compat_model, "whisper-large-v3");
+        assert_eq!(snap.stt_model, "whisper-large-v3");
+
+        // The same provider with no address is refused after the merge.
+        let (_dir2, path2) = temp_config();
+        let no_address = VoiceWritePayload {
+            stt_provider: Some("openai_compatible".into()),
+            ..Default::default()
+        };
+        let err = save_through_real_path(&path2, &no_address).expect_err("empty base_url");
+        assert!(
+            err.contains("voice_invalid:stt_compat_base_url:base_url_empty"),
+            "unexpected error: {err}"
+        );
+        assert!(!path2.exists(), "a rejected save must not write the file");
+
+        // An unknown provider id is rejected instead of merged (Pitfall 11).
+        let unknown = VoiceWritePayload {
+            stt_provider: Some("not_a_provider".into()),
+            ..Default::default()
+        };
+        assert!(validate_voice_payload(&unknown).is_err());
+        let unknown_tts = VoiceWritePayload {
+            tts_provider: Some("not_a_provider".into()),
+            ..Default::default()
+        };
+        assert!(validate_voice_payload(&unknown_tts).is_err());
+    }
+
+    #[test]
+    fn per_provider_tts_fields_do_not_cross_write() {
+        let (_dir, path) = temp_config();
+        let before = Config::default();
+
+        let payload = VoiceWritePayload {
+            tts_provider: Some("elevenlabs".into()),
+            tts_elevenlabs_voice: Some("ElevenVoiceX1".into()),
+            tts_elevenlabs_model: Some("eleven_turbo_v2_5".into()),
+            tts_openai_format: Some("opus".into()),
+            tts_openai_model: Some("tts-1-hd".into()),
+            tts_openai_voice: Some("nova".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &payload).expect("save");
+        let config = Config::load_from(&path).expect("reload");
+        assert_eq!(config.tts.provider, "elevenlabs");
+        assert_eq!(config.tts.elevenlabs.voice_id, "ElevenVoiceX1");
+        assert_eq!(config.tts.elevenlabs.model_id, "eleven_turbo_v2_5");
+        assert_eq!(
+            config.tts.edge.voice, before.tts.edge.voice,
+            "a voice typed for ElevenLabs must not overwrite the Edge voice (Pitfall 13)"
+        );
+        assert_eq!(config.tts.openai.format, "opus");
+        assert_eq!(config.tts.openai.model, "tts-1-hd");
+        assert_eq!(config.tts.openai.voice, "nova");
+
+        let snap = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
+        assert_eq!(snap.tts_elevenlabs_voice, "ElevenVoiceX1");
+        assert_eq!(snap.tts_elevenlabs_model, "eleven_turbo_v2_5");
+        assert_eq!(snap.tts_openai_format, "opus");
+
+        // A CHANGED format the provider does not list is refused.
+        let (_dir2, path2) = temp_config();
+        let flac = VoiceWritePayload {
+            tts_openai_format: Some("flac".into()),
+            ..Default::default()
+        };
+        let err = save_through_real_path(&path2, &flac).expect_err("unlisted changed format");
+        assert!(
+            err.contains("voice_invalid:tts_openai_format:format"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn legacy_format_does_not_block_unrelated_save() {
+        let (_dir, path) = temp_config();
+        let legacy_edge = "audio-24khz-48kbitrate-mono-mp3";
+        let mut seeded = Config::default();
+        seeded.tts.edge.output_format = legacy_edge.to_string();
+        seeded.tts.openai.format = "flac".to_string();
+        seeded.save_to(&path).expect("seed legacy config");
+
+        // The panel only toggles auto_tts but echoes the stored formats.
+        let echo = VoiceWritePayload {
+            auto_tts: Some(true),
+            tts_edge_format: Some(legacy_edge.into()),
+            tts_openai_format: Some("flac".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &echo).expect("echoed legacy formats must not block a save");
+        let config = Config::load_from(&path).expect("reload");
+        assert!(config.voice.auto_tts);
+        assert_eq!(config.tts.edge.output_format, legacy_edge);
+        assert_eq!(config.tts.openai.format, "flac");
+
+        // A CHANGED edge format outside the registry list is still refused.
+        let wav = VoiceWritePayload {
+            tts_edge_format: Some("wav".into()),
+            ..Default::default()
+        };
+        let err = save_through_real_path(&path, &wav).expect_err("unlisted changed edge format");
+        assert!(
+            err.contains("voice_invalid:tts_edge_format:format"),
+            "unexpected error: {err}"
+        );
+
+        // A listed one is accepted.
+        let mp3 = VoiceWritePayload {
+            tts_edge_format: Some("mp3".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &mp3).expect("mp3 is listed for edge");
+        let config = Config::load_from(&path).expect("reload");
+        assert_eq!(config.tts.edge.output_format, "mp3");
+    }
+
+    // -- Task 3: realtime block, voice.service, one-way legacy clear -------------
+
+    /// The operator's live pre-54.7 shape: open_mic plus the three legacy keys.
+    const LEGACY_YAML: &str = "voice:\n  barge_in_mode: open_mic\n  realtime_model: gpt-realtime-legacy\n  realtime_voice: ash\n  realtime_transcription_model: whisper-1\n";
+
+    fn seed_legacy(path: &Path) {
+        std::fs::write(path, LEGACY_YAML).expect("seed legacy yaml");
+    }
+
+    #[test]
+    fn realtime_payload_writes_new_block_and_clears_legacy() {
+        let (_dir, path) = temp_config();
+        seed_legacy(&path);
+        let payload = VoiceWritePayload {
+            voice_service: Some("realtime".into()),
+            realtime_base_url: Some("https://api.openai.com/v1".into()),
+            realtime_voice: Some("marin".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &payload).expect("save");
+
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("yaml");
+        assert_eq!(yaml["realtime"]["voice"].as_str(), Some("marin"));
+        // The other legacy values migrate into the new block instead of being lost.
+        assert_eq!(
+            yaml["realtime"]["model"].as_str(),
+            Some("gpt-realtime-legacy")
+        );
+        assert_eq!(
+            yaml["realtime"]["transcription_model"].as_str(),
+            Some("whisper-1")
+        );
+        let voice = &yaml["voice"];
+        for legacy in [
+            "realtime_model",
+            "realtime_voice",
+            "realtime_transcription_model",
+        ] {
+            assert!(
+                voice.get(legacy).is_none(),
+                "legacy key voice.{legacy} must be cleared: {voice:?}"
+            );
+        }
+        assert_eq!(voice["service"].as_str(), Some("realtime"));
+    }
+
+    #[test]
+    fn open_mic_is_rewritten_on_global_save() {
+        let (_dir, path) = temp_config();
+        std::fs::write(&path, "voice:\n  barge_in_mode: open_mic\n").expect("seed");
+        let payload = VoiceWritePayload {
+            voice_service: Some("realtime".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &payload).expect("save");
+        let config = Config::load_from(&path).expect("reload");
+        assert_eq!(
+            config.voice.barge_in_mode,
+            ironhermes_core::config::BargeInMode::PushToInterrupt
+        );
+        assert_eq!(
+            config.voice.service,
+            Some(ironhermes_core::config::VoiceService::Realtime)
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_service_legacy_flag_and_barge_modes() {
+        let (_dir, path) = temp_config();
+        seed_legacy(&path);
+        let config = Config::load_from(&path).expect("load legacy");
+        let snap = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
+        assert_eq!(snap.voice_service, "realtime");
+        assert!(snap.legacy_voice_keys_present);
+        assert_eq!(snap.barge_in_modes, vec!["push_to_interrupt".to_string()]);
+        // The folded legacy values are what the panel shows.
+        assert_eq!(snap.realtime_model, "gpt-realtime-legacy");
+        assert_eq!(snap.realtime_voice, "ash");
+        assert_eq!(snap.realtime_transcription_model, "whisper-1");
+
+        let payload = VoiceWritePayload {
+            voice_service: Some("realtime".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &payload).expect("migrating save");
+        let config = Config::load_from(&path).expect("reload");
+        let snap = build_voice_snapshot(&config, &VoiceKeyStatuses::default());
+        assert!(!snap.legacy_voice_keys_present);
+        assert_eq!(snap.voice_service, "realtime");
+        assert_eq!(snap.realtime_voice, "ash");
+    }
+
+    #[test]
+    fn realtime_key_resolution_rule() {
+        use ironhermes_core::voice_http::VoiceKey;
+        let _guard = crate::server::test_support::env_lock();
+        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
+        // SAFETY: serialized by env_lock(); restored below.
+        unsafe {
+            std::env::set_var("VOICE_KEY_IH_TEST_547_RT", "fake-rt-value-547");
+            std::env::set_var("OPENAI_API_KEY", "test-fake-key");
+        }
+
+        // A typed, namespaced reference resolves through the namespaced rule.
+        let mut config = Config::default();
+        config.realtime.api_key_ref = Some("VOICE_KEY_IH_TEST_547_RT".into());
+        assert!(matches!(
+            block_on(super::resolve_realtime_key(&config)),
+            VoiceKey::Found(_)
+        ));
+
+        // No reference + the api.openai.com default -> the provider key.
+        config.realtime.api_key_ref = None;
+        assert!(config.realtime.is_openai_default_base_url());
+        assert!(matches!(
+            block_on(super::resolve_realtime_key(&config)),
+            VoiceKey::Found(_)
+        ));
+
+        // No reference + a custom address -> no key, even with OPENAI_API_KEY set.
+        config.realtime.base_url = "http://rt.lan:9000/v1".into();
+        assert!(matches!(
+            block_on(super::resolve_realtime_key(&config)),
+            VoiceKey::None
+        ));
+
+        // A hand-edited out-of-namespace reference never reads that variable.
+        config.realtime.api_key_ref = Some("OPENAI_API_KEY".into());
+        assert!(matches!(
+            block_on(super::resolve_realtime_key(&config)),
+            VoiceKey::NotFound
+        ));
+
+        // SAFETY: still under env_lock().
+        unsafe {
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_RT");
+            match prior_openai {
+                Some(v) => std::env::set_var("OPENAI_API_KEY", v),
+                None => std::env::remove_var("OPENAI_API_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn realtime_payload_charset_is_enforced() {
+        fn rejection(payload: VoiceWritePayload) -> String {
+            validate_voice_payload(&payload)
+                .expect_err("must be rejected")
+                .to_string()
+        }
+        let e = rejection(VoiceWritePayload {
+            realtime_model: Some("a\"b".into()),
+            ..Default::default()
+        });
+        assert!(
+            e.contains("voice_invalid:realtime_model:model_charset"),
+            "{e}"
+        );
+        let e = rejection(VoiceWritePayload {
+            realtime_voice: Some("a/b".into()),
+            ..Default::default()
+        });
+        assert!(
+            e.contains("voice_invalid:realtime_voice:voice_charset"),
+            "{e}"
+        );
+        let e = rejection(VoiceWritePayload {
+            realtime_key_ref: Some("OPENAI_API_KEY".into()),
+            ..Default::default()
+        });
+        assert!(
+            e.contains("voice_invalid:realtime_key_ref:key_ref_namespace"),
+            "{e}"
+        );
+        let e = rejection(VoiceWritePayload {
+            realtime_provider: Some("not_a_provider".into()),
+            ..Default::default()
+        });
+        assert!(e.contains("voice_invalid:realtime_provider"), "{e}");
+        let e = rejection(VoiceWritePayload {
+            voice_service: Some("bogus".into()),
+            ..Default::default()
+        });
+        assert!(e.contains("voice_invalid:voice_service"), "{e}");
+
+        // `off` is the reserved transcription value; listed values pass.
+        let ok = VoiceWritePayload {
+            realtime_transcription_model: Some("off".into()),
+            realtime_model: Some("gpt-realtime".into()),
+            realtime_voice: Some("marin".into()),
+            realtime_provider: Some("openai_compatible".into()),
+            realtime_base_url: Some(String::new()),
+            voice_service: Some("turn_based".into()),
+            ..Default::default()
+        };
+        assert!(validate_voice_payload(&ok).is_ok());
+    }
+
+    #[test]
+    fn empty_realtime_base_url_means_default() {
+        let (_dir, path) = temp_config();
+        let custom = VoiceWritePayload {
+            realtime_base_url: Some("http://rt.lan:9000/v1".into()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &custom).expect("custom save");
+        assert_eq!(
+            Config::load_from(&path).unwrap().realtime.base_url,
+            "http://rt.lan:9000/v1"
+        );
+
+        let cleared = VoiceWritePayload {
+            realtime_base_url: Some(String::new()),
+            ..Default::default()
+        };
+        save_through_real_path(&path, &cleared).expect("clearing save");
+        assert_eq!(
+            Config::load_from(&path).unwrap().realtime.base_url,
+            "https://api.openai.com/v1"
+        );
+    }
+}
+
+// =============================================================================
+// Phase 54.7 Plan 11 (D-10/D-11/D-12): realtime on the provider abstraction.
+// Mint tests drive the extracted `mint_realtime_for` against wiremock with fake
+// keys and `VOICE_KEY_IH_TEST_547_*` reference names; they never touch AppState.
+// =============================================================================
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod realtime_547_mint_tests {
+    use super::{
+        mint_realtime_for, realtime_calls_url_for, realtime_session_config_for,
+        resolve_realtime_selection, validate_realtime_values, IssueRealtimeTokenResult,
+    };
+    use ironhermes_core::config::Config;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    #[test]
+    fn mint_realtime_for_custom_base_with_key() {
+        let _guard = crate::server::test_support::env_lock();
+        // SAFETY: serialized by env_lock(); the name is unique to this test.
+        unsafe {
+            std::env::set_var("VOICE_KEY_IH_TEST_547_RT", "test-fake-key");
+        }
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/realtime/client_secrets"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"value": "ek_fake"})),
+                )
+                .mount(&server)
+                .await;
+
+            let mut config = Config::default();
+            config.realtime.base_url = format!("{}/v1", server.uri());
+            config.realtime.api_key_ref = Some("VOICE_KEY_IH_TEST_547_RT".into());
+
+            let minted = mint_realtime_for(&config, None, "instr", &[])
+                .await
+                .expect("mint succeeds");
+            assert_eq!(minted.token.as_deref(), Some("ek_fake"));
+            assert_eq!(
+                minted.calls_url,
+                format!("{}/v1/realtime/calls", server.uri())
+            );
+            assert!(minted.session_json.is_none());
+
+            let reqs = server.received_requests().await.expect("recording on");
+            assert_eq!(reqs.len(), 1, "exactly one mint POST");
+            let auth = reqs[0]
+                .headers
+                .get("authorization")
+                .expect("authorization header")
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(auth, "Bearer test-fake-key");
+            let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+            assert_eq!(body["session"]["model"], "gpt-realtime");
+            assert_eq!(body["session"]["instructions"], "instr");
+        });
+        // SAFETY: still under env_lock().
+        unsafe {
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_RT");
+        }
+    }
+
+    #[test]
+    fn mint_realtime_for_default_base_builds_openai_urls() {
+        let url = realtime_calls_url_for(&Config::default()).expect("default base is valid");
+        assert_eq!(url, "https://api.openai.com/v1/realtime/calls");
+    }
+
+    #[test]
+    fn issue_result_round_trips_new_fields() {
+        let original = IssueRealtimeTokenResult {
+            token: None,
+            calls_url: "http://rt.lan:9000/v1/realtime/calls".into(),
+            session_json: Some("{\"type\":\"realtime\"}".into()),
+            turn_id: "t".into(),
+            session_id: "s".into(),
+            chat_session_id: "c".into(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: IssueRealtimeTokenResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, original);
+        let with_token = IssueRealtimeTokenResult {
+            token: Some("ek".into()),
+            session_json: None,
+            ..original
+        };
+        let back: IssueRealtimeTokenResult =
+            serde_json::from_str(&serde_json::to_string(&with_token).unwrap()).unwrap();
+        assert_eq!(back, with_token);
+    }
+
+    // ── Task 2: the D-11 charset gate ────────────────────────────────────────
+
+    /// IN-01: Debug output never carries the token or the session JSON.
+    #[test]
+    fn issue_realtime_token_result_debug_redacts_secrets() {
+        let result = IssueRealtimeTokenResult {
+            token: Some("ek_FAKE_TOKEN_VALUE".into()),
+            calls_url: "https://rt.example/v1/realtime/calls".into(),
+            session_json: Some("{\"instructions\":\"SYSTEM PROMPT TEXT\"}".into()),
+            turn_id: "t".into(),
+            session_id: "s".into(),
+            chat_session_id: "agent:main:web:dm:x".into(),
+        };
+        let shown = format!("{result:?}");
+        assert!(!shown.contains("ek_FAKE_TOKEN_VALUE"), "{shown}");
+        assert!(!shown.contains("SYSTEM PROMPT TEXT"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+    }
+
+    #[test]
+    fn realtime_gate_accepts_new_ids() {
+        assert!(validate_realtime_values("gpt-realtime-2.1", "marin").is_ok());
+        assert!(validate_realtime_values("gpt-realtime", "shimmer").is_ok());
+        // A namespaced id from an OpenAI-compatible server is also fine.
+        assert!(validate_realtime_values("org/model:v1.2", "af_heart").is_ok());
+    }
+
+    #[test]
+    fn realtime_gate_rejects_injection() {
+        let ok_voice = "marin";
+        let long_model = "m".repeat(129);
+        let long_voice = "v".repeat(65);
+        let bad_models: [&str; 8] = [
+            "a\"b",
+            "a\\b",
+            "a/../b",
+            "/abs/model",
+            "gpt\nrealtime",
+            "",
+            "gpt realtime",
+            &long_model,
+        ];
+        for model in bad_models {
+            let err = validate_realtime_values(model, ok_voice)
+                .expect_err(&format!("model {model:?} must be rejected"))
+                .to_string();
+            assert!(!err.contains("sk-"), "{err}");
+        }
+        for voice in ["a/b", "has space", "quo\"te", "", long_voice.as_str()] {
+            let err = validate_realtime_values("gpt-realtime", voice)
+                .expect_err(&format!("voice {voice:?} must be rejected"))
+                .to_string();
+            assert!(!err.contains("sk-"), "{err}");
+        }
+    }
+
+    /// WR-08: minting never sends the transcription model, so a bad stored value
+    /// must not disable realtime. The session-config path (the only consumer)
+    /// falls back to the default instead.
+    #[test]
+    fn bad_transcription_model_does_not_block_the_mint_path() {
+        let mut config = Config::default();
+        config.realtime.transcription_model = Some("bad\"x of f".to_string());
+        let (model, voice) = resolve_realtime_selection(&config, None)
+            .expect("a bad transcription model must not fail model/voice resolution");
+        assert!(!model.is_empty() && !voice.is_empty());
+        let json = realtime_session_config_for(&config);
+        assert!(
+            json.contains("gpt-4o-mini-transcribe") && !json.contains("bad"),
+            "the session config falls back to the default model: {json}"
+        );
+    }
+
+    /// A key-shaped value pasted into a field must never be echoed back.
+    #[test]
+    fn realtime_gate_does_not_echo_rejected_values() {
+        let err = validate_realtime_values("sk-live-abc\"def", "marin")
+            .expect_err("rejected")
+            .to_string();
+        assert!(!err.contains("sk-live-abc"), "{err}");
+    }
+
+    /// T-54.7-47: the gate runs BEFORE any key resolution or network call. The
+    /// key is resolvable and the mock would answer 200, so only the gate can
+    /// keep the request count at zero.
+    #[test]
+    fn issue_path_rejects_before_network() {
+        let _guard = crate::server::test_support::env_lock();
+        // SAFETY: serialized by env_lock(); the name is unique to this test.
+        unsafe {
+            std::env::set_var("VOICE_KEY_IH_TEST_547_GATE", "test-fake-key");
+        }
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/realtime/client_secrets"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"value": "ek_fake"})),
+                )
+                .mount(&server)
+                .await;
+
+            let mut config = Config::default();
+            config.realtime.base_url = format!("{}/v1", server.uri());
+            config.realtime.api_key_ref = Some("VOICE_KEY_IH_TEST_547_GATE".into());
+            config.realtime.model = Some("a\"b".into());
+
+            let result = mint_realtime_for(&config, None, "instr", &[]).await;
+            assert!(
+                result.is_err(),
+                "an injection-shaped model must be rejected"
+            );
+            let reqs = server.received_requests().await.expect("recording on");
+            assert_eq!(reqs.len(), 0, "no request may reach the realtime host");
+        });
+        // SAFETY: still under env_lock().
+        unsafe {
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_GATE");
+        }
+    }
+
+    /// D-16: the identity's realtime_model reaches the minted session.
+    #[test]
+    fn mint_uses_identity_realtime_model() {
+        let _guard = crate::server::test_support::env_lock();
+        // SAFETY: serialized by env_lock(); the name is unique to this test.
+        unsafe {
+            std::env::set_var("VOICE_KEY_IH_TEST_547_IDM", "test-fake-key");
+        }
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/realtime/client_secrets"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"value": "ek_fake"})),
+                )
+                .mount(&server)
+                .await;
+            let mut config = Config::default();
+            config.realtime.base_url = format!("{}/v1", server.uri());
+            config.realtime.api_key_ref = Some("VOICE_KEY_IH_TEST_547_IDM".into());
+            let rec = config
+                .identities
+                .entry("orb_bloom".to_string())
+                .or_default();
+            rec.voice.realtime_model = Some("gpt-realtime-2".into());
+            rec.voice.realtime_voice = Some("marin".into());
+
+            mint_realtime_for(&config, Some("orb_bloom"), "i", &[])
+                .await
+                .expect("mint");
+            let reqs = server.received_requests().await.expect("recording on");
+            let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+            assert_eq!(body["session"]["model"], "gpt-realtime-2");
+            assert_eq!(body["session"]["audio"]["output"]["voice"], "marin");
+        });
+        // SAFETY: still under env_lock().
+        unsafe {
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_IDM");
+        }
+    }
+
+    #[test]
+    fn session_config_transcription_uses_gate() {
+        fn transcription(model: &str) -> serde_json::Value {
+            let mut config = Config::default();
+            config.realtime.transcription_model = Some(model.to_string());
+            let json = realtime_session_config_for(&config);
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            v["audio"]["input"]["transcription"].clone()
+        }
+        assert_eq!(transcription("whisper-1")["model"], "whisper-1");
+        assert!(transcription("off").is_null());
+        assert_eq!(
+            transcription("bad\"x")["model"],
+            "gpt-4o-mini-transcribe",
+            "an invalid stored value falls back to the default"
+        );
+    }
+
+    // ── Task 3: keyless realtime and the custom-base key-leak guard ──────────
+
+    /// Save and clear OPENAI_API_KEY under the env lock; returns the prior value.
+    fn take_openai_key() -> Option<String> {
+        let prior = std::env::var("OPENAI_API_KEY").ok();
+        // SAFETY: callers hold env_lock().
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        prior
+    }
+
+    fn restore_openai_key(prior: Option<String>) {
+        // SAFETY: callers hold env_lock().
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("OPENAI_API_KEY", v),
+                None => std::env::remove_var("OPENAI_API_KEY"),
+            }
+        }
+    }
+
+    async fn mock_with_mint() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/realtime/client_secrets"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": "ek_fake"})),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// D-12: a custom base_url with no key reference skips minting and hands
+    /// the browser the full session JSON (instructions + tools included).
+    #[test]
+    fn keyless_custom_base_returns_session_json_without_mint() {
+        let _guard = crate::server::test_support::env_lock();
+        let prior = take_openai_key();
+        block_on(async {
+            let server = mock_with_mint().await;
+            let mut config = Config::default();
+            config.realtime.base_url = format!("{}/v1", server.uri());
+
+            let tools = vec![serde_json::json!({"type": "function", "name": "ping"})];
+            let minted = mint_realtime_for(&config, None, "be brief", &tools)
+                .await
+                .expect("keyless mint is not an error");
+            assert!(minted.token.is_none());
+            assert_eq!(
+                minted.calls_url,
+                format!("{}/v1/realtime/calls", server.uri())
+            );
+            let session: serde_json::Value =
+                serde_json::from_str(&minted.session_json.expect("session json")).unwrap();
+            assert_eq!(session["instructions"], "be brief");
+            assert_eq!(session["tools"][0]["name"], "ping");
+            assert_eq!(session["model"], "gpt-realtime");
+
+            let reqs = server.received_requests().await.expect("recording on");
+            assert_eq!(reqs.len(), 0, "keyless path must not mint");
+        });
+        restore_openai_key(prior);
+    }
+
+    /// Pitfall 9 / T-54.7-48: the OpenAI key never reaches a custom realtime
+    /// host, even when OPENAI_API_KEY and providers.openai are configured.
+    #[test]
+    fn custom_base_never_receives_openai_key() {
+        let _guard = crate::server::test_support::env_lock();
+        let prior = std::env::var("OPENAI_API_KEY").ok();
+        // SAFETY: serialized by env_lock(); restored below.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "test-fake-key");
+            std::env::set_var("VOICE_KEY_IH_TEST_547_OAI_PROVIDER", "test-fake-key");
+        }
+        block_on(async {
+            let server = mock_with_mint().await;
+            let mut config = Config::default();
+            config.realtime.base_url = format!("{}/v1", server.uri());
+            config
+                .providers
+                .entry("openai".to_string())
+                .or_default()
+                .api_key_env = Some("OPENAI_API_KEY".to_string());
+
+            let minted = mint_realtime_for(&config, None, "instr", &[])
+                .await
+                .expect("custom base without a reference is keyless");
+            assert!(minted.token.is_none());
+            let reqs = server.received_requests().await.expect("recording on");
+            assert_eq!(reqs.len(), 0, "the OpenAI key must not reach the mock");
+        });
+        // SAFETY: still under env_lock().
+        unsafe {
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_OAI_PROVIDER");
+        }
+        restore_openai_key(prior);
+    }
+
+    /// D-07: the default base_url with no resolvable OpenAI key is a typed
+    /// error (the turn-based fallback trigger), never a panic and never a
+    /// keyless session against api.openai.com.
+    #[test]
+    fn default_base_without_openai_key_errors_for_d07() {
+        let _guard = crate::server::test_support::env_lock();
+        let prior = take_openai_key();
+        let result = block_on(mint_realtime_for(&Config::default(), None, "instr", &[]));
+        restore_openai_key(prior);
+        let msg = result
+            .expect_err("no key on the default base is an error")
+            .to_string();
+        assert!(msg.contains("key not found"), "{msg}");
+        assert!(!msg.contains("sk-"), "{msg}");
+    }
+
+    /// T-36.17.12-02-NK (rewritten to exercise the real path): a missing key
+    /// yields a typed error with no key material and no variable name.
+    #[test]
+    fn realtime_token_no_key() {
+        let _guard = crate::server::test_support::env_lock();
+        let prior = take_openai_key();
+        let result = block_on(mint_realtime_for(&Config::default(), None, "instr", &[]));
+        restore_openai_key(prior);
+        let msg = result.expect_err("missing key must yield Err").to_string();
+        assert!(!msg.contains("sk-"), "{msg}");
+        assert!(!msg.contains("OPENAI_API_KEY"), "{msg}");
+    }
+
+    /// A typed reference that does not resolve is also the D-07 trigger -- it
+    /// must NOT silently become a keyless session.
+    #[test]
+    fn unresolved_key_reference_errors_instead_of_going_keyless() {
+        let _guard = crate::server::test_support::env_lock();
+        // SAFETY: serialized by env_lock().
+        unsafe {
+            std::env::remove_var("VOICE_KEY_IH_TEST_547_ABSENT");
+        }
+        block_on(async {
+            let server = mock_with_mint().await;
+            let mut config = Config::default();
+            config.realtime.base_url = format!("{}/v1", server.uri());
+            config.realtime.api_key_ref = Some("VOICE_KEY_IH_TEST_547_ABSENT".into());
+            let err = mint_realtime_for(&config, None, "instr", &[])
+                .await
+                .expect_err("unresolved reference is an error");
+            assert!(err.to_string().contains("key not found"), "{err}");
+            let reqs = server.received_requests().await.expect("recording on");
+            assert_eq!(reqs.len(), 0);
+        });
+    }
+
+    /// D-11: the three fixed whitelists are gone; the noise-reduction and
+    /// VAD-mode lists stay (Open Question 4). Needles are assembled so this
+    /// test's own source never satisfies them.
+    #[test]
+    fn realtime_whitelists_are_gone() {
+        let src = include_str!("api.rs");
+        for gone in ["_MODELS", "_VOICES", "_TRANSCRIPTION"] {
+            let needle = ["REALTIME_ALLOWED", gone].concat();
+            assert!(!src.contains(&needle), "{needle} must be deleted");
+        }
+        for kept in ["_NOISE_REDUCTION", "_VAD_MODES"] {
+            let needle = ["REALTIME_ALLOWED", kept].concat();
+            assert!(src.contains(&needle), "{needle} must remain");
+        }
+    }
+}
+
+// =============================================================================
+// WR-11: identity voice ids are stored trimmed, matching what validation checked.
+// =============================================================================
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod identity_trim_tests_wr11 {
+    use super::{apply_voice_payload, resolve_realtime_selection, VoiceWritePayload};
+    use ironhermes_core::config::Config;
+
+    #[test]
+    fn padded_identity_voice_ids_are_stored_trimmed() {
+        let mut config = Config::default();
+        let payload = VoiceWritePayload {
+            identity_slug: Some("orb_bloom".to_string()),
+            identity_tts_provider: Some(" edge ".to_string()),
+            identity_tts_voice: Some(" en-US-AriaNeural ".to_string()),
+            identity_realtime_voice: Some(" marin ".to_string()),
+            ..Default::default()
+        };
+        apply_voice_payload(&mut config, &payload).expect("padded ids validate on trim");
+        let rec = config.identities.get("orb_bloom").expect("identity record");
+        assert_eq!(rec.voice.free_mode_tts_provider.as_deref(), Some("edge"));
+        assert_eq!(
+            rec.voice.free_mode_tts_voice.as_deref(),
+            Some("en-US-AriaNeural")
+        );
+        assert_eq!(rec.voice.realtime_voice.as_deref(), Some("marin"));
+        // And realtime stays available for that identity.
+        let (_, voice) = resolve_realtime_selection(&config, Some("orb_bloom"))
+            .expect("a padded-then-trimmed voice passes the realtime gate");
+        assert_eq!(voice, "marin");
+    }
+}
+
+// =============================================================================
+// WR-12: an unchanged hidden value never blocks a save.
+// =============================================================================
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod unchanged_hidden_value_tests_wr12 {
+    use super::{
+        apply_voice_payload, drop_unchanged_choice_fields, validate_voice_payload,
+        VoiceWritePayload,
+    };
+    use ironhermes_core::config::Config;
+
+    /// A config whose UNSELECTED OpenAI provider holds legacy, out-of-charset values.
+    fn legacy_config() -> Config {
+        let mut config = Config::default();
+        config.tts.provider = "edge".into();
+        config.tts.openai.voice = "nova (old)".into();
+        config.tts.openai.model = "tts 1 hd".into();
+        config
+    }
+
+    /// What the panel sends: every provider's stored values, echoed back.
+    fn echo_payload(config: &Config) -> VoiceWritePayload {
+        VoiceWritePayload {
+            tts_provider: Some(config.tts.provider.clone()),
+            tts_openai_model: Some(config.tts.openai.model.clone()),
+            tts_openai_voice: Some(config.tts.openai.voice.clone()),
+            auto_tts: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn echoed_legacy_value_on_a_hidden_provider_does_not_block_the_save() {
+        let mut config = legacy_config();
+        let payload = echo_payload(&config);
+        // Unfiltered, the stateless gate rejects the hidden field (the bug).
+        assert!(validate_voice_payload(&payload).is_err());
+        let effective = drop_unchanged_choice_fields(&config, &payload);
+        validate_voice_payload(&effective).expect("unchanged hidden values are not re-judged");
+        apply_voice_payload(&mut config, &effective).expect("the save applies");
+        assert!(config.voice.auto_tts, "the real change still lands");
+        assert_eq!(config.tts.openai.voice, "nova (old)", "hidden value kept");
+    }
+
+    #[test]
+    fn a_changed_bad_value_is_still_rejected() {
+        let config = legacy_config();
+        let mut payload = echo_payload(&config);
+        payload.tts_openai_voice = Some("still bad voice".into());
+        let effective = drop_unchanged_choice_fields(&config, &payload);
+        let err = validate_voice_payload(&effective)
+            .expect_err("a NEW out-of-charset value must be rejected")
+            .to_string();
+        assert!(err.contains("voice_invalid:tts_openai_voice"), "{err}");
+
+        // An unknown provider id that differs from the stored one is rejected too.
+        let mut payload = echo_payload(&config);
+        payload.tts_provider = Some("nonsense".into());
+        let effective = drop_unchanged_choice_fields(&config, &payload);
+        assert!(validate_voice_payload(&effective).is_err());
+    }
+
+    #[test]
+    fn identity_payloads_are_never_filtered() {
+        let config = legacy_config();
+        let payload = VoiceWritePayload {
+            identity_slug: Some("orb_bloom".into()),
+            identity_tts_voice: Some("bad voice".into()),
+            ..Default::default()
+        };
+        let effective = drop_unchanged_choice_fields(&config, &payload);
+        assert_eq!(effective, payload);
+        assert!(validate_voice_payload(&effective).is_err());
     }
 }

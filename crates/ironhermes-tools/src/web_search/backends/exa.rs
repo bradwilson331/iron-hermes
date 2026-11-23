@@ -12,7 +12,12 @@
 //! `numResults`, `contents.text`, `contents.highlights`,
 //! `contents.livecrawlTimeout`, plus `includeDomains`/`excludeDomains` and
 //! `startPublishedDate` when the caller supplies a domain or freshness
-//! filter. Response: `results[]` mapped to `SearchHit`, and
+//! filter, and `category: "news"` when the caller selects the news vertical
+//! (sent ONLY for news; Exa's other categories are an OPT-OUT per the quick
+//! 261015-tcs COVERAGE.md because they have no Brave or Tavily analogue).
+//! The snippet comes from `highlights` first and falls back to page `text`
+//! only when there are no non-empty highlights (see `snippet_from`).
+//! Response: `results[]` mapped to `SearchHit`, and
 //! `costDollars.total` captured into `SearchOutcome.cost_dollars` (D-14,
 //! capture-only — never enforced).
 
@@ -96,6 +101,11 @@ pub async fn search(
     {
         body["startPublishedDate"] = json!(start);
     }
+    // Hard-coded literal behind the allowlist chokepoint — the caller's
+    // category string is never serialized (T-261015-tcs-01).
+    if filters.is_news() {
+        body["category"] = json!("news");
+    }
 
     let response = client
         .post(resolve_endpoint())
@@ -119,17 +129,10 @@ pub async fn search(
         .results
         .into_iter()
         .take(limit as usize)
-        .map(|r| {
-            let snippet = r
-                .text
-                .filter(|t| !t.is_empty())
-                .or_else(|| r.highlights.first().cloned())
-                .unwrap_or_default();
-            SearchHit {
-                title: r.title.unwrap_or_default(),
-                url: r.url,
-                snippet,
-            }
+        .map(|r| SearchHit {
+            title: r.title.unwrap_or_default(),
+            url: r.url,
+            snippet: snippet_from(r.text, r.highlights),
         })
         .collect();
 
@@ -138,6 +141,22 @@ pub async fn search(
         cost_dollars: parsed.cost_dollars.and_then(|c| c.total),
         provider: "exa",
     })
+}
+
+/// Picks the snippet source: `highlights` first, page `text` only as a
+/// fallback. A homepage's `text` opens with navigation chrome, which the
+/// 3-line / 300-char output cap then shows instead of content (quick
+/// 261015-tcs diagnosis); highlights are the relevant passages.
+fn snippet_from(text: Option<String>, highlights: Vec<String>) -> String {
+    let kept: Vec<&str> = highlights
+        .iter()
+        .map(|h| h.trim())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if !kept.is_empty() {
+        return kept.join(" ... ");
+    }
+    text.filter(|t| !t.trim().is_empty()).unwrap_or_default()
 }
 
 /// Converts the tool's symbolic freshness window into Exa's exact
@@ -179,6 +198,42 @@ mod tests {
         assert!(freshness_to_start_published_date("month").is_some());
         assert!(freshness_to_start_published_date("year").is_some());
         assert!(freshness_to_start_published_date("decade").is_none());
+    }
+
+    #[test]
+    fn snippet_prefers_highlights_over_nav_boilerplate_text() {
+        let s = snippet_from(
+            Some("Skip to content\nNews\nSport".to_string()),
+            vec!["Parliament passes the budget.".to_string()],
+        );
+        assert_eq!(s, "Parliament passes the budget.");
+    }
+
+    #[test]
+    fn snippet_joins_multiple_highlights() {
+        let s = snippet_from(None, vec!["First.".to_string(), "Second.".to_string()]);
+        assert_eq!(s, "First. ... Second.");
+    }
+
+    #[test]
+    fn snippet_falls_back_to_text_when_highlights_empty_or_blank() {
+        assert_eq!(
+            snippet_from(Some("Body text".to_string()), vec![]),
+            "Body text"
+        );
+        assert_eq!(
+            snippet_from(
+                Some("Body text".to_string()),
+                vec!["  ".to_string(), String::new()]
+            ),
+            "Body text"
+        );
+    }
+
+    #[test]
+    fn snippet_is_empty_without_highlights_or_text() {
+        assert_eq!(snippet_from(None, vec![]), "");
+        assert_eq!(snippet_from(Some(String::new()), vec![]), "");
     }
 
     // Real request-shape behavior is exercised by

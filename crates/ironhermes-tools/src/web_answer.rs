@@ -163,8 +163,7 @@ impl WebAnswerTool {
                         "web_answer: unknown provider '{}' in tools.web_answer.chain — skipping",
                         unknown
                     );
-                    skip_or_fail_reasons
-                        .push(format!("{unknown}: unrecognised provider, skipped"));
+                    skip_or_fail_reasons.push(format!("{unknown}: unrecognised provider, skipped"));
                 }
             }
         }
@@ -295,7 +294,9 @@ impl Tool for WebAnswerTool {
         // D-08: read the chain at call time — never cached at construction —
         // mirroring WebSearchTool's own convention.
         let cfg = ironhermes_core::config::Config::load().unwrap_or_default();
-        let outcome = self.answer_chain(query, &cfg.tools.web_answer.chain).await?;
+        let outcome = self
+            .answer_chain(query, &cfg.tools.web_answer.chain)
+            .await?;
 
         // D-13: one coarse phase once the response has been fully collected
         // — every backend collects fully before returning (never a partial
@@ -435,7 +436,10 @@ mod tests {
             .await
             .expect("web_answer must succeed via ddg with zero provider keys configured");
 
-        assert!(result.contains("Progress phase probe answer."), "got: {result}");
+        assert!(
+            result.contains("Progress phase probe answer."),
+            "got: {result}"
+        );
         let recorded = phases.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(
             *recorded,

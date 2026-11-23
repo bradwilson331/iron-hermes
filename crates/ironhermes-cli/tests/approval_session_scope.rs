@@ -159,6 +159,13 @@ async fn shared_store_session_grant_persists_across_two_real_dispatches() {
     set_force_tty_for_test(Some(true));
 
     let dir = tempfile::tempdir().expect("tempdir");
+    // The gated intercept writes its audit row via `AuditLog::load`, which
+    // resolves `get_hermes_home()/logs/audit.jsonl`. Without this pivot every
+    // run appended two `sess-wr06` rows to the operator's real
+    // `~/.ironhermes/logs/audit.jsonl`. This is the only test in this binary
+    // that reads `IRONHERMES_HOME`, so the process-wide set is race-free here.
+    // SAFETY: no other thread in this test binary reads or writes the env.
+    unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
     let approvals = Arc::new(ironhermes_core::ApprovalsStore::with_path(
         dir.path().join("approvals.json"),
     ));
@@ -187,7 +194,6 @@ async fn shared_store_session_grant_persists_across_two_real_dispatches() {
         "sess-wr06".to_string(),
         "cli",
         "chat-wr06".to_string(),
-        false, // yolo
         approvals.clone(),
     );
     let outcome1 = intercept1(args.clone())
@@ -213,7 +219,6 @@ async fn shared_store_session_grant_persists_across_two_real_dispatches() {
         "sess-wr06".to_string(),
         "cli",
         "chat-wr06".to_string(),
-        false,
         approvals.clone(),
     );
     let outcome2 = intercept2(args)
@@ -232,5 +237,15 @@ async fn shared_store_session_grant_persists_across_two_real_dispatches() {
          consult the shared store's session cache — i.e. the WR-01 regression (a fresh \
          `ApprovalsStore::load()` inside the closure body, which always starts with an \
          empty in-memory session set — D-01) has reappeared."
+    );
+
+    // Isolation guard: both dispatches' audit rows must land in the tempdir,
+    // never in the operator's real home.
+    let audit = std::fs::read_to_string(dir.path().join("logs").join("audit.jsonl"))
+        .expect("audit rows must be written under the pivoted IRONHERMES_HOME");
+    assert_eq!(
+        audit.matches("\"session\":\"sess-wr06\"").count(),
+        2,
+        "expected exactly the two dispatches' audit rows in the tempdir: {audit}"
     );
 }

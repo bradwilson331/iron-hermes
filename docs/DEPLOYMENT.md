@@ -82,9 +82,15 @@ After install, seed your API keys in `~/.ironhermes/.env` and set the model prov
 > systemd user service, troubleshooting): [CONTAINER.md](CONTAINER.md).**
 > This section is the reference: build stages, environment variables, volumes.
 
-The `Dockerfile` uses a three-stage build (OCI format — buildable and runnable with both **Podman** and Docker):
+> **The default run is [`docker-compose.yml`](../docker-compose.yml)** (phase
+> 54.11): read-only root filesystem, noexec tmpfs, minimal capabilities,
+> `no-new-privileges` and resource limits. `docker compose up -d` (or
+> `podman compose up -d`) is the documented way to run the container; the plain
+> `podman run` / `docker run` commands below are the unhardened alternative.
+> What each control does and what it breaks: [CONTAINER.md](CONTAINER.md).
 
-- **Stage 0 (`gosu_source`)** — pulls `gosu` from `tianon/gosu:1.17` for privilege dropping
+The `Dockerfile` uses a multi-stage build (OCI format — buildable and runnable with both **Podman** and Docker):
+
 - **Stage 1 (`builder`)** — `rust:1.96-bookworm` (pinned; edition 2024 requires rustc ≥ 1.85); installs `pkg-config` + `libasound2-dev` (ALSA for the `cpal`/`rodio` audio deps in `ironhermes-tools`) and `libssl-dev` + `perl`; compiles `ironhermes` release binary (`cargo build --release --bin ironhermes`, no `--features` flags) with workspace layer caching
 - **Stage 2 (`runtime`)** — `debian:bookworm-slim`; installs `python3`, `ca-certificates`, `procps`, `libasound2` (ALSA runtime); runs as UID 10000 (`ironhermes` user)
 
@@ -200,6 +206,161 @@ podman run -d \
   -e TELEGRAM_BOT_TOKEN=... \
   ironhermes
 ```
+
+### Cloudflare Tunnel
+
+Cloudflare Tunnel is the supported way to put a hosted IronHermes on a public
+hostname without opening an inbound port. `docker-compose.yml` carries an
+optional `cloudflare` profile: a digest-pinned `cloudflared` connector (outbound
+connection only, no published port, read-only, all capabilities dropped,
+`no-new-privileges`) in front of the hardened `ironhermes` service. Without the
+profile, compose starts only `ironhermes`.
+
+1. In the Cloudflare Zero Trust dashboard create a **remotely managed tunnel**
+   and copy its token.
+2. Add a **public hostname** to the tunnel whose service is
+   `http://ironhermes:8080` (the compose service name and the container port;
+   `cloudflared` reaches it over the compose network).
+3. Put the token in the compose project's `.env` file, mode `0600`. It is a
+   bearer credential: never put it in `config.yaml`, and never commit the file.
+
+   ```bash
+   umask 077
+   printf 'CLOUDFLARE_TUNNEL_TOKEN=%s\n' '<token from the dashboard>' >> .env
+   ```
+4. Set the three settings the exposed UI requires (the same fail-closed guards
+   as any non-loopback bind, see [CONTAINER.md](CONTAINER.md)):
+
+   | Setting | Value |
+   |---|---|
+   | `IRONHERMES_IP` | `0.0.0.0`, so `cloudflared` can reach the UI from another container |
+   | `IRONHERMES_WEB_PASSWORD_HASH` | an argon2id hash (`ironhermes web set-password`), single-quoted |
+   | `IRONHERMES_WEB_ALLOWED_ORIGINS` | `https://<tunnel hostname>`, the URL browsers use |
+
+5. Start both services:
+
+   ```bash
+   docker compose --profile cloudflare up -d
+   ```
+
+   `cloudflared` waits for the `ironhermes` healthcheck (`depends_on` with
+   `service_healthy`), so a refused bind configuration shows up as a failed
+   `ironhermes` service, not a tunnel that points at nothing.
+6. Check the **WebSocket path** from a browser on the public hostname: log in,
+   open a chat and confirm the stream updates live. The web UI and the kanban
+   board both use WebSockets; Cloudflare proxies them, but an origin mismatch
+   is rejected with a 403 on upgrade. (Not yet verified live: the Cloudflare
+   Tunnel and WebSocket checks in plan 54.11-06 were deferred by the operator on
+   2026-11-03.)
+
+The `ironhermes` host port stays bound to `127.0.0.1`; the tunnel does not use
+it. `cloudflared` is stateless, so it has no volume.
+
+**Why not Cloudflare Containers.** IronHermes keeps SQLite state and runs
+always-on schedulers (cron, kanban, notifier). Cloudflare Containers has an
+ephemeral disk, `sleepAfter` shutdowns that would stop those schedulers
+(instances sleep after about 10 minutes idle), is amd64-only, and is Beta.
+A tunnel in front of a container with a persistent volume avoids all four.
+
+### Sliplane
+
+Sliplane runs the **`-dev-tools` image** (it carries Node, npm and `wrangler`
+for site deploys). Deploy it as a service with a volume mounted at `/opt/data`
+and set:
+
+| Variable | Value | Why |
+|---|---|---|
+| `SLIPLANE_USER_ID` | `10000` | Sliplane pre-owns the volume as this UID |
+| `SLIPLANE_GROUP_ID` | `10000` | and this GID, matching the image's `ironhermes` user |
+
+Sliplane gives you a container with no custom runtime flags, so what applies
+there splits in two:
+
+- **In-image enforcement, applies with no flags:** the entrypoint drops to uid
+  10000 with `setpriv`, sets `no_new_privs`, empties the bounding set where the
+  runtime allows `CAP_SETPCAP`, and fails closed (the container exits rather
+  than running as root).
+- **Runtime-only controls:** the read-only root filesystem, the `noexec`
+  tmpfs and the pids/memory/cpu limits come from `docker-compose.yml` and
+  depend on what Sliplane's runtime accepts. The Sliplane probe has **not been
+  run** (see below), so treat them as **not enforced** on Sliplane.
+
+#### Sliplane probe results
+
+D-02 decision: option-a
+
+Sliplane uses the single `-dev-tools` image. There is no `docker/sliplane.Dockerfile`
+and no Sliplane variant to keep in step. The operator chose option-a on
+2026-11-03 together with deferring the probe and gave no stated reason. For
+context only, the plan listed these pros for it: no drift between two
+Dockerfiles, the in-image enforcement already applies on Sliplane, and env-only
+differences are set in Sliplane's own settings. Revisit the decision if a later
+probe shows Sliplane needs a default that its settings cannot express.
+
+**Not probed (deferred 2026-11-03).** Nobody has observed which compose keys
+Sliplane's docker-run/Compose import accepts, silently drops or rejects, and
+production Sliplane has not been switched to the hardened `-dev-tools` digest or
+checked with the in-container probe. The status of each runtime-only control on
+Sliplane is therefore **unknown**:
+
+| Compose key | Control | Status on Sliplane |
+|---|---|---|
+| `read_only` | read-only root filesystem | unknown, residual risk |
+| `tmpfs` (`/tmp`, `/var/tmp`, `/dev/shm`, noexec) | noexec scratch space | unknown, residual risk |
+| `shm_size` | Chromium shared memory (Docker default 64 MiB) | unknown, residual risk |
+| `cap_drop` / `cap_add` | capability set at container start | unknown, residual risk (the in-image bounding-set drop below still applies) |
+| `security_opt: no-new-privileges` | runtime `no_new_privs` | unknown, residual risk (the in-image `no_new_privs` below still applies) |
+| `pids_limit`, `mem_limit`/`memswap_limit`, `cpus` | fork-bomb, memory and CPU limits | unknown, residual risk |
+
+Treat every row as a residual risk until a probe says otherwise: on Sliplane a
+compromised agent may be able to write to the root filesystem, execute from
+tmpfs, or exhaust the host's pids, memory or CPU.
+
+**Enforced in-image regardless of what Sliplane applies.** The entrypoint drops
+to uid 10000 with `setpriv`, sets `no_new_privs` and empties the bounding set. The
+`sliplane_equivalent` case in `scripts/tests/container_hardened_smoke.sh` runs
+the `-dev-tools` image with no runtime flags and asserts `APP_UID=10000`,
+`APP_NONEWPRIVS=1`, `APP_CAPBND=0000000000000000` and `GET /` 200 (plan
+54.11-07 Task 1, passed on podman). This is a local proof; it was not observed
+on Sliplane itself.
+
+**Chromium sandbox.** On rootful Linux Docker with Docker's default seccomp
+profile and no flags, Chromium's own sandbox crashed (plan 54.11-06 Task 2). Sliplane
+runs on Docker-class infrastructure, so keep `IRONHERMES_BROWSER_NO_SANDBOX=1`,
+which is already the image default. Do not set it to `0` on Sliplane unless a
+probe shows the sandbox works there.
+
+**How to re-probe.** Run this after a Sliplane change, or to replace the
+"unknown" rows above with facts:
+
+1. Publish a pre-release per `docs/DOCKER-PUBLISH.md` ("Cutting a release"),
+   confirm the docker-publish gates and `cosign verify` on the `-dev-tools`
+   digest, and give Sliplane the digest, never a moving tag.
+2. On a scratch Sliplane service, paste the `ironhermes` service from
+   `docker-compose.yml` (with `image:` set to that digest) into the
+   docker-run/Compose import. Note which keys it accepted, dropped or rejected.
+3. In the service's exec console run:
+
+   ```sh
+   bash /opt/ironhermes/docker/hardening-probe.sh
+   grep -E 'NoNewPrivs|CapBnd' /proc/1/status
+   touch /usr/local/ih-x
+   df -k /dev/shm
+   cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/memory.max
+   ```
+
+   Then, as uid 10000, run `chromium --headless --dump-dom about:blank` once
+   without and once with `--no-sandbox`. Read the app PID values in the probe
+   output (`APP_UID`, `APP_NONEWPRIVS`, `APP_CAPBND`, `ROOTFS_RO`,
+   `TMP_NOEXEC`, `SHM_SIZE_KB`); PID 1 is tini running as root, so its own
+   `CapBnd`/`NoNewPrivs` are not the signal. `ROOTFS_RO` is only `yes` if
+   `touch /usr/local/ih-x` fails as root. `max` in `pids.max`/`memory.max` means
+   no limit.
+4. Switch production to the digest with `SLIPLANE_USER_ID=10000` and
+   `SLIPLANE_GROUP_ID=10000`, keeping the existing env, and confirm the `/`
+   health check and the same probe output on the production container. Then
+   replace the table above with the observed outcomes.
+
 
 ---
 
@@ -324,6 +485,64 @@ loginctl enable-linger $USER
 ```
 
 The unit restarts automatically (`Restart=always`, `RestartSec=5`), capped at 5 starts per 60-second window.
+
+### Memory cap and agent job scopes (Linux)
+
+Phase 58.1 added a containment cap to both agent-hosting units (`ironhermes-gateway.service` and `ironhermes-web.service`) after a child process OOM took a whole unit down. Both ship:
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `MemoryHigh` | `6G` | Kernel throttles the unit's cgroup before it reaches the hard limit |
+| `MemoryMax` | `8G` | Hard limit; the kernel OOM-kills inside the unit's cgroup |
+| `OOMPolicy` | `continue` | An OOM-killed child no longer fails the whole unit |
+| `KillMode` | `control-group` | On stop or crash, every process left in the unit's cgroup is killed (setsid escapees included) |
+
+The cap is only sensible because agent workloads that outlive a turn do not run inside the unit's cgroup: the gateway itself is about 137 MB, so 8G means "gateway bug", not "a build job is running". Long-running workloads live in their own scopes (below) and are not counted against, or killed with, the unit.
+
+**Tuning.** `install.sh` / `update.sh` / `web-install.sh` overwrite the installed unit, so put overrides in a drop-in, which survives reinstall:
+
+```bash
+systemctl --user edit ironhermes-gateway   # or: ironhermes-web
+# in the editor:
+# [Service]
+# MemoryHigh=12G
+# MemoryMax=16G
+```
+
+**Requirements.** The limits are enforced by cgroup v2 with the memory controller delegated to the user manager, and job scopes live under the user manager, which dies with your last session unless linger is on:
+
+```bash
+stat -fc %T /sys/fs/cgroup        # must print: cgroup2fs
+loginctl enable-linger $USER
+systemctl --user show ironhermes-gateway -p MemoryMax -p MemoryHigh -p OOMPolicy -p KillMode
+```
+
+On a host that fails either requirement the keys are accepted but the cap may be a silent no-op. Confirm that the shown values match the table above and that `memory.max` in the unit's cgroup is non-`max`; this document does not claim the cap has been verified on any particular host.
+
+**Agent job scopes.** A terminal command that detaches (`nohup`, `setsid`, `disown`, or a trailing `&`) runs in `ironhermes-job-<id>.scope` under `ironhermes-jobs.slice`. It survives gateway restarts. List and stop:
+
+```bash
+systemctl --user list-units 'ironhermes-job-*'
+systemctl --user stop ironhermes-job-<id>.scope
+```
+
+Limits of the scope placement:
+
+- Detection is a textual match on the command, not a shell parser. A false positive (for example `grep -r nohup .`) still runs in a scope; if that command later hits its timeout, only the foreground shell is killed and anything it started stays in the scope until you stop it (the tool output says so).
+- `background=true` launches go through the process registry and are **not** scoped. They stay in the gateway's cgroup, count against its memory cap, and die with the gateway on restart. Use `nohup`/`setsid` (with output redirected to a file) for anything that must outlive the gateway.
+- If `systemd-run` fails its availability probe, scoping is skipped and the probe is retried after 60 seconds, so a transient failure does not disable it until restart.
+
+**Optional aggregate cap for all jobs.** To bound the total memory of every job scope together:
+
+```bash
+systemctl --user set-property ironhermes-jobs.slice MemoryMax=<size>
+```
+
+This is unverified on every host (research assumption A4): check `systemctl --user show ironhermes-jobs.slice -p MemoryMax` after setting it.
+
+**Kill switch.** Set `IRONHERMES_JOB_SCOPE=off` in `~/.ironhermes/.env` and restart the service to restore the pre-58.1 launch path (no scopes; detached workloads run as children of the unit and are subject to its cap and `KillMode`).
+
+**macOS and containers.** There are no scopes and no memory cap: launchd has no equivalent of a systemd memory hard limit or transient scopes, and a container runtime applies its own limits. Behaviour there is exactly as before 58.1.
 
 ### Cron Watchdog (Fallback)
 

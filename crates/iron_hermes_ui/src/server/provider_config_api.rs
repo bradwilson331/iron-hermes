@@ -366,6 +366,10 @@ pub async fn update_provider_config(payload: ProviderWritePayload) -> Result<(),
     // Step 1: validate
     validate_provider_payload(&payload)?;
 
+    // WR-06: serialise with the menu / activation / agent writers of the root config.yaml
+    // (no `.await` below, so the guard is never held across one).
+    let _root_write = crate::server::profile_activation_api::lock_root_config_write();
+
     // Step 2: fresh disk read (NOT app_state.config — that is the startup snapshot)
     let mut config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;

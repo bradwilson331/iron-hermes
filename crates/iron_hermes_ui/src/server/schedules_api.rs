@@ -993,7 +993,13 @@ fn validate_and_parse_schedule(
     if prompt.trim().is_empty() {
         return Err("Job prompt is required".to_string());
     }
-    ironhermes_cron::scan_cron_prompt(prompt)?;
+    // Regex floor, then the detection sidecar (Phase 57 D-04a). `name` is the label a
+    // blocked job is reported under on the web transcript (UI-SPEC R6).
+    ironhermes_cron::scan_cron_prompt_screened(
+        prompt,
+        ironhermes_core::defcon::session_defcon().process_default(),
+        name.trim(),
+    )?;
     ironhermes_cron::parse_schedule(schedule).map_err(|e| format!("Invalid schedule: {e}"))
 }
 
@@ -1513,6 +1519,72 @@ mod schedules_api_tests {
             list_schedules_in_store(&store, None, false, "default").is_empty(),
             "a rejected prompt must never be persisted"
         );
+    }
+
+    /// A core-level screen that Blocks any text containing `CANARY-CRON`.
+    #[cfg(feature = "server")]
+    struct CanaryScreen;
+
+    #[cfg(feature = "server")]
+    impl ironhermes_core::content_screen::ContentScreen for CanaryScreen {
+        fn screen(
+            &self,
+            req: &ironhermes_core::content_screen::ContentScreenRequest<'_>,
+        ) -> ironhermes_core::content_screen::ContentScreenOutcome {
+            use ironhermes_core::content_screen::{ContentScreenOutcome, ScreenVerdict};
+            let hit = req.text.contains("CANARY-CRON");
+            ContentScreenOutcome {
+                verdict: if hit {
+                    ScreenVerdict::Block
+                } else {
+                    ScreenVerdict::Allow
+                },
+                rules: if hit {
+                    vec!["FakeBlock".to_string()]
+                } else {
+                    Vec::new()
+                },
+                max_severity: hit.then(|| "CRITICAL".to_string()),
+                unavailable: None,
+            }
+        }
+    }
+
+    /// Phase 57 D-04a / UI-SPEC R6: the Schedules create path screens the prompt with the
+    /// detection sidecar, stores nothing, and publishes one `JobBlocked` labelled with the
+    /// form's job name (the in-process path the web transcript shows).
+    #[test]
+    #[cfg(feature = "server")]
+    fn web_schedule_create_refuses_screened_prompt() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = ScopedEnv::set("IRONHERMES_HOME", home.path().to_str().unwrap());
+        ironhermes_core::content_screen::install_content_screen(std::sync::Arc::new(CanaryScreen));
+        let mut rx = ironhermes_core::subscribe_security_events();
+        let (_dir, mut store) = tmp_store();
+
+        let result = create_schedule_in_store(
+            &mut store,
+            basic_input("nightly-digest", "every 2h", "Summarize CANARY-CRON", "local"),
+            None,
+            false,
+            "default",
+        );
+        ironhermes_core::content_screen::clear_content_screen_for_tests();
+
+        let err = result.expect_err("a screened prompt must be refused");
+        assert!(err.contains("security screen"), "got: {err}");
+        assert!(
+            !err.contains("CANARY-CRON"),
+            "the refusal never echoes the prompt: {err}"
+        );
+        assert!(
+            list_schedules_in_store(&store, None, false, "default").is_empty(),
+            "a refused prompt must never be persisted"
+        );
+        let event = rx.try_recv().expect("a JobBlocked event is published");
+        assert_eq!(event.kind, ironhermes_core::SecurityEventKind::JobBlocked);
+        assert_eq!(event.tool, "cron_prompt");
+        assert_eq!(event.summary, "nightly-digest", "the form's job name");
     }
 
     #[test]

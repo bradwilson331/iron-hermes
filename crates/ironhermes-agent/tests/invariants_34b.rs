@@ -11,6 +11,9 @@
 //!
 //!   (b) `preprocess_context_references_async` does NOT appear in the three
 //!       surface files (handler.rs, state.rs, main.rs) — centralization invariant.
+//!
+//! Phase 58.3.1 plan 13 widens the `context_warnings` guard from three surfaces
+//! to five (CLI, gateway, web, TUI, ACP) plus both /goal turn runners.
 
 const RUNTIME_SOURCE: &str = include_str!("../src/agent_runtime.rs");
 
@@ -20,6 +23,13 @@ const HANDLER_SOURCE: &str = include_str!("../../ironhermes-gateway/src/handler.
 const STATE_SOURCE: &str = include_str!("../../iron_hermes_ui/src/server/state.rs");
 
 const MAIN_SOURCE: &str = include_str!("../../ironhermes-cli/src/main.rs");
+
+// Phase 58.3.1 plan 13 (WR-03 / D-05): the TUI turn task, TUI /goal runner and ACP.
+const TUI_EVENT_LOOP_SOURCE: &str = include_str!("../../ironhermes-cli/src/tui_rata/event_loop.rs");
+
+const TUI_APP_SOURCE: &str = include_str!("../../ironhermes-cli/src/tui_rata/app.rs");
+
+const ACP_HANDLERS_SOURCE: &str = include_str!("../../ironhermes-acp/src/handlers.rs");
 
 /// (a) Centralization-before-engine invariant:
 /// The byte offset of `preprocess_context_references_async` in agent_runtime.rs
@@ -105,9 +115,14 @@ fn update_from_response_after_agent_run_in_run_turn() {
 
 const CONTEXT_REFS_SOURCE: &str = include_str!("../src/context_refs.rs");
 
-/// (f) WR-01 surface guard: each of the three production surface files must
-/// reference `context_warnings` — proving CLI, gateway, and web all read the
-/// out-of-band warnings field after `run_turn` returns.
+/// (f) WR-01 surface guard: each production surface file must reference
+/// `context_warnings` — proving CLI, gateway, web, TUI and ACP all read the
+/// out-of-band warnings field after `run_turn` returns, and (Phase 58.3.1 WR-03,
+/// D-05) that both /goal runners render it too. The behavior tests
+/// (`acp_prompt_streams_compact_notice_as_agent_message_chunk`,
+/// `finished_event_shows_context_warnings_as_system_line`,
+/// `goal_turn_notice_streams_context_warnings`, `goal_turn_shows_compact_notice_once`)
+/// are the primary guard; this source check is the inventory.
 #[test]
 fn surfaces_consume_context_warnings() {
     let token = "context_warnings";
@@ -125,6 +140,30 @@ fn surfaces_consume_context_warnings() {
         STATE_SOURCE.contains(token),
         "WR-01: state.rs (web surface) must reference `context_warnings` — \
          run_web_turn must render warnings out-of-band"
+    );
+
+    // Production part only: cut at the first column-0 `#[cfg(test)]` (handler.rs has an
+    // indented one inside an impl, so a bare split would cut far too early).
+    let prod = |src: &'static str| src.split("\n#[cfg(test)]").next().unwrap();
+    assert!(
+        prod(TUI_EVENT_LOOP_SOURCE).contains("agent_result.context_warnings"),
+        "WR-03: TUI event_loop.rs must forward `agent_result.context_warnings` on Finished"
+    );
+    assert!(
+        prod(ACP_HANDLERS_SOURCE).contains("agent_result.context_warnings"),
+        "WR-03: ACP handlers.rs must render `agent_result.context_warnings`"
+    );
+    assert!(
+        prod(TUI_APP_SOURCE).contains("goal_turn_notice(&result,"),
+        "WR-03: the TUI /goal runner must call goal_turn_notice after run_turn"
+    );
+    let gw_uses = prod(HANDLER_SOURCE)
+        .matches("context_warnings_message(&result.context_warnings)")
+        .count();
+    assert!(
+        gw_uses >= 2,
+        "WR-03: gateway handler.rs must render context_warnings in run_agent AND the /goal \
+         runner (found {gw_uses} uses)"
     );
 }
 

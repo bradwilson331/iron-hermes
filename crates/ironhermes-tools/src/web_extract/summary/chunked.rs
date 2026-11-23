@@ -4,9 +4,14 @@
 //! chunk in parallel via `tokio::spawn` + `sem.acquire_owned()` (D-15 single-budget), joins outputs
 //! with `---\n[Chunk N/M]\n` markers (D-16), and runs ONE final synthesis LLM call.
 //!
-//! D-17: the same `Arc<Semaphore>` is used for BOTH outer (per-URL) and inner (per-chunk) fan-out
-//! — Plan 12 holds the outer permit when calling route_tiers, this module acquires inner permits
-//! per chunk. Single budget by design.
+//! D-17: the same `Arc<Semaphore>` is used for BOTH outer (per-URL fetch) and inner (per-chunk
+//! summarization) fan-out — single budget by design. The caller MUST NOT hold an outer permit
+//! while calling `route_tiers` / `summarize_chunked`: this module (and tier 2 in `tiers.rs`)
+//! acquires further permits from the same semaphore, so a caller that kept its own would
+//! deadlock against its siblings once the number of URLs reaching summarization is >= the permit
+//! count. `WebExtractTool::execute` releases the per-URL fetch permit (in `process_one_url`)
+//! before summarization starts. Invariant: no task ever holds one permit while waiting for
+//! another.
 
 use anyhow::{Result, anyhow};
 use ironhermes_core::SummarizationClientHandle;

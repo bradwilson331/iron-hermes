@@ -14,6 +14,18 @@
 //! `Ok(_)` branch. This does NOT call `skills_resource.restart()` — that is
 //! a documented hook-order-crash trap for this screen (see providers.rs
 //! header comment + repo MEMORY feedback_dioxus_use_server_future_restart_trap).
+//!
+//! ── Profile label + D-08 copy (Phase 54.1) ──────────────────────────────
+//! The header's profile name is RESOLVED via a separate `use_resource` over
+//! `get_active_profile()`, never hardcoded — it falls back to the literal
+//! `"default"` only when no activation record has been persisted, matching
+//! `resolve_active_profile_for`'s own fallback contract. This is a NEW,
+//! independent resource with no `.restart()` call anywhere — the ban above
+//! stays documented and applies to every resource on this screen, this one
+//! included. The header also states that skills are installed for everyone
+//! and enabled per profile (post-D-06 truth; see `skills_import_api.rs`'s
+//! `save_job_as_blueprint` doc comment for the server-side half of this
+//! copy correction).
 
 use dioxus::prelude::*;
 use std::collections::HashMap;
@@ -32,8 +44,9 @@ fn tab_predicate(category: &str, enabled: bool, tab: &str) -> bool {
     }
 }
 
-#[allow(dead_code)] // called from use_memo closure in ScreenSkills; dead_code fires on test target
-fn search_matches(name: &str, description: &str, query: &str) -> bool {
+/// The one case-insensitive substring matcher for every search box in the UI.
+/// Shared (not copied) by the settings slide-over's tool and skill pickers.
+pub(crate) fn search_matches(name: &str, description: &str, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
@@ -52,6 +65,20 @@ pub fn ScreenSkills(is_active: bool) -> Element {
         let _tick = refresh_tick();
         async move { crate::server::api::list_skills().await }
     })?;
+
+    // Phase 54.1 D-08: the activated profile's name for the header label —
+    // resolved, never hardcoded. Independent `use_resource` (no `.restart()`
+    // call — see module header). Falls back to the literal "default" when
+    // no activation record has been persisted.
+    let active_profile_resource = use_resource(move || async move {
+        crate::server::profile_activation_api::get_active_profile()
+            .await
+            .unwrap_or(None)
+    });
+    let active_profile_label: String = active_profile_resource()
+        .flatten()
+        .map(|record| record.name)
+        .unwrap_or_else(|| "default".to_string());
 
     // Extract data and error flag BEFORE rsx! — signal borrow discipline
     // per iron_hermes_ui/clippy.toml (no GenerationalRef held across RSX).
@@ -221,7 +248,11 @@ pub fn ScreenSkills(is_active: bool) -> Element {
                     h1 { class: "screen-title", "Skills" }
                     span { class: "screen-status",
                         "· {count_all} loaded · {enabled_count_live} enabled for "
-                        code { style: "color:var(--teal)", "default" }
+                        code { style: "color:var(--teal)", "{active_profile_label}" }
+                    }
+                    div {
+                        style: "opacity:0.7; font-size:0.85em; margin-top:2px;",
+                        "Installed for everyone · enabled per profile"
                     }
                 }
                 div { class: "screen-actions",
@@ -422,5 +453,21 @@ fn SkillCard(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_matches;
+
+    #[test]
+    fn search_matches_is_case_insensitive_on_name_and_description() {
+        assert!(search_matches("Web_Search", "Find pages", "web"));
+        assert!(search_matches("x", "Find PAGES", "pages"));
+        assert!(!search_matches("x", "y", "zzz"));
+        assert!(
+            search_matches("x", "y", ""),
+            "an empty query matches everything"
+        );
     }
 }

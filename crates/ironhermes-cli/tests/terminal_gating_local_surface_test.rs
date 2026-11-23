@@ -132,7 +132,7 @@ async fn benign_local_terminal_command_runs_and_is_audited() {
     let (dir, log) = test_log();
     let approvals_tmp = tempfile::tempdir().expect("approvals tempdir");
     let store = ApprovalsStore::with_path(approvals_tmp.path().join("approvals.json"));
-    let cli_gate = CliApprovalGate::new(store, false);
+    let cli_gate = CliApprovalGate::new(store);
 
     let outcome = execute_gated_command(
         "terminal",

@@ -175,7 +175,10 @@ mod tests {
     #[async_trait::async_trait]
     impl FileTransport for FakeTransport {
         async fn bulk_upload(&self, files: &[(PathBuf, String)]) -> anyhow::Result<()> {
-            self.uploads.lock().expect("uploads mutex poisoned").push(files.to_vec());
+            self.uploads
+                .lock()
+                .expect("uploads mutex poisoned")
+                .push(files.to_vec());
             Ok(())
         }
 
@@ -184,7 +187,10 @@ mod tests {
         }
 
         async fn delete(&self, paths: &[String]) -> anyhow::Result<()> {
-            self.deletes.lock().expect("deletes mutex poisoned").push(paths.to_vec());
+            self.deletes
+                .lock()
+                .expect("deletes mutex poisoned")
+                .push(paths.to_vec());
             Ok(())
         }
     }
@@ -201,7 +207,9 @@ mod tests {
 
         let files = vec![(file_path.clone(), "remote/a.txt".to_string())];
         mgr.sync(&files).await.expect("first sync");
-        mgr.sync(&files).await.expect("second sync — file unchanged");
+        mgr.sync(&files)
+            .await
+            .expect("second sync — file unchanged");
 
         let uploads = handle.uploads.lock().expect("uploads mutex poisoned");
         assert_eq!(
@@ -258,7 +266,11 @@ mod tests {
         mgr.sync(&[]).await.expect("second sync — a.txt removed");
 
         let deletes = handle.deletes.lock().expect("deletes mutex poisoned");
-        assert_eq!(deletes.len(), 1, "a removed file must trigger exactly one delete call");
+        assert_eq!(
+            deletes.len(),
+            1,
+            "a removed file must trigger exactly one delete call"
+        );
         assert_eq!(deletes[0], vec!["remote/a.txt".to_string()]);
     }
 
@@ -298,6 +310,8 @@ mod tests {
 
         // FakeTransport::bulk_download is a no-op Ok(()); this just proves
         // the manager wires sync_back() straight through without erroring.
-        mgr.sync_back(dir.path()).await.expect("sync_back should delegate cleanly");
+        mgr.sync_back(dir.path())
+            .await
+            .expect("sync_back should delegate cleanly");
     }
 }

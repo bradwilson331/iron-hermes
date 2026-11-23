@@ -17,6 +17,7 @@ pub mod docker;
 pub mod executor;
 pub mod file_sync;
 pub mod local;
+pub mod scope;
 pub mod session;
 pub mod ssh;
 
@@ -74,6 +75,10 @@ pub struct RunOpts {
     /// `Executor::execute` to be able to cancel whichever `tokio::process::
     /// Child` a backend spawned to honor `ExecResult.returncode == 130`.
     pub cancel: Option<CancellationToken>,
+    /// 58.1 D-11: true when the RAW command detaches a process; `LocalEnvironment`
+    /// launches it into its own systemd scope. Docker/SSH ignore it — their
+    /// workload is already off-host.
+    pub detached: bool,
 }
 
 /// Result of a single [`Environment::run_bash`] call (§1.2 return contract —

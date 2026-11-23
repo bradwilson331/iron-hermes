@@ -1094,6 +1094,23 @@ mod tests {
         );
     }
 
+    /// Phase 58.3.1 (D-13): the three new sources carry their provenance word.
+    #[test]
+    fn window_placeholder_names_new_sources() {
+        assert_eq!(
+            window_placeholder(Some(8192), ContextWindowSource::Learned),
+            "resolved: 8,192 (learned)"
+        );
+        assert_eq!(
+            window_placeholder(Some(8192), ContextWindowSource::Probed),
+            "resolved: 8,192 (probed)"
+        );
+        assert_eq!(
+            window_placeholder(Some(8192), ContextWindowSource::LocalDefault),
+            "resolved: 8,192 (local default)"
+        );
+    }
+
     /// Phase 50.5 Task 1: blank means clear (`Ok(None)`), a valid number
     /// parses, and garbage / zero / above-ceiling all carry the Copywriting
     /// Contract's validation string.

@@ -1,0 +1,273 @@
+/* ──────────────────────────────────────────────────────────
+   Phase 54.4 Plan 07 (D-08 / D-24) — Logs screen.
+   Linked unconditionally from app.rs (plan 11's Chat mini-panel reuses the
+   row styles). Colours come only from the theme variables.
+   ────────────────────────────────────────────────────────── */
+
+/* Layout (user-requested, 2026-10-08, overriding UI-SPEC D-26 "first row
+   below the wheel"): the screen header row sits in the overhang band to the
+   RIGHT of the docked wheel, 16px below the banner, and starts at
+   --ih-row-inset. Everything after it begins at or below the wheel's bottom
+   edge (--ih-overhang-h below the banner): 16px top padding + the header's
+   min-height + the 16px gap add up to exactly --ih-overhang-h, so nothing
+   sits under the wheel. Scoped to #screen-logs so the generic .screen rule
+   in screens.css is untouched. */
+#screen-logs { padding: 16px 16px 60px; gap: 16px; }
+#screen-logs > .screen-header {
+  box-sizing: border-box;
+  /* The screen already pads 16px on the left; add the rest of the inset. */
+  margin-left: calc(var(--ih-row-inset) - 16px);
+  min-height: calc(var(--ih-overhang-h) - 32px);
+  align-items: center;
+}
+
+.ih-log-caption {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Agent filter select (40px, min 160px). */
+.ih-log-filter {
+  box-sizing: border-box;
+  height: 40px;
+  min-width: 160px;
+  padding: 0 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+}
+.ih-log-filter:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Body frame: positions the Jump-to-latest pill over the scrolling body. */
+.ih-log-frame {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 192px;
+  display: flex;
+  flex-direction: column;
+}
+.ih-log-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border-faint);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  padding: 16px;
+  position: relative;
+}
+
+/* One collapsed row: a single line, cut with an ellipsis. */
+.ih-log-row {
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+}
+.ih-log-row--audit { cursor: pointer; }
+.ih-log-row--audit:hover { background: var(--bg-card); }
+
+.ih-log-level--ERROR { color: var(--red); }
+.ih-log-level--WARN { color: var(--amber); }
+.ih-log-level--INFO,
+.ih-log-level--DEBUG,
+.ih-log-level--TRACE { color: var(--text-dim); }
+
+.ih-log-badge { margin-left: 8px; font-weight: 700; }
+.ih-log-badge--rollup { color: var(--amber); }
+
+/* Expanded audit args (already redacted at write time). */
+.ih-log-args {
+  margin: 4px 0 8px 16px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-dim);
+  font-family: var(--font);
+}
+
+.ih-log-dim { color: var(--text-dim); }
+
+.ih-log-empty { display: flex; flex-direction: column; gap: 4px; }
+.ih-log-empty-heading { font-size: 14px; font-weight: 700; color: var(--text); }
+.ih-log-empty-body { font-size: 12px; color: var(--text-dim); }
+
+/* Failed-read banner above the still-visible rows. */
+.ih-log-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--red);
+}
+
+/* Jump to latest (32px pill, bottom-right of the body). */
+.ih-log-jump {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  border: 1px solid var(--teal);
+  color: var(--teal);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 54.4 Plan 11 (D-14 / D-25) — Logs mini-panel in the Chat widget
+   column, plus the LOGS PANEL toggle at the right end of the tab strip.
+   ────────────────────────────────────────────────────────── */
+
+/* LOGS PANEL toggle: the nav-button style, pushed to the strip's right end
+   (outside the scrolling tab list). Pressed = teal border + text. */
+.ih-logs-toggle {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: auto;
+  height: 40px;
+  min-width: 64px;
+  padding: 0 16px;
+  font: 700 10px/1.4 var(--font);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  border: 1px solid var(--border);
+  background: var(--bg-card-hover);
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ih-logs-toggle[aria-pressed="true"] {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+.ih-logs-toggle:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+/* The panel: anchored below the parked cards, takes the rest of the column. */
+.ih-logs-mini {
+  flex: 1 1 0;
+  min-height: 192px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.ih-logs-mini-head {
+  flex: 0 0 32px;
+  height: 32px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px 0 16px;
+  border-bottom: 1px solid var(--border-faint);
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.ih-logs-mini-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ih-logs-mini-close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: 700 12px/1 var(--font);
+  cursor: pointer;
+}
+.ih-logs-mini-close:hover { color: var(--text); }
+.ih-logs-mini-close:focus-visible,
+.ih-logs-mini .ih-link:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: -2px;
+}
+.ih-logs-mini-note {
+  flex: 0 0 auto;
+  padding: 4px 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.ih-logs-mini-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 16px;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.ih-logs-mini-foot {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border-faint);
+}
+.ih-logs-mini .ih-link {
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--teal);
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.ih-logs-mini .ih-link:hover { text-decoration: underline; }
+
+/* Drop zone (D-14): while the header Logs shortcut is dragged over the chat
+   body it gets a 1px dashed teal outline and a hint. The hint ignores the
+   pointer so it can never steal the drag events (no dragleave flicker). */
+.ih-chat-body.is-logs-drop-target {
+  position: relative;
+  outline: 1px dashed var(--teal);
+  outline-offset: -1px;
+}
+.ih-logs-drop-hint {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 8px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--teal);
+  border-radius: 4px;
+  color: var(--teal);
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Below 900px the Logs panel and its toggle are hidden (UI-SPEC Responsive
+   Contract). A widget column holding only the panel would be an empty 80px
+   strip, so it goes too; a column with parked cards stays. */
+@media (max-width: 899px) {
+  .ih-logs-mini,
+  .ih-logs-toggle { display: none; }
+  .ih-widget-col:not(:has(.ih-parked-card)) { display: none; }
+}

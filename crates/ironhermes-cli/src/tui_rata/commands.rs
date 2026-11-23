@@ -20,9 +20,10 @@ use std::sync::atomic::Ordering;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use ironhermes_core::commands::context::{
-    AgentLoopHandle, CommandContext, ContextCompressorHandle, CoreContextHandles, McpManagerHandle,
-    McpReloader, MemoryManagerHandle, PersonalityHandle, ProcessRegistrySnapshotHandle,
-    ProviderResolverHandle, StateStoreHandle, SubagentListSnapshot, build_core_context,
+    AgentLoopHandle, CommandContext, ContextCompressorHandle, CoreContextHandles, DefconAuthFacts,
+    McpManagerHandle, McpReloader, MemoryManagerHandle, PersonalityHandle,
+    ProcessRegistrySnapshotHandle, ProviderResolverHandle, StateStoreHandle, SubagentListSnapshot,
+    build_core_context,
 };
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
@@ -377,8 +378,11 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         // toggle + status must be driven App-side, not from the core
                         // handler's canned strings or stale on-disk config.
                         "voice" => handle_voice(app, &args_vec, result),
-                        // Toggles: yolo/verbose/statusbar/debug/skin (NOT fast — owned by subsystem_mutator)
-                        "yolo" | "verbose" | "statusbar" | "debug" | "skin" => {
+                        // Toggles: verbose/statusbar/debug/skin (NOT fast — owned by subsystem_mutator).
+                        // `/yolo` is NOT here (Phase 57 D-09/D-10): it falls through to the core
+                        // `cmd_yolo` result below, which already changed the session's live
+                        // DEFCON level and wrote the `defcon_change` audit row.
+                        "verbose" | "statusbar" | "debug" | "skin" => {
                             handle_toggle(app, def.name, args_str)
                         }
                         // App-handle inspectors: trust core output; no App-side mutation needed
@@ -417,8 +421,8 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         // session-clear path forwards to the ClearSession /
                         // NewSession mapping in map_core_to_slash_outcome.
                         "new" => handle_session_control(app, def.name, &args_vec, &result).await,
-                        // Subsystem mutators: model/fast (AnyClient rebuild) + personality/compress
-                        "model" | "fast" | "personality" | "compress" => {
+                        // Subsystem mutators: model/fast (runtime model switch) + personality/compress
+                        "model" | "fast" | "personality" | "compress" | "models" => {
                             handle_subsystem_mutator(app, def.name, &args_vec, &result).await
                         }
                         // Default: trust core dispatch result
@@ -729,6 +733,12 @@ fn build_command_context(app: &App) -> CommandContext {
         trajectory_writer: app.trajectory_writer.clone(),
     };
     let mut ctx = build_core_context(Platform::Local, app.session_id.clone(), core_handles);
+    // Phase 57 D-22: `Platform::Local` needs no authorization facts; the actor only
+    // labels the `defcon_change` audit row a `/yolo <N>` writes.
+    ctx = ctx.with_defcon_auth(DefconAuthFacts {
+        actor: "local".to_string(),
+        ..DefconAuthFacts::default()
+    });
 
     if let Some(mgr) = &app.mcp_manager {
         // Also wire the McpManagerHandle for `/mcp` full enumeration (D-04).
@@ -868,7 +878,7 @@ fn render_help_router(router: &CommandRouter, platform: &Platform) -> String {
 
 // ── Post-router helper functions (D-02, Plan 03 full expansion) ──────────────
 
-/// handle_toggle — flip Arc<AtomicBool> toggles (yolo/verbose/statusbar/debug) or
+/// handle_toggle — flip Arc<AtomicBool> toggles (verbose/statusbar/debug) or
 /// write Arc<RwLock<String>> for skin. EXCLUDES "fast" (owned by handle_subsystem_mutator).
 ///
 /// Plan 03 D-09: fetch_xor(true, Ordering::SeqCst) is the canonical toggle pattern for AtomicBool.
@@ -905,7 +915,7 @@ fn handle_voice(app: &mut App, args: &[&str], core_result: CommandResult) -> Sla
         None | Some("status") => {
             let config = ironhermes_core::Config::load().unwrap_or_default();
             let provider = ironhermes_tools::stt::select_stt_provider(&config.stt)
-                .unwrap_or_else(|| "none (no API key configured)".to_string());
+                .unwrap_or_else(|| "none (no STT provider configured)".to_string());
             format!(
                 "Voice mode status:\n  enabled: {}\n  provider: {}\n  record_key: {}\n  auto_tts: {}",
                 app.voice.is_enabled(),
@@ -922,10 +932,6 @@ fn handle_voice(app: &mut App, args: &[&str], core_result: CommandResult) -> Sla
 
 fn handle_toggle(app: &mut App, name: &str, arg: &str) -> SlashOutcome {
     match name {
-        "yolo" => {
-            let new_val = !app.yolo_enabled.fetch_xor(true, Ordering::SeqCst);
-            SlashOutcome::Handled(format!("YOLO mode: {}", if new_val { "on" } else { "off" }))
-        }
         "verbose" => {
             let new_val = !app.verbose_enabled.fetch_xor(true, Ordering::SeqCst);
             SlashOutcome::Handled(format!(
@@ -1273,7 +1279,7 @@ async fn handle_session_control(
     }
 }
 
-/// handle_subsystem_mutator — covers model/fast (AnyClient rebuild) + personality/compress.
+/// handle_subsystem_mutator — covers model/fast (runtime model switch) + personality/compress.
 ///
 /// Plan 03 owns the FULL helper under Option B (Plan 02 does NOT touch commands.rs).
 /// T-22.4.2-03-10: /model validates via resolver before rebuilding.
@@ -1294,50 +1300,63 @@ async fn handle_subsystem_mutator(
                 Some(m) => *m,
                 None => return map_core_to_slash_outcome(core_result.clone()),
             };
-            // T-22.4.2-03-10: validate model name via resolver before rebuilding.
-            let main_ep = app.resolver.resolve_for_main();
+            // T-22.4.2-03-10: apply_model_switch validates before it swaps anything.
             let provider = app.resolver.main_provider().to_string();
-            match ironhermes_agent::build_client(&app.resolver, &provider, model) {
-                Ok(new_client) => {
-                    app.client = new_client;
-                    SlashOutcome::Handled(format!("Switched to model {model}"))
+            match app.apply_model_switch(&provider, model) {
+                Ok(note) => {
+                    SlashOutcome::Handled(with_note(format!("Switched to model {model}"), note))
                 }
-                Err(_) => {
-                    // Model not found in provider — return informational text.
-                    let _ = main_ep; // suppress unused warning
-                    SlashOutcome::Handled(format!("Model {model} not found in registry."))
-                }
+                Err(e) => SlashOutcome::Error(e.to_string()),
             }
         }
         "fast" => {
-            // Toggle fast_enabled AtomicBool AND rebuild AnyClient from fast role.
+            // Toggle fast_enabled AtomicBool AND switch the runtime to/from the fast role.
             let new_state = !app.fast_enabled.fetch_xor(true, Ordering::SeqCst);
             if new_state {
-                // ON: try to rebuild from fast role
-                match ironhermes_agent::build_role_client(&app.resolver, "fast") {
-                    Ok(Some(new_client)) => {
-                        let model = app
-                            .resolver
-                            .resolve_role("fast")
-                            .map(|ep| ep.default_model.clone())
-                            .unwrap_or_else(|| "fast".to_string());
-                        app.client = new_client;
-                        SlashOutcome::Handled(format!("Fast mode ON — model {model}"))
+                // ON: switch to the fast role's provider/model, remembering where we were.
+                match app.resolver.resolve_role_named("fast") {
+                    Some((provider, endpoint)) => {
+                        let model = endpoint.default_model.clone();
+                        let restore = (
+                            app.resolver.main_provider().to_string(),
+                            app.resolver.resolve_for_main().default_model.clone(),
+                        );
+                        match app.apply_model_switch(&provider, &model) {
+                            Ok(note) => {
+                                app.fast_restore = Some(restore);
+                                SlashOutcome::Handled(with_note(
+                                    format!("Fast mode ON — model {model}"),
+                                    note,
+                                ))
+                            }
+                            Err(e) => {
+                                SlashOutcome::Handled(format!("Fast mode ON (rebuild failed: {e})"))
+                            }
+                        }
                     }
-                    Ok(None) => SlashOutcome::Handled(
+                    None => SlashOutcome::Handled(
                         "Fast mode toggle (no fast preset configured).".to_string(),
                     ),
-                    Err(e) => SlashOutcome::Handled(format!("Fast mode ON (rebuild failed: {e})")),
                 }
             } else {
-                // OFF: restore main model client
-                match ironhermes_agent::build_main_client(&app.resolver) {
-                    Ok(new_client) => {
+                // OFF: switch back to what ON replaced (nothing to switch if ON was a no-op).
+                match app.fast_restore.clone() {
+                    Some((provider, model)) => match app.apply_model_switch(&provider, &model) {
+                        Ok(note) => {
+                            app.fast_restore = None;
+                            SlashOutcome::Handled(with_note(
+                                format!("Fast mode OFF — restored to {model}"),
+                                note,
+                            ))
+                        }
+                        Err(e) => {
+                            SlashOutcome::Handled(format!("Fast mode OFF (restore failed: {e})"))
+                        }
+                    },
+                    None => {
                         let main_model = app.resolver.resolve_for_main().default_model.clone();
-                        app.client = new_client;
                         SlashOutcome::Handled(format!("Fast mode OFF — restored to {main_model}"))
                     }
-                    Err(e) => SlashOutcome::Handled(format!("Fast mode OFF (restore failed: {e})")),
                 }
             }
         }
@@ -1366,7 +1385,38 @@ async fn handle_subsystem_mutator(
             // Future: trigger actual compression hook here on demand.
             map_core_to_slash_outcome(core_result.clone())
         }
+        // G-58.3.1-12: the picker reads a resolver snapshot built from
+        // models-cache.json, so a refresh rebuilds that snapshot from the
+        // refreshed cache. Only the picker's resolver is rebuilt (WR-10): the
+        // live session's config, model and client are unchanged by a refresh,
+        // so no runtime reload, and a blank main model cannot block it.
+        // shortcut: a refresh made by another process (web UI, `ironhermes models
+        // fetch`) reaches this picker at the next switch or restart.
+        "models" => match (args.first().copied(), core_result) {
+            (Some("refresh"), CommandResult::Output(text)) => {
+                let config = app.agent_runtime.config();
+                let cache = ironhermes_core::models_cache::ModelsCache::load();
+                let text = match ironhermes_core::ProviderResolver::build_with_cache(&config, cache)
+                {
+                    Ok(resolver) => {
+                        app.resolver = resolver;
+                        text.clone()
+                    }
+                    Err(e) => format!("{text}\nModel picker not reloaded: {e}"),
+                };
+                SlashOutcome::Handled(text)
+            }
+            _ => map_core_to_slash_outcome(core_result.clone()),
+        },
         _ => map_core_to_slash_outcome(core_result.clone()),
+    }
+}
+
+/// Append a switch-time note (G-58.3.1-10) to a success line, on its own line.
+pub(crate) fn with_note(text: String, note: Option<String>) -> String {
+    match note {
+        Some(note) => format!("{text}\n{note}"),
+        None => text,
     }
 }
 
@@ -1525,5 +1575,389 @@ mod attach_command_tests {
             }
             other => panic!("expected Unknown usage hint, got {other:?}"),
         }
+    }
+}
+
+// ── Phase 57 plan 13 tests: `/yolo <N>` is the audited session dial (D-09/D-10/D-21) ──
+
+#[cfg(all(test, feature = "test-support"))]
+mod defcon_surface_tests {
+    use super::*;
+    use crate::tui_rata::approval_gate_tui::{
+        ApprovalRequest, TuiApprovalGate, build_tui_gated_terminal_intercept,
+    };
+    use ironhermes_core::defcon::session_defcon;
+    use ironhermes_core::{ApprovalGate, ApprovalOutcome, ApprovalsStore, AuditEntry, Config};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// A `terminal` tool that counts how many times it really ran.
+    struct CountingTerminal {
+        runs: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ironhermes_tools::Tool for CountingTerminal {
+        fn name(&self) -> &str {
+            "terminal"
+        }
+        fn toolset(&self) -> &str {
+            "terminal"
+        }
+        fn description(&self) -> &str {
+            "counting stub terminal tool"
+        }
+        fn schema(&self) -> ironhermes_core::ToolSchema {
+            ironhermes_core::ToolSchema::new(
+                "terminal",
+                self.description(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"]
+                }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            self.runs.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok("stub-ran".to_string())
+        }
+    }
+
+    fn audit_rows(home: &std::path::Path) -> Vec<AuditEntry> {
+        let path = home.join("logs").join("audit.jsonl");
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("audit row parses"))
+            .collect()
+    }
+
+    /// Run `body` with `IRONHERMES_HOME` pointed at a fresh temp dir, serialised
+    /// against every other env-mutating test in this crate. The lock is held by this
+    /// SYNC frame (never across an `.await` inside `body`'s own future).
+    fn with_home<T>(body: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = crate::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("IRONHERMES_HOME").ok();
+        // SAFETY: serialised by `test_env_lock`; restored below.
+        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
+        let out = body(tmp.path());
+        match prev {
+            // SAFETY: as above.
+            Some(v) => unsafe { std::env::set_var("IRONHERMES_HOME", v) },
+            None => unsafe { std::env::remove_var("IRONHERMES_HOME") },
+        }
+        out
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    /// The tracer: `/yolo 1` typed in the TUI is the core `cmd_yolo`. It changes THIS
+    /// session's live level, writes one `defcon_change` row (surface `local`), and its
+    /// notice reaches the transcript naming the old and the new level.
+    #[test]
+    fn tui_yolo_command_sets_level_and_audits() {
+        let session = "s-tui-yolo-1";
+        with_home(|home| {
+            block_on(async {
+                let mut app = App::new_test_with_session(session);
+                assert_eq!(app.defcon.get(), session_defcon().process_default());
+                let before_len = app.history.len();
+
+                let outcome = dispatch_slash(&mut app, "/yolo 1").await;
+                let SlashOutcome::Handled(text) = &outcome else {
+                    panic!("expected Handled, got {outcome:?}");
+                };
+                assert!(
+                    text.contains('3') && text.contains('1'),
+                    "the notice names the old and the new level: {text}"
+                );
+                app.apply_slash_outcome(outcome);
+
+                assert_eq!(app.defcon.get().level(), 1, "the live level changed");
+                assert_eq!(
+                    session_defcon().handle_for(session).get().level(),
+                    1,
+                    "the registry agrees"
+                );
+                assert_eq!(app.history.len(), before_len + 1, "a transcript notice");
+                let last = app.history.last().expect("notice");
+                assert_eq!(last.role, ironhermes_core::types::Role::System);
+            });
+            let rows = audit_rows(home);
+            assert_eq!(rows.len(), 1, "exactly one defcon_change row: {rows:?}");
+            let row = &rows[0];
+            assert_eq!(row.kind, "defcon_change");
+            assert_eq!(row.session, session);
+            assert_eq!(row.surface, "local");
+            assert_eq!(row.decision, "changed");
+            let args: serde_json::Value = serde_json::from_str(&row.args).expect("args json");
+            assert_eq!(args["old"], 3);
+            assert_eq!(args["new"], 1);
+        });
+        session_defcon().forget(session);
+    }
+
+    /// A gated `curl` through the TUI intercept follows the LIVE level: after `/yolo 5`
+    /// it is an audited bypass; after `/yolo 3` it reaches the approval prompt channel.
+    #[test]
+    fn tui_gated_call_follows_live_level() {
+        let session = "s-tui-follows";
+        with_home(|home| {
+            block_on(async {
+                let mut app = App::new_test_with_session(session);
+                let runs = Arc::new(AtomicUsize::new(0));
+                let tool: Arc<dyn ironhermes_tools::Tool> =
+                    Arc::new(CountingTerminal { runs: runs.clone() });
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+                let approvals = Arc::new(ApprovalsStore::with_path(home.join("approvals.json")));
+                let gate: Arc<dyn ApprovalGate> = Arc::new(TuiApprovalGate::new(tx, approvals));
+                let intercept = build_tui_gated_terminal_intercept(
+                    Some(tool),
+                    Arc::new(Config::default()),
+                    session.to_string(),
+                    "tui",
+                    session.to_string(),
+                    gate,
+                );
+                let args = serde_json::json!({ "command": "curl https://example.com" });
+
+                // /yolo 5 -> the Warn is bypassed upstream, audited as a bypass.
+                let outcome = dispatch_slash(&mut app, "/yolo 5").await;
+                assert!(matches!(outcome, SlashOutcome::Handled(_)), "{outcome:?}");
+                assert_eq!(app.defcon.get().level(), 5);
+                // A bounded wait: a regression that asks the operator here (nobody is
+                // answering in this phase) must fail the assertion, not hang the suite.
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    intercept(args.clone()),
+                )
+                .await
+                .expect("level 5 must bypass, not wait on an approval prompt")
+                .expect("intercept ok");
+                assert_eq!(
+                    runs.load(AtomicOrdering::SeqCst),
+                    1,
+                    "bypass ran it: {result}"
+                );
+                assert!(
+                    rx.try_recv().is_err(),
+                    "a bypass must not surface an approval prompt"
+                );
+                let shell: Vec<_> = audit_rows(home)
+                    .into_iter()
+                    .filter(|r| r.kind == "shell_command")
+                    .collect();
+                assert_eq!(shell.len(), 1, "{shell:?}");
+                assert_eq!(shell[0].resolution, "bypass", "{shell:?}");
+
+                // /yolo 3 -> the same call now asks the operator; the operator denies.
+                let outcome = dispatch_slash(&mut app, "/yolo 3").await;
+                assert!(matches!(outcome, SlashOutcome::Handled(_)), "{outcome:?}");
+                assert_eq!(app.defcon.get().level(), 3);
+                let pending = tokio::spawn({
+                    let intercept = intercept.clone();
+                    let args = args.clone();
+                    async move { intercept(args).await.expect("intercept ok") }
+                });
+                let req = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+                    .await
+                    .expect("level 3 must surface the approval prompt")
+                    .expect("approval channel open");
+                assert_eq!(req.tool_name, "terminal");
+                let _ = req.resolve.send(ApprovalOutcome::Denied);
+                let denied = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+                    .await
+                    .expect("the denied call must complete")
+                    .expect("join");
+                assert!(denied.contains("Denied"), "operator denial wins: {denied}");
+                assert_eq!(runs.load(AtomicOrdering::SeqCst), 1, "denied must not run");
+                let bypass_rows = audit_rows(home)
+                    .into_iter()
+                    .filter(|r| r.kind == "shell_command" && r.resolution == "bypass")
+                    .count();
+                assert_eq!(bypass_rows, 1, "level 3 added no bypass row");
+            });
+        });
+        session_defcon().forget(session);
+    }
+}
+
+// ── Phase 58.3.1 plan 14 tests: `/models refresh` feeds the `/model` picker (G-58.3.1-12) ──
+
+#[cfg(all(test, feature = "test-support"))]
+mod models_refresh_tests {
+    use super::*;
+    use ironhermes_core::config::ProviderConfig;
+    use std::ffi::OsString;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Records the prior value of every env var it touches, points
+    /// `IRONHERMES_HOME` at the tempdir and routes https through a refused port
+    /// (the curated catalog fetches then fail at once, offline). The http mock on
+    /// loopback is exempted by `NO_PROXY`. Restores everything on drop.
+    struct EnvGuard {
+        prior: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        const VARS: [&'static str; 9] = [
+            "IRONHERMES_HOME",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "no_proxy",
+            "NO_PROXY",
+        ];
+
+        fn new(home: &std::path::Path) -> Self {
+            let prior = Self::VARS
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+            let guard = Self { prior };
+            for k in [
+                "https_proxy",
+                "HTTP_PROXY",
+                "http_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "no_proxy",
+            ] {
+                // SAFETY: serialised by crate::test_env_lock; restored by EnvGuard::drop
+                unsafe { std::env::remove_var(k) };
+            }
+            // SAFETY: serialised by crate::test_env_lock; restored by EnvGuard::drop
+            unsafe {
+                std::env::set_var("IRONHERMES_HOME", home);
+                std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:9");
+                std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.prior {
+                match v {
+                    // SAFETY: serialised by crate::test_env_lock; restored by EnvGuard::drop
+                    Some(v) => unsafe { std::env::set_var(k, v) },
+                    // SAFETY: serialised by crate::test_env_lock; restored by EnvGuard::drop
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    /// G-58.3.1-12 / D-12: a typed `/models refresh` against an Unsloth-shaped
+    /// server (ids without `context_length`) makes those ids selectable in
+    /// `/model` step 2 with no restart.
+    #[test]
+    fn tui_models_refresh_makes_served_ids_selectable() {
+        refresh_lists_served_ids("small-model", Some("small-model"));
+    }
+
+    /// WR-10: with a blank main model the refresh still rebuilds the picker. It
+    /// rebuilds only the picker's resolver, so it cannot fail on a model switch.
+    #[test]
+    fn tui_models_refresh_reloads_picker_when_main_model_is_blank() {
+        refresh_lists_served_ids("", None);
+    }
+
+    fn refresh_lists_served_ids(main_default: &str, local_default: Option<&str>) {
+        let _lock = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = EnvGuard::new(home.path());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/models"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [
+                        {"id": "unsloth/flint-GGUF", "context_length": 8192, "loaded": true},
+                        {"id": "flint-GGUF:UD-Q3_K_XL", "loaded": false}
+                    ]
+                })))
+                .mount(&server)
+                .await;
+
+            let mut cfg = ironhermes_core::Config::default();
+            cfg.model.provider = "local".to_string();
+            cfg.model.default = main_default.to_string();
+            cfg.providers.insert(
+                "local".to_string(),
+                ProviderConfig {
+                    base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                    default_model: local_default.map(str::to_string),
+                    ..Default::default()
+                },
+            );
+            cfg.providers.insert(
+                "unsloth-mac-local".to_string(),
+                ProviderConfig {
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    default_model: None,
+                    ..Default::default()
+                },
+            );
+            cfg.save().expect("config saves to the temp home");
+
+            let mut app = App::new_test_empty();
+            let resolver =
+                ironhermes_core::ProviderResolver::build(&cfg).expect("seed resolver builds");
+            app.agent_runtime
+                .reload_config_and_resolver(Arc::new(cfg), Arc::new(resolver.clone()))
+                .await
+                .expect("seed: runtime reload");
+            app.resolver = resolver;
+
+            let before =
+                crate::tui_rata::overlay::model_picker_models_filtered(&app, "unsloth-mac-local");
+            assert!(
+                !before.iter().any(|m| m == "unsloth/flint-GGUF"),
+                "precondition: not listed before the refresh: {before:?}"
+            );
+
+            let outcome = dispatch_slash(&mut app, "/models refresh").await;
+            let SlashOutcome::Handled(text) = outcome else {
+                panic!("expected Handled, got {outcome:?}");
+            };
+            assert!(
+                text.contains("unsloth-mac-local: 2 models received"),
+                "got: {text}"
+            );
+            assert!(!text.contains("not reloaded"), "got: {text}");
+
+            let after =
+                crate::tui_rata::overlay::model_picker_models_filtered(&app, "unsloth-mac-local");
+            assert!(
+                after.iter().any(|m| m == "unsloth/flint-GGUF"),
+                "step 2 must list the served id: {after:?}"
+            );
+            assert!(
+                after.iter().any(|m| m == "flint-GGUF:UD-Q3_K_XL"),
+                "step 2 must list the id with no context_length: {after:?}"
+            );
+            assert!(
+                !after.iter().any(|m| m.is_empty()),
+                "no blank row: {after:?}"
+            );
+        });
     }
 }

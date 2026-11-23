@@ -7,6 +7,11 @@
 //! results source and belongs to `web_answer`'s keyless terminal (Plan 08),
 //! not this tool's results-list contract (D-10).
 //!
+//! `SearchFilters.category` (and every other filter) is ignored here: the
+//! keyless HTML endpoint has no news vertical, so a news query falls back to
+//! general results (provider limitation, recorded in the quick 261015-tcs
+//! COVERAGE.md). `search` takes no filters and keeps its signature.
+//!
 //! Parsing reuses this crate's existing `scraper`-based HTML extraction
 //! discipline (see `web_extract/backends/local.rs` and
 //! `web_extract/sanitize.rs`) rather than adding a new HTML dependency.
@@ -238,11 +243,7 @@ mod tests {
         );
         assert_eq!(hits[0].title, "Rust Programming Language");
         assert_eq!(hits[0].url, "https://rust-lang.org/");
-        assert!(
-            hits[0].snippet.contains("fast, reliable"),
-            "{:?}",
-            hits[0]
-        );
+        assert!(hits[0].snippet.contains("fast, reliable"), "{:?}", hits[0]);
         assert_eq!(hits[1].title, "The Rust Book");
         assert_eq!(hits[1].url, "https://doc.rust-lang.org/book/");
     }

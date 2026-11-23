@@ -8,6 +8,8 @@ description = "Agent execution runner for IronHermes cron jobs"
 
 [dependencies]
 ironhermes-core  = { path = "../ironhermes-core" }
+# Phase 57 Plan 05 (D-02): every agent host reaches the tirith sidecar service through this crate.
+ironhermes-security = { path = "../ironhermes-security" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
@@ -28,6 +30,9 @@ chrono      = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 tempfile = { workspace = true }
+# Phase 57 Plan 11 (SC-1): tests/security_surface.rs drives a real cron run against a
+# mocked LLM endpoint. Workspace-pinned and already in the graph; no new package.
+wiremock = { workspace = true }
 
 [features]
 # Phase 46.8 Plan 07 (D-07): threads the RustyVault backend into the vault

@@ -2,7 +2,9 @@
 # =============================================================================
 # IronHermes AaaS web-server entrypoint
 # Mirrors docker/entrypoint.sh (privilege drop + template seeding) but runs the
-# iron_hermes_ui fullstack server instead of the `ironhermes` CLI.
+# iron_hermes_ui fullstack server instead of the `ironhermes` CLI. The privilege
+# drop (setpriv, UID/GID remap) lives in the shared docker/priv-drop.sh and
+# FAILS CLOSED: this script never carries on as root.
 # Binds 0.0.0.0:8080 (IP/PORT env, set in the Dockerfile) — requires a web
 # password hash (IRONHERMES_WEB_PASSWORD_HASH / config.yaml) or the app's
 # fail-closed bind guard refuses to start.
@@ -25,40 +27,83 @@ INSTALL_DIR="/opt/ironhermes"
 
 # ─── Privilege drop (start as root, switch to ironhermes) ───
 if [ "$(id -u)" = "0" ]; then
-    chown -R ironhermes:ironhermes "$IRONHERMES_HOME" 2>/dev/null || \
-        echo "Warning: chown failed (rootless?) — continuing"
-    exec gosu ironhermes "$0" "$@"
+    # shellcheck source=/dev/null
+    . "$INSTALL_DIR/docker/priv-drop.sh" || {
+        echo "Error: cannot load $INSTALL_DIR/docker/priv-drop.sh -- refusing to run as root" >&2
+        exit 1
+    }
+    ih_drop_privileges "$0" "$@"
+    echo "Error: privilege drop failed -- refusing to run as root" >&2
+    exit 1
 fi
 
 # ─── Running as ironhermes user ───
+# D-16: user installs (npm globals, pip --user) land on the volume, not the
+# read-only rootfs. Non-fatal.
+# shellcheck source=/dev/null
+if . "$INSTALL_DIR/docker/priv-drop.sh" && ih_volume_env; then :; else
+    echo "Warning: could not set the volume install environment — continuing" >&2
+fi
+
 mkdir -p "$IRONHERMES_HOME"/{cron,sessions,logs,hooks,memories,skills,workspace}
 
 # Seed templates only if absent (preserve the .env the AaaS provisioner wrote,
 # which carries IRONHERMES_WEB_PASSWORD_HASH + provider keys).
 [ -f "$IRONHERMES_HOME/.env" ]        || cp "$INSTALL_DIR/.env.example" "$IRONHERMES_HOME/.env"
-[ -f "$IRONHERMES_HOME/config.yaml" ] || cp "$INSTALL_DIR/cli-config.yaml.example" "$IRONHERMES_HOME/config.yaml"
+# D-13: config.yaml is seeded ONCE, from IRONHERMES_CONFIG_TEMPLATE when it is
+# set and readable, else from the baked example. Non-fatal.
+if [ ! -f "$IRONHERMES_HOME/config.yaml" ]; then
+    _cfg_src="$INSTALL_DIR/cli-config.yaml.example"
+    if [ -n "${IRONHERMES_CONFIG_TEMPLATE:-}" ]; then
+        if [ -r "$IRONHERMES_CONFIG_TEMPLATE" ]; then
+            _cfg_src="$IRONHERMES_CONFIG_TEMPLATE"
+        else
+            echo "Warning: IRONHERMES_CONFIG_TEMPLATE=$IRONHERMES_CONFIG_TEMPLATE is not readable — using the baked example" >&2
+        fi
+    fi
+    cp "$_cfg_src" "$IRONHERMES_HOME/config.yaml" || \
+        echo "Warning: could not seed config.yaml from $_cfg_src — continuing" >&2
+fi
 [ -f "$IRONHERMES_HOME/SOUL.md" ]     || cp "$INSTALL_DIR/docker/SOUL.md" "$IRONHERMES_HOME/SOUL.md"
 chmod 600 "$IRONHERMES_HOME/.env" 2>/dev/null || true
 
-# ─── Skill seeding (image → volume, skip-if-exists) ───
+# >>> skills seeding
+# ─── Skill seeding (image → volume, history-aware) ───
 # /opt/ironhermes/{skills,optional-skills} are the read-only copies baked into
-# the image; the agent only ever scans the volume. `cp -rn` merges new
-# categories and new skills in on an image upgrade while never overwriting an
-# operator edit or a Hub install already on the volume.
+# the image; the agent only ever scans the volume. Seeding goes through the
+# shared ih_seed_bundled_tree (docker/seed-bundled.sh, the same function
+# install.sh embeds): a file absent from the volume is copied, a file that is
+# an unmodified OLDER bundled version (listed in skills/.bundled-history) is
+# upgraded to the current one, and a file the operator edited, or a Hub
+# install already on the volume, is kept. Plain `cp -rn` could never deliver a
+# changed bundled skill to an existing volume.
 #
-# skills/ lands in $IRONHERMES_HOME/skills, a default search root, so those
-# skills are live immediately. optional-skills/ lands in
-# $IRONHERMES_HOME/optional-skills, which is NOT a default search root — opt in
-# by adding it to skills.extra_paths in config.yaml, or import individual
-# skills from it in the web UI (its Local Path quick-pick already offers this
-# directory). Non-fatal: a seeding failure must never take the container down.
+# Both trees are default search roots: skills/ lands in $IRONHERMES_HOME/skills
+# and optional-skills/ in $IRONHERMES_HOME/optional-skills, which is a default
+# root since Phase 54.1 (Official tier), so seeded skills are live immediately.
+# Non-fatal: a seeding failure must never take the container down.
+_ih_seed_lib=0
+if [ -f "$INSTALL_DIR/docker/seed-bundled.sh" ]; then
+    # shellcheck source=/dev/null
+    if . "$INSTALL_DIR/docker/seed-bundled.sh"; then
+        _ih_seed_lib=1
+    fi
+fi
 for _src in skills optional-skills; do
     if [ -d "$INSTALL_DIR/$_src" ]; then
         mkdir -p "$IRONHERMES_HOME/$_src"
-        cp -rn "$INSTALL_DIR/$_src/." "$IRONHERMES_HOME/$_src/" 2>/dev/null || \
-            echo "Warning: seeding $_src into $IRONHERMES_HOME failed — continuing" >&2
+        if [ "$_ih_seed_lib" = "1" ]; then
+            ih_seed_bundled_tree "$INSTALL_DIR/$_src" "$IRONHERMES_HOME/$_src" \
+                "$INSTALL_DIR/skills/.bundled-history" "$_src" || \
+                echo "Warning: seeding $_src into $IRONHERMES_HOME was incomplete — continuing" >&2
+        else
+            # Older image layout without the shared library: copy-absent only.
+            cp -rn "$INSTALL_DIR/$_src/." "$IRONHERMES_HOME/$_src/" 2>/dev/null || \
+                echo "Warning: seeding $_src into $IRONHERMES_HOME was incomplete — continuing" >&2
+        fi
     fi
 done
+# <<< skills seeding
 
 # First-run web credential provisioning (quick task 260820-8h5). Generates a
 # random password and persists ONLY its argon2id hash into config.yaml, but
@@ -131,6 +176,7 @@ stop_gateway() {
 # stop arriving inside that window would otherwise hit bash's default SIGTERM
 # disposition and kill this shell with the gateway still running. Both PIDs are
 # read with `:-` defaults so the handler is safe at any point in that window.
+# shellcheck disable=SC2329  # invoked via the trap below
 forward_shutdown() {
     SHUTDOWN_SIGNALLED=1
     if [ -n "${GW_PID:-}" ]; then

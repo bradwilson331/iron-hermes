@@ -51,6 +51,8 @@ pub async fn execute(
         timeout,
         stdin: None,
         cancel,
+        // 58.1 D-11: detect on the RAW command; `wrapped` is `eval '<quoted>'`.
+        detached: super::scope::is_detached_launch(command),
     };
 
     let mut result = env.run_bash(&wrapped, opts).await?;
@@ -107,11 +109,7 @@ pub async fn run_bash_with_limits(
     };
 
     let returncode = match &outcome {
-        Outcome::Completed(status) => status
-            .as_ref()
-            .ok()
-            .and_then(|s| s.code())
-            .unwrap_or(-1),
+        Outcome::Completed(status) => status.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1),
         Outcome::TimedOut => 124,
         Outcome::Cancelled => 130,
     };
@@ -158,7 +156,10 @@ impl PipeDrain {
         if tokio::time::timeout(deadline, self.task).await.is_err() {
             abort_handle.abort();
         }
-        self.buf.lock().expect("drain buffer mutex poisoned").clone()
+        self.buf
+            .lock()
+            .expect("drain buffer mutex poisoned")
+            .clone()
     }
 }
 

@@ -1,7 +1,8 @@
 //! Behavioral tests for Phase 22.4.2 Plan 03 toggle handlers.
 //!
 //! Tests App-side Arc<AtomicBool> and Arc<RwLock<String>> mutations directly —
-//! simulating what handle_toggle() does to App fields. Requires `test-support`
+//! simulating what handle_toggle() does to App fields (`/yolo` is no longer one
+//! of them: it is the audited core command, see `yolo_is_the_session_dial_not_a_toggle`). Requires `test-support`
 //! feature for App::new_test_empty().
 //!
 //! PATTERNS.md Cat-5D: App toggle test pattern using App::new_test_empty().
@@ -11,27 +12,35 @@
 use ironhermes_cli::tui_rata::app::App;
 use std::sync::atomic::Ordering;
 
-/// INV companion: yolo_enabled is Arc<AtomicBool> (D-09 upgrade from bool).
-/// fetch_xor toggles the bit; calling it twice restores original state.
+/// Phase 57 D-09: `/yolo` is the session DEFCON dial, not a boolean toggle. The App
+/// exposes the session's live level as `defcon`; a level set through the process-wide
+/// registry for the App's session id is observed through that handle, and setting 3
+/// returns to 3.
 #[test]
-fn yolo_toggle_flips_atomic_bool() {
+fn yolo_is_the_session_dial_not_a_toggle() {
+    use ironhermes_core::config::DefconLevel;
+    use ironhermes_core::defcon::session_defcon;
+
     let app = App::new_test_empty();
-    let initial = app.yolo_enabled.load(Ordering::SeqCst);
-    // Simulate handle_toggle(app, "yolo", "") — fetch_xor
-    let old = app.yolo_enabled.fetch_xor(true, Ordering::SeqCst);
-    assert_eq!(old, initial, "fetch_xor returns the previous value");
-    assert_ne!(
-        app.yolo_enabled.load(Ordering::SeqCst),
-        initial,
-        "bit flipped"
-    );
-    // Second toggle restores original
-    app.yolo_enabled.fetch_xor(true, Ordering::SeqCst);
+    let session = app.session_id.clone();
+
+    session_defcon().set_session_level(&session, DefconLevel::FIVE);
     assert_eq!(
-        app.yolo_enabled.load(Ordering::SeqCst),
-        initial,
-        "second flip restores"
+        app.defcon.get(),
+        DefconLevel::FIVE,
+        "a level set for the App's session must be observed through App.defcon"
     );
+    assert!(app.defcon.get().yolo_bypass_active());
+
+    session_defcon().set_session_level(&session, DefconLevel::THREE);
+    assert_eq!(
+        app.defcon.get(),
+        DefconLevel::THREE,
+        "setting 3 returns to 3"
+    );
+    assert!(!app.defcon.get().yolo_bypass_active());
+
+    session_defcon().forget(&session);
 }
 
 /// verbose_enabled starts false; toggling sets to true.

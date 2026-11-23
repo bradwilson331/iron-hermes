@@ -10,6 +10,9 @@ pub use ironhermes_cron::DeliverySend;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, warn};
 
 #[async_trait]
@@ -105,24 +108,237 @@ pub use tokio_util::sync::CancellationToken;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
+/// Server-side long-poll window sent to Telegram as `getUpdates.timeout`
+/// (seconds). Plan 54.8-07 derives its watchdog thresholds from this value.
+pub const LONG_POLL_SECS: u64 = 30;
+/// Grace added on top of [`LONG_POLL_SECS`] before the client gives up on a
+/// `getUpdates` call (D-02): covers network latency and Telegram's own
+/// response jitter, so a healthy poll never trips the deadline.
+pub const POLL_GRACE_SECS: u64 = 15;
+/// Whole-request timeout for every Telegram call (D-01). Deliberately
+/// generous (120 s) because the same client uploads `sendDocument` /
+/// `sendVideo` multipart bodies; `getUpdates` is bounded far tighter by the
+/// outer poll deadline.
+const REQUEST_TIMEOUT_SECS: u64 = 120;
+/// TCP connect timeout (D-01): a black-holed route must fail fast, not wait
+/// for the OS default.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+/// TCP keepalive interval (D-01): lets the kernel notice a half-open
+/// connection that a NAT/firewall silently dropped.
+const TCP_KEEPALIVE_SECS: u64 = 30;
+/// Idle pooled-connection lifetime (D-01): shorter than typical middlebox
+/// idle timeouts so the pool never hands out a connection the network already
+/// forgot.
+const POOL_IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// HTTP timing knobs for the Telegram client (D-01 / D-02).
+#[derive(Debug, Clone, Copy)]
+pub struct TelegramHttpTuning {
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub tcp_keepalive: Duration,
+    pub pool_idle_timeout: Duration,
+    /// Outer bound on one whole `getUpdates` call (send + response body).
+    pub poll_deadline: Duration,
+}
+
+impl Default for TelegramHttpTuning {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(CONNECT_TIMEOUT_SECS),
+            request_timeout: Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            tcp_keepalive: Duration::from_secs(TCP_KEEPALIVE_SECS),
+            pool_idle_timeout: Duration::from_secs(POOL_IDLE_TIMEOUT_SECS),
+            poll_deadline: Duration::from_secs(LONG_POLL_SECS + POLL_GRACE_SECS),
+        }
+    }
+}
+
+/// Build a Telegram HTTP client from explicit tuning. This and
+/// [`build_http_client`] are the ONLY places a reqwest client is constructed
+/// in this module.
+fn build_http_client_with(t: &TelegramHttpTuning) -> Client {
+    Client::builder()
+        .connect_timeout(t.connect_timeout)
+        .timeout(t.request_timeout)
+        .tcp_keepalive(t.tcp_keepalive)
+        .pool_idle_timeout(t.pool_idle_timeout)
+        .build()
+        .expect("reqwest client with static config")
+}
+
+/// The D-01 client: default tuning.
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_http_client() -> Client {
+    build_http_client_with(&TelegramHttpTuning::default())
+}
+
+/// Replace every occurrence of the bot token (and therefore of `bot<token>`)
+/// in server-provided text with `[REDACTED]` (F12 / T-54.8-78). Returns the
+/// input borrowed when the token is absent; a no-op for an empty token.
+/// Leaves every other word intact so runner.rs's `Conflict` / `409` detection
+/// keeps working on a real 409 description.
+fn redact_bot_token<'a>(token: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
+    if token.is_empty() || !text.contains(token) {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(text.replace(token, "[REDACTED]"))
+    }
+}
+
+/// Poll is "fresh" when its last success is no older than `max_age` (D-04).
+/// Pure so the boundary is unit-testable: `None` (never succeeded) is stale.
+pub fn is_poll_fresh(since_last_ok: Option<Duration>, max_age: Duration) -> bool {
+    since_last_ok.is_some_and(|d| d <= max_age)
+}
+
+/// Default staleness bound for the poller heartbeat (D-04: "~2x the long-poll
+/// deadline"): 2 x (30 + 15) s = 90 s.
+pub const POLL_FRESH_MAX_AGE: Duration =
+    Duration::from_secs(2 * (LONG_POLL_SECS + POLL_GRACE_SECS));
+
+/// Shared "last successful Telegram poll" stamp (D-04, adapter half).
+///
+/// Freshness is decided on the MONOTONIC clock (`std::time::Instant`), so a
+/// wall-clock step can neither hide a dead poller nor fake a live one. The
+/// wall-clock time is kept for reporting only.
+pub struct PollLiveness {
+    /// `(monotonic instant, wall time)` of the last success; `None` = never.
+    last_ok: std::sync::Mutex<Option<(Instant, SystemTime)>>,
+}
+
+impl Default for PollLiveness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PollLiveness {
+    pub fn new() -> Self {
+        Self {
+            last_ok: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn snapshot(&self) -> Option<(Instant, SystemTime)> {
+        // Lock, copy, drop: the guard is never held across an `.await`.
+        *self.last_ok.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Record a successful poll (or boot `getMe`) now.
+    pub fn stamp_now(&self) {
+        *self.last_ok.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((Instant::now(), SystemTime::now()));
+    }
+
+    /// Monotonic time elapsed since the last success; `None` if never.
+    pub fn since_last_ok(&self) -> Option<Duration> {
+        self.snapshot().map(|(at, _)| at.elapsed())
+    }
+
+    /// Whether the last success is within `max_age`, on the monotonic clock.
+    pub fn is_fresh(&self, max_age: Duration) -> bool {
+        is_poll_fresh(self.since_last_ok(), max_age)
+    }
+
+    /// Wall-clock time of the last success. REPORTING ONLY: never use this
+    /// for a freshness decision (a clock step makes it lie).
+    pub fn last_poll_ok_at(&self) -> Option<SystemTime> {
+        self.snapshot().map(|(_, wall)| wall)
+    }
+
+    /// Test seam: stamp with explicit monotonic and wall values.
+    #[doc(hidden)]
+    pub fn stamp_at_for_tests(&self, at: Instant, wall: SystemTime) {
+        *self.last_ok.lock().unwrap_or_else(|e| e.into_inner()) = Some((at, wall));
+    }
+}
+
 /// Telegram Bot API adapter using long polling.
 pub struct TelegramAdapter {
     token: String,
-    http: Client,
+    /// Always [`TELEGRAM_API_BASE`] in production. NEVER read from config or
+    /// the environment (T-54.8-03): a config edit must not be able to send the
+    /// bot token to another host.
+    base_url: String,
+    tuning: TelegramHttpTuning,
+    /// Swappable so the self-heal watchdog can rebuild a wedged client (D-05).
+    /// The guard is never held across an `.await`; see [`Self::http_client`].
+    http: std::sync::RwLock<Client>,
+    http_generation: AtomicU64,
+    liveness: Arc<PollLiveness>,
     pub bot_username: Option<String>,
 }
 
 impl TelegramAdapter {
     pub fn new(token: impl Into<String>) -> Self {
+        Self::with_parts(
+            token,
+            TELEGRAM_API_BASE.to_string(),
+            TelegramHttpTuning::default(),
+        )
+    }
+
+    fn with_parts(token: impl Into<String>, base_url: String, tuning: TelegramHttpTuning) -> Self {
         Self {
             token: token.into(),
-            http: Client::new(),
+            base_url,
+            http: std::sync::RwLock::new(build_http_client_with(&tuning)),
+            http_generation: AtomicU64::new(0),
+            liveness: Arc::new(PollLiveness::new()),
+            tuning,
             bot_username: None,
         }
     }
 
+    /// Clone the current client out from under the read guard. `Client` is an
+    /// `Arc` internally, so this is cheap and the guard is dropped before any
+    /// `.await`.
+    fn http_client(&self) -> Client {
+        self.http.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// D-05 watchdog hook: replace the HTTP client (dropping the old pool and
+    /// every connection in it). Every `Arc<TelegramAdapter>` clone uses the
+    /// fresh client on its next call.
+    pub fn rebuild_http(&self) {
+        let fresh = build_http_client_with(&self.tuning);
+        *self.http.write().unwrap_or_else(|e| e.into_inner()) = fresh;
+        self.http_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Number of times [`Self::rebuild_http`] has run.
+    pub fn http_generation(&self) -> u64 {
+        self.http_generation.load(Ordering::SeqCst)
+    }
+
+    /// Shared liveness stamp (D-04): stamped by every successful `getUpdates`
+    /// and the boot `getMe`; never by a failed or timed-out poll.
+    pub fn poll_liveness(&self) -> Arc<PollLiveness> {
+        Arc::clone(&self.liveness)
+    }
+
+    /// Test-only seam (D-03): point the adapter at a local stub server.
+    /// `base_url` must never come from config or env (T-54.8-03).
+    #[cfg(test)]
+    fn with_base_url(token: impl Into<String>, base_url: impl Into<String>) -> Self {
+        Self::with_parts(token, base_url.into(), TelegramHttpTuning::default())
+    }
+
+    /// Test-only seam for integration tests under `tests/`, which cannot see
+    /// `#[cfg(test)]` items (plan 54.8-07 uses it). Not a production API:
+    /// `base_url` must never come from config or env (T-54.8-03).
+    #[doc(hidden)]
+    pub fn for_tests(
+        token: impl Into<String>,
+        base_url: impl Into<String>,
+        tuning: TelegramHttpTuning,
+    ) -> Self {
+        Self::with_parts(token, base_url.into(), tuning)
+    }
+
     fn api_url(&self, method: &str) -> String {
-        format!("{}/bot{}/{}", TELEGRAM_API_BASE, self.token, method)
+        format!("{}/bot{}/{}", self.base_url, self.token, method)
     }
 
     pub async fn api_call<T: serde::de::DeserializeOwned>(
@@ -132,24 +348,30 @@ impl TelegramAdapter {
     ) -> Result<T> {
         let url = self.api_url(method);
         let response = self
-            .http
+            .http_client()
             .post(&url)
             .json(params)
             .send()
             .await
+            // F12: the bot token is a URL path segment and reqwest's Display
+            // appends the URL, so strip it from every reqwest error.
+            .map_err(reqwest::Error::without_url)
             .context("Telegram API request failed")?;
 
         let status = response.status();
         let body: TelegramResponse<T> = response
             .json()
             .await
+            .map_err(reqwest::Error::without_url)
             .context("Failed to parse Telegram response")?;
 
         if !body.ok {
+            let description = body.description.unwrap_or_default();
             anyhow::bail!(
                 "Telegram API error ({}): {}",
                 body.error_code.unwrap_or(status.as_u16() as i32),
-                body.description.unwrap_or_default()
+                // T-54.8-78: server text is copied into the error; scrub the token.
+                redact_bot_token(&self.token, &description)
             );
         }
 
@@ -158,7 +380,9 @@ impl TelegramAdapter {
 
     /// Get bot information.
     pub async fn get_me(&self) -> Result<TgUser> {
-        self.api_call("getMe", &serde_json::json!({})).await
+        let me: TgUser = self.api_call("getMe", &serde_json::json!({})).await?;
+        self.liveness.stamp_now();
+        Ok(me)
     }
 
     /// Register bot commands with Telegram.
@@ -176,19 +400,50 @@ impl TelegramAdapter {
 
     /// Download a file by its file_path from getFile response.
     pub async fn download_file(&self, file_path: &str) -> Result<Vec<u8>> {
-        let url = format!("{}/file/bot{}/{}", TELEGRAM_API_BASE, self.token, file_path);
-        let bytes = self.http.get(&url).send().await?.bytes().await?;
+        let url = format!("{}/file/bot{}/{}", self.base_url, self.token, file_path);
+        let response = self
+            .http_client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Telegram file download failed")?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Telegram file download body read failed")?;
         Ok(bytes.to_vec())
     }
 
-    /// Long-poll for updates with a 30-second timeout.
+    /// Long-poll for updates with a [`LONG_POLL_SECS`] server-side window.
     /// `offset` should be `last_update_id + 1` to avoid redelivery.
     pub async fn get_updates(&self, offset: Option<i64>) -> Result<Vec<TgUpdate>> {
-        let mut params = serde_json::json!({ "timeout": 30 });
+        let mut params = serde_json::json!({ "timeout": LONG_POLL_SECS });
         if let Some(off) = offset {
             params["offset"] = serde_json::Value::Number(serde_json::Number::from(off));
         }
-        self.api_call("getUpdates", &params).await
+        // D-02: bound the WHOLE call (send + response-body read) so a dead
+        // connection can never await forever. The error text is fixed and
+        // carries no number, so it can never render as `409` / `Conflict`
+        // and trip runner.rs's fatal-conflict branch.
+        match tokio::time::timeout(
+            self.tuning.poll_deadline,
+            self.api_call::<Vec<TgUpdate>>("getUpdates", &params),
+        )
+        .await
+        {
+            Ok(result) => {
+                let updates = result?;
+                // D-04: any successful poll (empty or not) proves the pipe is
+                // alive; a failed or timed-out poll never stamps.
+                self.liveness.stamp_now();
+                Ok(updates)
+            }
+            Err(_elapsed) => Err(anyhow::anyhow!(
+                "getUpdates timed out (stalled connection: no response within the poll deadline)"
+            )),
+        }
     }
 
     /// Upload a file to Telegram using multipart/form-data.
@@ -233,25 +488,28 @@ impl TelegramAdapter {
 
         let url = self.api_url(method);
         let response = self
-            .http
+            .http_client()
             .post(&url)
             .multipart(form)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("Telegram {} request failed", method))?;
 
         let status = response.status();
         let body: TelegramResponse<TgMessage> = response
             .json()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("Failed to parse Telegram {} response", method))?;
 
         if !body.ok {
+            let description = body.description.unwrap_or_default();
             anyhow::bail!(
                 "Telegram {} error ({}): {}",
                 method,
                 body.error_code.unwrap_or(status.as_u16() as i32),
-                body.description.unwrap_or_default()
+                redact_bot_token(&self.token, &description)
             );
         }
 
@@ -1158,5 +1416,364 @@ mod media_path_guard_tests {
             result.is_err(),
             "a path outside all allowed roots must be rejected, but it was accepted"
         );
+    }
+}
+
+/// Phase 54.8 Plan 01: regression + hardening tests for the Telegram HTTP
+/// stall (DIAGNOSIS findings A/B). All run in real time against local stub
+/// servers; fake token `test-token-abc` only.
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const TOKEN: &str = "test-token-abc";
+
+    fn short_deadline_tuning() -> TelegramHttpTuning {
+        TelegramHttpTuning {
+            poll_deadline: Duration::from_millis(300),
+            ..TelegramHttpTuning::default()
+        }
+    }
+
+    /// Accepts one connection and then never answers.
+    async fn silent_listener() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Accepts one connection, reads the request, sends headers declaring a
+    /// longer body plus a partial body, then stalls.
+    async fn body_stall_listener() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1000\r\n\r\n{\"ok\":";
+            sock.write_all(head.as_bytes()).await.expect("write head");
+            sock.flush().await.expect("flush");
+            std::future::pending::<()>().await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Run `get_updates` inside a 5 s outer guard; the pre-fix code never
+    /// returns and trips the guard instead of hanging the suite.
+    async fn get_updates_guarded(adapter: &TelegramAdapter) -> Result<Vec<TgUpdate>> {
+        match tokio::time::timeout(Duration::from_secs(5), adapter.get_updates(None)).await {
+            Ok(inner) => inner,
+            Err(_) => panic!("stall reproduced: get_updates did not return within 5s"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_updates_times_out_on_silent_server() {
+        let base = silent_listener().await;
+        let adapter = TelegramAdapter::for_tests(TOKEN, base, short_deadline_tuning());
+        let started = std::time::Instant::now();
+        let err = get_updates_guarded(&adapter)
+            .await
+            .expect_err("silent server must produce an error");
+        assert!(
+            format!("{err}").contains("timed out"),
+            "error must say `timed out`, got: {err}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn get_updates_times_out_when_body_stalls() {
+        let base = body_stall_listener().await;
+        let adapter = TelegramAdapter::for_tests(TOKEN, base, short_deadline_tuning());
+        let err = get_updates_guarded(&adapter)
+            .await
+            .expect_err("stalled body must produce an error");
+        assert!(
+            format!("{err}").contains("timed out"),
+            "error must say `timed out`, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_error_is_not_a_conflict() {
+        let base = silent_listener().await;
+        let adapter = TelegramAdapter::for_tests(TOKEN, base, short_deadline_tuning());
+        let err = get_updates_guarded(&adapter)
+            .await
+            .expect_err("silent server must produce an error");
+        for rendered in [format!("{err}"), format!("{err:#}")] {
+            assert!(!rendered.contains("Conflict"), "got: {rendered}");
+            assert!(!rendered.contains("409"), "got: {rendered}");
+        }
+    }
+
+    #[test]
+    fn new_uses_default_tuning() {
+        let adapter = TelegramAdapter::new("test-token-abc");
+        assert_eq!(adapter.base_url, TELEGRAM_API_BASE);
+        assert_eq!(adapter.tuning.poll_deadline, Duration::from_secs(45));
+        let t = TelegramHttpTuning::default();
+        assert_eq!(t.connect_timeout, Duration::from_secs(10));
+        assert_eq!(t.request_timeout, Duration::from_secs(120));
+        assert_eq!(t.tcp_keepalive, Duration::from_secs(30));
+        assert_eq!(t.pool_idle_timeout, Duration::from_secs(60));
+        // The D-01 named constructor builds with the same defaults.
+        let _client = build_http_client();
+        // The D-03 test constructor keeps default tuning and the given base.
+        let local = TelegramAdapter::with_base_url("test-token-abc", "http://127.0.0.1:1");
+        assert_eq!(local.base_url, "http://127.0.0.1:1");
+        assert_eq!(local.tuning.poll_deadline, Duration::from_secs(45));
+    }
+
+    // ---- Task 2: token-free errors (F12 / T-54.8-01 / T-54.8-78) ----
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A base URL on 127.0.0.1 with nothing listening (connection refused).
+    fn refused_base() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        drop(l);
+        format!("http://{addr}")
+    }
+
+    /// Assert the token is absent from `{e}`, `{e:#}` and `{e:?}`.
+    fn assert_token_free(e: &anyhow::Error) {
+        for rendered in [format!("{e}"), format!("{e:#}"), format!("{e:?}")] {
+            assert!(
+                !rendered.contains(TOKEN),
+                "error rendering leaked the bot token: {rendered}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn error_chain_never_contains_token() {
+        let adapter = TelegramAdapter::with_base_url(TOKEN, refused_base());
+        let err = adapter.get_me().await.expect_err("connection refused");
+        assert_token_free(&err);
+    }
+
+    #[tokio::test]
+    async fn download_error_never_contains_token() {
+        let adapter = TelegramAdapter::with_base_url(TOKEN, refused_base());
+        let err = adapter
+            .download_file("photos/x.jpg")
+            .await
+            .expect_err("connection refused");
+        assert_token_free(&err);
+    }
+
+    #[tokio::test]
+    async fn multipart_error_never_contains_token() {
+        let adapter = TelegramAdapter::with_base_url(TOKEN, refused_base());
+        let file = std::env::temp_dir().join(format!("ih-54-8-01-mp-{}.txt", std::process::id()));
+        std::fs::write(&file, b"small").expect("write temp file");
+        let err = adapter
+            .send_file_multipart("sendDocument", "document", "1", &file, None)
+            .await
+            .expect_err("connection refused");
+        let _ = std::fs::remove_file(&file);
+        assert_token_free(&err);
+    }
+
+    #[tokio::test]
+    async fn parse_error_never_contains_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 8\r\nconnection: close\r\n\r\nnot json";
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.flush().await;
+        });
+        let adapter = TelegramAdapter::with_base_url(TOKEN, format!("http://{addr}"));
+        let err = adapter.get_me().await.expect_err("non-JSON body");
+        assert_token_free(&err);
+    }
+
+    #[tokio::test]
+    async fn api_error_description_never_contains_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token-abc/getMe"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "ok": false,
+                "error_code": 400,
+                "description": "Bad Request: bot test-token-abc rejected"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = TelegramAdapter::with_base_url(TOKEN, server.uri());
+        let err = adapter.get_me().await.expect_err("HTTP 400");
+        assert_token_free(&err);
+        let shown = format!("{err}");
+        assert!(shown.contains("Bad Request"), "got: {shown}");
+        assert!(shown.contains("[REDACTED]"), "got: {shown}");
+    }
+
+    #[tokio::test]
+    async fn conflict_description_survives_redaction() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token-abc/getUpdates"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "ok": false,
+                "error_code": 409,
+                "description": "Conflict: terminated by other getUpdates request"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = TelegramAdapter::with_base_url(TOKEN, server.uri());
+        let err = adapter.get_updates(None).await.expect_err("HTTP 409");
+        let shown = format!("{err}");
+        assert!(
+            shown.contains("Conflict") && shown.contains("409"),
+            "runner.rs 409 detection needs both words intact, got: {shown}"
+        );
+    }
+
+    #[test]
+    fn redact_bot_token_unit() {
+        // Absent -> borrowed, unchanged.
+        let out = redact_bot_token(TOKEN, "Conflict: other request");
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(out, "Conflict: other request");
+        // Every occurrence (including `bot<token>`) is replaced.
+        let out = redact_bot_token(TOKEN, "a test-token-abc b bottest-token-abc c");
+        assert_eq!(out, "a [REDACTED] b bot[REDACTED] c");
+        // Empty token is a no-op.
+        assert_eq!(redact_bot_token("", "text"), "text");
+    }
+
+    // ---- Task 3: monotonic liveness + rebuildable client (D-04 / D-05) ----
+
+    use std::time::SystemTime;
+
+    #[test]
+    fn poll_fresh_boundaries() {
+        let max = Duration::from_secs(90);
+        assert!(!is_poll_fresh(None, max), "never stamped is not fresh");
+        assert!(is_poll_fresh(Some(Duration::from_secs(90)), max));
+        assert!(!is_poll_fresh(
+            Some(Duration::from_secs(90) + Duration::from_millis(1)),
+            max
+        ));
+        assert!(is_poll_fresh(Some(Duration::ZERO), max));
+        assert_eq!(POLL_FRESH_MAX_AGE, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn freshness_is_monotonic_not_wall_clock() {
+        let max = Duration::from_secs(90);
+
+        // Monotonic instant 200 s ago + wall time one day in the FUTURE:
+        // a wall-clock step must not make a dead poller look alive.
+        let stale = PollLiveness::new();
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(200))
+            .expect("instant 200s ago");
+        stale.stamp_at_for_tests(long_ago, SystemTime::now() + Duration::from_secs(86_400));
+        assert!(!stale.is_fresh(max));
+
+        // Monotonic instant now + wall time at the Unix epoch: a backward
+        // wall-clock step must not make a live poller look dead.
+        let live = PollLiveness::new();
+        let reported = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        live.stamp_at_for_tests(Instant::now(), reported);
+        assert!(live.is_fresh(max));
+        // Wall time is kept for reporting only.
+        assert_eq!(live.last_poll_ok_at(), Some(reported));
+
+        let unstamped = PollLiveness::new();
+        assert!(unstamped.since_last_ok().is_none());
+        assert!(unstamped.last_poll_ok_at().is_none());
+        assert!(!unstamped.is_fresh(max));
+    }
+
+    #[tokio::test]
+    async fn get_updates_ok_stamps_liveness() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token-abc/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": []})),
+            )
+            .mount(&server)
+            .await;
+        let adapter = TelegramAdapter::with_base_url(TOKEN, server.uri());
+        let liveness = adapter.poll_liveness();
+        assert!(liveness.since_last_ok().is_none());
+        let updates = adapter.get_updates(None).await.expect("empty poll is Ok");
+        assert!(updates.is_empty());
+        assert!(liveness.since_last_ok().is_some());
+        assert!(liveness.is_fresh(POLL_FRESH_MAX_AGE));
+    }
+
+    #[tokio::test]
+    async fn failed_poll_does_not_stamp() {
+        let base = silent_listener().await;
+        let adapter = TelegramAdapter::for_tests(TOKEN, base, short_deadline_tuning());
+        let liveness = adapter.poll_liveness();
+        let _ = get_updates_guarded(&adapter)
+            .await
+            .expect_err("silent server must time out");
+        assert!(
+            liveness.since_last_ok().is_none(),
+            "a timed-out poll must not stamp liveness"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_me_ok_stamps_liveness() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token-abc/getMe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {"id": 1, "first_name": "Bot", "username": "test_bot"}
+            })))
+            .mount(&server)
+            .await;
+        let adapter = TelegramAdapter::with_base_url(TOKEN, server.uri());
+        let liveness = adapter.poll_liveness();
+        assert!(liveness.since_last_ok().is_none());
+        adapter.get_me().await.expect("getMe is Ok");
+        assert!(liveness.since_last_ok().is_some());
+    }
+
+    #[tokio::test]
+    async fn rebuild_http_bumps_generation_and_still_works() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token-abc/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": []})),
+            )
+            .mount(&server)
+            .await;
+        let adapter = std::sync::Arc::new(TelegramAdapter::with_base_url(TOKEN, server.uri()));
+        let clone = std::sync::Arc::clone(&adapter);
+        assert_eq!(adapter.http_generation(), 0);
+        adapter.rebuild_http();
+        assert_eq!(adapter.http_generation(), 1);
+        // Every Arc clone sees the fresh client on its next call.
+        clone
+            .get_updates(None)
+            .await
+            .expect("poll after rebuild is Ok");
     }
 }

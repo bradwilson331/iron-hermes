@@ -9,9 +9,10 @@ use colored::Colorize;
 use ironhermes_core::Config;
 use ironhermes_core::auth::AuthStore;
 use ironhermes_core::get_hermes_home;
+use ironhermes_mcp::paste_back::{OAuthPasteBack, is_oauth_denial, redact_oauth_params};
 use ironhermes_mcp::{McpServerConfig, interpolate_config, sanitize_error};
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 // ---------------------------------------------------------------------------
 // McpAction enum (clap Subcommand)
@@ -60,6 +61,9 @@ pub enum McpAction {
         /// Force browser (PKCE loopback) flow
         #[arg(long)]
         browser: bool,
+        /// Headless paste-back: print the authorization link, then paste the redirected URL
+        #[arg(long, conflicts_with = "browser")]
+        no_browser: bool,
     },
 }
 
@@ -79,7 +83,11 @@ pub async fn handle_mcp_command(action: McpAction) -> anyhow::Result<()> {
         McpAction::List => cmd_list().await,
         McpAction::Test { name } => cmd_test(name).await,
         McpAction::Configure { name } => cmd_configure(name).await,
-        McpAction::Connect { name, browser } => cmd_connect(name, browser).await,
+        McpAction::Connect {
+            name,
+            browser,
+            no_browser,
+        } => cmd_connect(name, browser, no_browser).await,
     }
 }
 
@@ -536,7 +544,7 @@ fn should_confirm_new_issuer(defcon: ironhermes_core::config::DefconLevel) -> bo
 /// - Token values are never printed; only tool names are displayed.
 /// - `validate_prm_issuer` runs inside `connect_http_oauth` before any network call.
 /// - AuthStore is opened at `get_hermes_home().join("auth.json")`, never HERMES_HOME.
-async fn cmd_connect(name: String, _browser: bool) -> anyhow::Result<()> {
+async fn cmd_connect(name: String, browser: bool, no_browser: bool) -> anyhow::Result<()> {
     use ironhermes_mcp::transport::connect_http_oauth;
     let config = Config::load().unwrap_or_default();
     let server_val = match config.mcp_servers.get(&name).cloned() {
@@ -580,7 +588,8 @@ async fn cmd_connect(name: String, _browser: bool) -> anyhow::Result<()> {
             .and_then(|u| u.host_str().map(|h| h.to_string()))
             .unwrap_or_else(|| "unknown-host".to_string());
 
-        let must_confirm = should_confirm_new_issuer(config.skills.defcon_level);
+        let defcon = config.effective_defcon_level();
+        let must_confirm = should_confirm_new_issuer(defcon);
         let mut proceed = true;
         let (decision, resolution): (&str, &str) = if must_confirm {
             println!(
@@ -594,7 +603,7 @@ async fn cmd_connect(name: String, _browser: bool) -> anyhow::Result<()> {
             let confirmed = prompt_yn(
                 &format!(
                     "Trust '{}' and connect ({} requires confirmation)?",
-                    host, config.skills.defcon_level
+                    host, defcon
                 ),
                 false,
             );
@@ -637,6 +646,28 @@ async fn cmd_connect(name: String, _browser: bool) -> anyhow::Result<()> {
         }
     }
 
+    // D-14: paste-back on request, or by default on a headless host (container,
+    // SSH) unless `--browser` forces the loopback flow. Nothing below this branch
+    // changes for the loopback path.
+    let paste_back = no_browser || (!browser && ironhermes_core::auth::is_headless());
+    if paste_back {
+        let manager = ironhermes_mcp::McpManager::new(std::sync::Arc::new(
+            tokio::sync::RwLock::new(ironhermes_tools::ToolRegistry::new()),
+        ))
+        .with_auth_store(Some(store.clone()))
+        .with_global_issuer_allowlist(config.mcp_oauth.issuer_allowlist.clone());
+        let stdin = io::stdin();
+        // On a terminal the paste is read with echo disabled (T-54.8-45).
+        let no_echo = stdin.is_terminal();
+        let mut input = stdin.lock();
+        let mut out = io::stdout();
+        paste_back_connect(&manager, &name, &server, &mut input, &mut out, no_echo).await?;
+        println!(
+            "Authorized '{name}'. Restart the gateway (or the container) so it loads the new token."
+        );
+        return Ok(());
+    }
+
     println!(
         "{}",
         format!("Connecting to '{}' via OAuth...", name).cyan()
@@ -666,6 +697,91 @@ async fn cmd_connect(name: String, _browser: bool) -> anyhow::Result<()> {
     drop(client);
     drop(child);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Paste-back authorization (D-14, D-15)
+// ---------------------------------------------------------------------------
+
+/// Run a paste-back authorization: print the link, read ONE pasted line (the
+/// redirected address-bar URL), and complete through `oauth`.
+///
+/// The pasted line is never written back: not to `out`, not into a returned error.
+/// Every error text that comes from the MCP layer (which may quote the callback URL,
+/// for example an authorization server's exchange error) passes through
+/// `redact_oauth_params` before it is returned. The one exception is the
+/// authorization link itself, printed verbatim because the operator must open it
+/// intact; it carries the `state` the operator's own browser sees anyway, never a code.
+///
+/// With `no_echo` the line is read without terminal echo (see [`read_pasted_line`]).
+/// Terminal multiplexers or tools that log raw keyboard input are outside this
+/// process's control (T-54.8-45, accepted): the code is single-use and is consumed
+/// before the token exchange, so a copy left anywhere cannot be replayed.
+///
+/// Returns the authorized server name.
+async fn paste_back_connect<R: BufRead, W: Write>(
+    oauth: &dyn OAuthPasteBack,
+    name: &str,
+    server: &McpServerConfig,
+    input: &mut R,
+    out: &mut W,
+    no_echo: bool,
+) -> anyhow::Result<String> {
+    let start = oauth.begin(name, server).await.map_err(|e| {
+        anyhow::anyhow!("could not start authorization: {}", redact_oauth_params(&e))
+    })?;
+
+    writeln!(
+        out,
+        "Open this link on any device and approve access for '{name}':"
+    )?;
+    writeln!(out)?;
+    writeln!(out, "{}", start.auth_url)?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "The page will fail to load after you approve. Copy the whole address-bar URL, \
+         paste it here and press Enter. The link expires in 5 minutes."
+    )?;
+    if no_echo {
+        writeln!(out, "(What you paste will not be shown.)")?;
+    }
+    out.flush()?;
+
+    let line = read_pasted_line(input, no_echo)?;
+    let line = line.trim();
+
+    if line.is_empty() {
+        oauth.cancel(&start.state).await;
+        anyhow::bail!("no URL pasted; authorization cancelled");
+    }
+    if is_oauth_denial(line) {
+        oauth.cancel(&start.state).await;
+        anyhow::bail!("authorization was denied");
+    }
+    match oauth.complete(line).await {
+        Ok(server_name) => Ok(server_name),
+        Err(e) => {
+            oauth.cancel(&start.state).await;
+            Err(anyhow::anyhow!(
+                "authorization failed: {}",
+                redact_oauth_params(&e)
+            ))
+        }
+    }
+}
+
+/// Read the one pasted line. On a terminal (`no_echo`) the read goes through
+/// `rpassword` so the URL is not echoed onto the screen or into plain scrollback;
+/// pipes and tests use the `BufRead` path.
+fn read_pasted_line<R: BufRead>(input: &mut R, no_echo: bool) -> anyhow::Result<String> {
+    if no_echo {
+        Ok(rpassword::read_password()?)
+    } else {
+        let mut line = String::new();
+        input.read_line(&mut line)?;
+        Ok(line)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1112,17 @@ mod tests {
         assert!(!should_confirm_new_issuer(DefconLevel::FIVE));
     }
 
+    /// Phase 57 Plan 02 (D-11): the new-issuer confirmation reads the RESOLVED
+    /// level, so a config whose only key is `security.defcon_level: 2` confirms.
+    #[test]
+    fn mcp_new_issuer_uses_effective_level() {
+        let strict: ironhermes_core::config::Config =
+            serde_yaml::from_str("security:\n  defcon_level: 2\n").unwrap();
+        assert!(should_confirm_new_issuer(strict.effective_defcon_level()));
+        let default = ironhermes_core::config::Config::default();
+        assert!(!should_confirm_new_issuer(default.effective_defcon_level()));
+    }
+
     #[test]
     fn remove_mcp_server_config_roundtrip() {
         let content = r#"
@@ -1025,5 +1152,285 @@ mcp_servers:
             serialized.contains("gpt-4"),
             "model key should be preserved"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Paste-back (D-14)
+    // -----------------------------------------------------------------------
+
+    use ironhermes_mcp::manager::OAuthAuthorizationStart;
+    use std::io::Cursor;
+    use std::sync::Mutex;
+
+    /// Records every call; `complete`/`begin` results are configurable.
+    struct FakePasteBack {
+        auth_url: String,
+        state: String,
+        begin_result: Option<String>,
+        complete_result: Result<String, String>,
+        completed: Mutex<Vec<String>>,
+        cancelled: Mutex<Vec<String>>,
+    }
+
+    impl FakePasteBack {
+        fn new() -> Self {
+            Self {
+                auth_url: "https://auth.example.test/authorize?state=st-1".to_string(),
+                state: "st-1".to_string(),
+                begin_result: None,
+                complete_result: Ok("demo".to_string()),
+                completed: Mutex::new(Vec::new()),
+                cancelled: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OAuthPasteBack for FakePasteBack {
+        async fn begin(
+            &self,
+            _server_name: &str,
+            _config: &McpServerConfig,
+        ) -> Result<OAuthAuthorizationStart, String> {
+            match &self.begin_result {
+                Some(err) => Err(err.clone()),
+                None => Ok(OAuthAuthorizationStart {
+                    auth_url: self.auth_url.clone(),
+                    state: self.state.clone(),
+                }),
+            }
+        }
+        async fn complete(&self, callback_url: &str) -> Result<String, String> {
+            self.completed
+                .lock()
+                .unwrap()
+                .push(callback_url.to_string());
+            self.complete_result.clone()
+        }
+        async fn cancel(&self, state: &str) {
+            self.cancelled.lock().unwrap().push(state.to_string());
+        }
+        async fn reconnect_server(&self, server_name: &str, _config: &McpServerConfig) -> String {
+            format!("{server_name}: fake")
+        }
+    }
+
+    const CALLBACK: &str = "http://127.0.0.1:8765/callback?code=cd-123&state=st-1";
+
+    async fn drive(
+        fake: &dyn OAuthPasteBack,
+        pasted: &str,
+    ) -> (anyhow::Result<String>, String, usize) {
+        let mut input = Cursor::new(pasted.as_bytes().to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        let server = McpServerConfig::default();
+        let result = paste_back_connect(fake, "demo", &server, &mut input, &mut out, false).await;
+        (
+            result,
+            String::from_utf8(out).unwrap(),
+            input.position() as usize,
+        )
+    }
+
+    #[tokio::test]
+    async fn paste_back_connect_happy_path() {
+        let fake = FakePasteBack::new();
+        let (result, out, _) = drive(&fake, &format!("  {CALLBACK}  \n")).await;
+        assert_eq!(result.unwrap(), "demo");
+        assert_eq!(*fake.completed.lock().unwrap(), vec![CALLBACK.to_string()]);
+        assert!(out.contains("https://auth.example.test/authorize?state=st-1"));
+    }
+
+    #[tokio::test]
+    async fn paste_back_connect_never_echoes_pasted_line() {
+        let fake = FakePasteBack::new();
+        let (result, out, _) = drive(&fake, &format!("{CALLBACK}\n")).await;
+        assert!(result.is_ok());
+        assert!(!out.contains("cd-123"), "code leaked: {out}");
+        assert!(!out.contains("code="), "code param leaked: {out}");
+    }
+
+    #[tokio::test]
+    async fn paste_back_connect_empty_line_cancels() {
+        let fake = FakePasteBack::new();
+        let (result, _, _) = drive(&fake, "\n").await;
+        assert!(result.is_err());
+        assert_eq!(*fake.cancelled.lock().unwrap(), vec!["st-1".to_string()]);
+        assert!(fake.completed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn paste_back_connect_denial_cancels() {
+        let fake = FakePasteBack::new();
+        let (result, _, _) = drive(
+            &fake,
+            "http://127.0.0.1:8765/callback?error=access_denied&state=st-1\n",
+        )
+        .await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("denied"), "got: {err}");
+        assert_eq!(*fake.cancelled.lock().unwrap(), vec!["st-1".to_string()]);
+        assert!(fake.completed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn paste_back_real_manager_fails_closed_before_reading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(tmp.path().join("auth.json")).await.unwrap();
+        let manager = ironhermes_mcp::McpManager::new(std::sync::Arc::new(
+            tokio::sync::RwLock::new(ironhermes_tools::ToolRegistry::new()),
+        ))
+        .with_auth_store(Some(store));
+        let server = McpServerConfig {
+            url: Some("http://127.0.0.1:9/mcp".to_string()),
+            oauth_provider: Some("demo_ns".to_string()),
+            ..McpServerConfig::default()
+        };
+        let mut input = Cursor::new(format!("{CALLBACK}\n").into_bytes());
+        let mut out: Vec<u8> = Vec::new();
+        let result =
+            paste_back_connect(&manager, "demo", &server, &mut input, &mut out, false).await;
+        assert!(result.is_err());
+        assert_eq!(
+            input.position(),
+            0,
+            "input must not be read after begin fails"
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("cd-123"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Secrecy hardening (D-14 / D-15, T-54.8-04)
+    // -----------------------------------------------------------------------
+
+    /// A fake whose `begin` URL carries no `state`, so the only way `st-1` or
+    /// `cd-123` can reach the output is a leak.
+    fn quiet_fake() -> FakePasteBack {
+        let mut fake = FakePasteBack::new();
+        fake.auth_url = "https://auth.example.test/authorize?client_id=demo".to_string();
+        fake
+    }
+
+    #[tokio::test]
+    async fn complete_error_quoting_callback_is_redacted() {
+        let mut fake = quiet_fake();
+        fake.complete_result = Err(
+            "exchange failed for http://127.0.0.1:8765/callback?code=cd-123&state=st-1".to_string(),
+        );
+        let (result, out, _) = drive(&fake, &format!("{CALLBACK}\n")).await;
+        let err = format!("{:#}", result.unwrap_err());
+        for text in [&err, &out] {
+            assert!(!text.contains("cd-123"), "code leaked: {text}");
+            assert!(!text.contains("st-1"), "state leaked: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn begin_error_is_redacted() {
+        let mut fake = quiet_fake();
+        fake.begin_result = Some("registration failed near state=st-9".to_string());
+        let (result, out, _) = drive(&fake, &format!("{CALLBACK}\n")).await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(!err.contains("st-9"), "state leaked in error: {err}");
+        assert!(!out.contains("st-9"), "state leaked in output: {out}");
+    }
+
+    #[tokio::test]
+    async fn percent_encoded_callback_is_never_echoed() {
+        let fake = quiet_fake();
+        let (result, out, _) = drive(
+            &fake,
+            "http://127.0.0.1:8765/callback?%63ode=cd-123&%73tate=st-1\n",
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(fake.completed.lock().unwrap().len(), 1);
+        assert!(fake.cancelled.lock().unwrap().is_empty());
+        assert!(!out.contains("cd-123"), "code leaked: {out}");
+    }
+
+    #[test]
+    fn pasted_line_read_without_echo_on_a_tty() {
+        // Needles are built from fragments so this test cannot match itself.
+        let read_password = concat!("rpassword::", "read_password");
+        let tty_guard = concat!("stdin.is_", "terminal()");
+        let src = include_str!("mcp_config.rs");
+        assert!(
+            src.contains(tty_guard),
+            "cmd_connect must decide echo from the stdin terminal check"
+        );
+        let start = src
+            .find(concat!("fn read_pasted_", "line<"))
+            .expect("read_pasted_line must exist");
+        let body = &src[start..start + 400];
+        let guard_at = body.find("if no_echo").expect("no_echo branch");
+        let read_at = body.find(read_password).expect("rpassword read");
+        assert!(
+            guard_at < read_at,
+            "rpassword must sit inside the no_echo branch"
+        );
+        assert!(body.contains("read_line"), "BufRead path for pipes/tests");
+    }
+
+    #[test]
+    fn read_pasted_line_uses_the_reader_when_echo_is_allowed() {
+        let mut input = Cursor::new(b"hello\nworld\n".to_vec());
+        assert_eq!(read_pasted_line(&mut input, false).unwrap(), "hello\n");
+    }
+
+    /// Fake `begin`, REAL manager `complete`: drives the manager's real
+    /// unknown-state error path through the CLI.
+    struct FakeBeginRealComplete {
+        fake: FakePasteBack,
+        manager: ironhermes_mcp::McpManager,
+    }
+
+    #[async_trait::async_trait]
+    impl OAuthPasteBack for FakeBeginRealComplete {
+        async fn begin(
+            &self,
+            server_name: &str,
+            config: &McpServerConfig,
+        ) -> Result<OAuthAuthorizationStart, String> {
+            self.fake.begin(server_name, config).await
+        }
+        async fn complete(&self, callback_url: &str) -> Result<String, String> {
+            OAuthPasteBack::complete(&self.manager, callback_url).await
+        }
+        async fn cancel(&self, state: &str) {
+            self.fake.cancel(state).await;
+        }
+        async fn reconnect_server(&self, server_name: &str, config: &McpServerConfig) -> String {
+            self.fake.reconnect_server(server_name, config).await
+        }
+    }
+
+    #[tokio::test]
+    async fn real_manager_unknown_state_error_is_value_free() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(tmp.path().join("auth.json")).await.unwrap();
+        let manager = ironhermes_mcp::McpManager::new(std::sync::Arc::new(
+            tokio::sync::RwLock::new(ironhermes_tools::ToolRegistry::new()),
+        ))
+        .with_auth_store(Some(store));
+        let wrapper = FakeBeginRealComplete {
+            fake: quiet_fake(),
+            manager,
+        };
+        let (result, out, _) = drive(
+            &wrapper,
+            "http://127.0.0.1:8765/callback?code=cd-123&state=st-never-parked\n",
+        )
+        .await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("unknown, already-used, or expired"),
+            "expected the manager's fixed refusal, got: {err}"
+        );
+        for text in [&err, &out] {
+            assert!(!text.contains("cd-123"), "code leaked: {text}");
+            assert!(!text.contains("st-never-parked"), "state leaked: {text}");
+        }
     }
 }

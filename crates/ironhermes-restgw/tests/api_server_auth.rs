@@ -719,6 +719,7 @@ async fn adapter_reachable_through_run_api_server_adapter_with_key() {
         host: Some("127.0.0.1".to_string()),
         port: Some(0),
         public_opt_in: false,
+        allowed_origin: None,
     };
     let adapter = Arc::new(
         ApiServerAdapter::new(config, test_handles()).expect("construction with key must succeed"),
@@ -777,6 +778,7 @@ async fn adapter_construction_fails_closed_without_key() {
         host: Some("127.0.0.1".to_string()),
         port: Some(0),
         public_opt_in: false,
+        allowed_origin: None,
     };
     let result = ApiServerAdapter::new(config, test_handles());
     assert!(result.is_err());

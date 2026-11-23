@@ -508,10 +508,8 @@ mod tests {
             "entry 0 must name obscura when backend: obscura is configured"
         );
         assert!(
-            obscura_prereqs
-                .iter()
-                .any(|p| p.kind == "config_field"
-                    && p.name == "auxiliary.vision OR multimodal-capable main provider"),
+            obscura_prereqs.iter().any(|p| p.kind == "config_field"
+                && p.name == "auxiliary.vision OR multimodal-capable main provider"),
             "entry 1 (config_field vision) must remain byte-identical regardless of backend"
         );
     }
@@ -700,7 +698,10 @@ mod tests {
     #[test]
     fn the_session_lock_is_still_released_before_the_vision_call() {
         let source = include_str!("browser_vision.rs");
-        let fn_needle = format!("{}{}", "async fn ", "execute(&self, args: serde_json::Value)");
+        let fn_needle = format!(
+            "{}{}",
+            "async fn ", "execute(&self, args: serde_json::Value)"
+        );
         let fn_start = source
             .find(&fn_needle)
             .expect("execute() definition not found");
@@ -722,7 +723,10 @@ mod tests {
             .find(&call_needle)
             .expect("vision_call not found in execute()");
 
-        assert!(i_shot < i_drop, "screenshot must happen before the guard drops");
+        assert!(
+            i_shot < i_drop,
+            "screenshot must happen before the guard drops"
+        );
         assert!(
             i_drop < i_call,
             "the session lock guard must drop before the vision LLM round-trip"

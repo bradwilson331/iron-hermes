@@ -120,9 +120,12 @@ pub async fn extract_pdf_bytes(url: &str, bytes: Vec<u8>) -> Result<ExtractionRe
 async fn fetch_pdf_bytes(url: &str) -> Result<Vec<u8>> {
     let timeout_secs = Config::load().map(|c| c.web.timeout_secs).unwrap_or(30);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()?;
+    // D-13/D-14: every hop — including a redirect's new host — is resolved
+    // through crate::web_client's SSRF-safe resolver BEFORE connecting; see its
+    // module doc for the redirect-policy rationale. `None` user agent preserves
+    // this call site's existing behavior of sending no User-Agent header.
+    let client =
+        crate::web_client::build_ssrf_safe_client(None, Duration::from_secs(timeout_secs))?;
 
     let response = client
         .get(url)
@@ -130,7 +133,10 @@ async fn fetch_pdf_bytes(url: &str) -> Result<Vec<u8>> {
         .await
         .map_err(|e| anyhow!("PDF fetch failed: {}", e))?;
 
-    // D-18 post-redirect re-validation
+    // D-18 post-redirect re-validation: SECOND line of defense. The SSRF-safe
+    // resolver above is the FIRST line — it blocks pre-connection, at
+    // resolution time, for every hop reqwest follows. This check only fires if
+    // the resolver did not.
     let final_url = response.url().as_str().to_string();
     if final_url != url {
         validate_url_async(&final_url)

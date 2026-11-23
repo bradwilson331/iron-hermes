@@ -1,5 +1,333 @@
 # Changelog
 
+## [0.5.7] — Small-window models, Tier 2 memory, dashboard canvas, security layers, hardened containers (2026-11-22)
+
+A model with a small context window (8,192 tokens on a local server) failed any
+long turn with a `context_length_exceeded` 400, because the agent assumed a
+128,000-token window and sent a prompt that did not fit. Agent-launched heavy
+workloads could OOM-kill the whole gateway, and a delegated turn could end with
+no reply. The web UI had no way to arrange its menu, edit `config.yaml` or show
+live boards, and the security layers still had gaps around `execute_code`, web
+approvals and inbound text. This release closes those, adds Tier 2 semantic
+memory, and hardens the container images.
+
+### Added
+
+- **Menu tab in web Settings** (Phase 54.9). Reorder the docked wheel and the
+  header shortcuts, move a screen between them, rename labels, and Reset to the
+  shipped layout. The result is saved per profile under `ui.menu` in
+  `config.yaml` and applies live. The wheel holds 6 to 11 sections; Chat and
+  Settings stay on the wheel. A saved layout that fails validation falls back to
+  the default with a one-line notice instead of breaking the page.
+- **OpenUI screen** (Phase 54.9, `docs/adr/ADR-0007-openui-generative-ui.md`). Type
+  a request and the agent answers in OpenUI Lang, rendered in a sandboxed frame
+  as it streams. Views are saved per profile (up to 200) and can be re-run. A
+  button inside a view sends a new agent turn through the normal tool, guardrail
+  and approval gates; a view never calls a tool directly. The Thesys hosted
+  Gateway is off by default; `ui.openui_gateway_enabled: true` plus a
+  `THESYS_API_KEY` (vault secret `thesys` or environment) turns it on, and
+  conversation content then leaves the machine.
+- **Dashboard screen** (Phase 54.10). Each profile keeps up to 12 named boards on
+  a pannable, zoomable canvas with a soft snap grid. A board holds AI widgets
+  (references to saved OpenUI views), native tiles, and notes. Native tiles are
+  usage and cost, sessions, kanban, cron, gateway health and reports; they poll
+  while the screen is open and each has a refresh button. Start from a role
+  preset (Founder, Engineering, Sales, Ops), Blank, or Plan with AI, which shows
+  the planned widgets for you to edit and confirm before anything is generated.
+  `/` creates a widget at the cursor, `N` adds a note, and Present mode walks the
+  board full screen. Widgets move and resize from the keyboard (arrows nudge,
+  Shift+arrows resize, Delete asks twice). Below 900 px wide a board is a
+  read-only single column. Existing saved menu layouts gain the Dashboard entry
+  on upgrade.
+- **`report_publish` tool** (Phase 54.10). An agent run, such as a red-team pass,
+  publishes a named report (title, summary, severity counts, findings, body).
+  Publishing under the same name adds a version (20 kept); a Reports tile shows
+  the latest with its change from the previous version. No approval is needed
+  because it writes only to the profile's report store, and every publish is
+  recorded in `logs/audit.jsonl`.
+- **Raw `config.yaml` editor in web Settings** (Phase 54.13). A "Config file
+  (YAML)" section edits the root `config.yaml` or any profile's. **Check** reports
+  YAML and type errors with a line and column; unknown keys are listed as
+  warnings and do not block the save. Inline secrets never reach the browser (they
+  show as `•••• (kept)` and are restored on save). Each save writes
+  `config.yaml.bak-<UTC time>` beside the file (newest 10 kept), and a Backups
+  list loads an older copy into the editor. Saving needs login when web auth is
+  on and `security.web_config_write_enabled: true`; with it off, the editor is
+  read-only. A save that turns that flag off asks for typed confirmation. After a
+  save the banner offers Restart gateway; the web server itself needs a manual
+  restart.
+- **Gateway cards can be reordered, and Schedules HISTORY opens the last run**
+  (Phase 54.10). Gateway screen cards drag (or move by keyboard) and the order is
+  saved per profile; the top card spans the full width. The HISTORY button on
+  Schedules shows the selected job's last run time, status and error. It says it
+  shows the last run only; run history is still not recorded.
+- **Tier 2 semantic memory** (Phase 58.2, ADR-0008, `docs/MEMORY-TIER2.md`). A
+  per-profile store of short, cited claims under `<home>/tier2/`, beside the
+  unchanged `MEMORY.md` / `USER.md`. It adds the `memory_search` and
+  `memory_explain` tools, a Tier 2 tab on the Memory screen, hourly claim
+  consolidation (`memory_consolidate`), nightly "dreams" and a frozen
+  `ALIGNMENT_SYNTHESIS.md` block at session start, dated agent notes
+  (`memory_note`), and forgetting (`memory_forget` stages a claim, hiding it from
+  search at once). **All of it is off by default:** `memory.tier2_enabled`,
+  `memory.consolidation_enabled`, `memory.dreams_enabled`,
+  `memory.forgetting_enabled` and `memory.promotion_enabled`. Claim extraction and
+  dreams use the `memory` model role. Search uses a built-in 384-dimension
+  embedder (downloaded on first use; keyword search until it is ready) or an
+  OpenAI-compatible endpoint set under `memory.embeddings`. Staged forgets are
+  deleted only when a human runs `ironhermes memory purge` (dry run first) or
+  Purge now on the Tier 2 tab; no agent tool and no schedule can purge.
+- **Agent jobs that detach run in their own systemd scope** (Phase 58.1, Linux).
+  A terminal command using `nohup`, `setsid`, `disown` or a trailing `&` now
+  runs in `ironhermes-job-<id>.scope`, outside the gateway's cgroup. It survives
+  a gateway restart, and an out-of-memory kill of a render or model server no
+  longer takes the gateway down. List with `systemctl --user list-units
+  'ironhermes-job-*'`. `IRONHERMES_JOB_SCOPE=off` restores the old behavior. See
+  `docs/DEPLOYMENT.md`, "Memory cap and agent job scopes".
+- **Compact profile for small windows** (Phase 58.3.1). `agent.compact_profile`
+  is `auto` (default), `on` or `off`. When the full system prompt plus tool
+  definitions would take more than half the window, the agent sends only
+  `terminal`, `read_file`, `write_file`, `patch`, `memory`, `web_search` and
+  `web_read` (plus `kanban_complete` and `kanban_block` in a kanban worker),
+  drops the skills index, and shortens context files; `SOUL.md` stays whole. The
+  first compact turn of a session shows a one-line notice on the TUI, web, ACP
+  and chat platforms.
+- **`compression.model_thresholds`** maps a model name to a compression trigger
+  fraction, for example `qwen2.5-7b: 0.3`. Keys match as case-insensitive
+  substrings and the longest match wins; values outside 0 to 1 are ignored with
+  a warning.
+- **Local servers are asked for their loaded window.** Before the first request
+  to a loopback or LAN endpoint, ironhermes asks LM Studio, Ollama and llama.cpp
+  how many tokens the loaded model has, and uses the answer.
+- **`/models refresh` and `ironhermes models fetch` save the model ids each
+  provider serves**, and the `/model` picker lists them without a restart.
+- **tirith detection sidecar** (Phase 57). A separately licensed
+  `ironhermes-tirith` process (AGPL-3.0, `tirith-core` pinned to 0.4.2) is
+  started by every agent host and screens tool arguments, inbound chat text,
+  cron and kanban prompts, context files, MCP configuration and URLs. The
+  existing regex tables keep running and the strictest verdict wins, so they are
+  the floor when the sidecar is down. No MIT binary links `tirith-core`.
+  `IRONHERMES_TIRITH_BIN` points at a non-default binary; `ironhermes doctor`
+  reports the sidecar's presence, pin and a live ping.
+- **DEFCON is one dial, set per session with `/yolo <N>`** (Phase 57). `N` is 1
+  (strictest) to 5 (most permissive); `security.defcon_level` is the default for
+  new sessions. `/yolo <N>` works on the TUI, CLI, web, Telegram, Discord and
+  Slack, lasts for the session, is never written to `config.yaml`, and every
+  change is audited. A remote surface needs `security.defcon_remote_change_enabled:
+  true`; see `docs/CONFIGURATION.md`, "DEFCON levels and `/yolo <N>`".
+- **Real approvals on the web** (Phase 57). A command that needs approval shows
+  an Approve / Deny card in chat; before this the web gate denied every such
+  command.
+- **The web chat shows only critical events** (Phase 57). Routine tool traffic
+  collapses into one status dot per turn that spins while tools run, turns amber
+  when a warned or bypassed call ran, and red on a block or failure. Blocks,
+  approvals, credential detections, failed jobs, sidecar outages and `/yolo`
+  changes still show. The Logs screen stays complete, and the separate yolo-bypass
+  chip is gone.
+- **Approvals on Discord and Slack.** A command that needs approval sends the
+  prompt to the requester's DM, even when it came from a channel. Only the
+  requester's `/approve` or `/deny` from that DM resolves it. In a channel the bot
+  answers "Approvals are answered in a DM to the bot", and another user cannot
+  approve someone else's request. A timeout denies. Before this, Discord and Slack
+  refused every such command with no prompt. Slack needs the `im:write` and
+  `chat:write` scopes.
+- Image `HEALTHCHECK` on `/`, OCI labels, digest-pinned base images, and cosign
+  signing of published images (see `docs/DOCKER-PUBLISH.md`).
+- Container lint Gate 11 (checks the compose profile and Dockerfile).
+- `IRONHERMES_UID` / `IRONHERMES_GID` remap now works in the web image under a
+  read-only rootfs.
+- `IRONHERMES_CONFIG_TEMPLATE` seeds `config.yaml` once from a file you name.
+- `IRONHERMES_BROWSER_NO_SANDBOX` environment override for `browser.no_sandbox`.
+- Optional Cloudflare Tunnel hosting: `docker compose --profile cloudflare up -d`
+  starts a hardened, digest-pinned `cloudflared` connector in front of the UI
+  (`docs/DEPLOYMENT.md`).
+
+### Changed
+
+- **BREAKING: the read-only rootfs turns apt-style writes into EROFS.** Under the
+  compose default (`docker-compose.yml`), `apt install`, `apt-get`, system-wide
+  `pip install` and any write to `/etc` or `/usr` fail with "read-only file
+  system". Agent workflows that installed system packages must install into the
+  volume instead (`npm install -g` lands in `/opt/data/.local`; the Python user
+  base is pointed there too, but the image ships no `pip` or `venv` module, so
+  Python packages need a pip you bring yourself) or use a derived image. The tmpfs `/tmp` is `noexec`,
+  which blocks direct execution from `/tmp`.
+- **Chromium runs with `--no-sandbox` by default in both images**
+  (`IRONHERMES_BROWSER_NO_SANDBOX=1`). Chromium's own sandbox crashes under the
+  hardened compose profile; the container's controls (UID 10000, no
+  capabilities, `no_new_privs`, read-only rootfs) are the compensating boundary.
+  Run with `-e IRONHERMES_BROWSER_NO_SANDBOX=0` to restore the sandbox where your
+  runtime allows it.
+- `setpriv` replaces the old privilege-drop helper. The drop happens inside the
+  image, fails closed, and holds on hosts that cannot apply the compose runtime
+  flags.
+- `docker compose up -d` with `docker-compose.yml` is now the documented default
+  run. Plain `podman run` remains as the unhardened alternative.
+- **Sliplane runs the same single `-dev-tools` image** (D-02 option-a: there is
+  no Sliplane-specific Dockerfile). The in-image enforcement (uid 10000,
+  `no_new_privs`, empty bounding set) applies with no runtime flags, proven by
+  the `sliplane_equivalent` smoke case. Whether Sliplane applies the compose
+  runtime flags (read-only rootfs, noexec tmpfs, `shm_size`, `cap_drop`,
+  pids/memory/cpu limits) was **not probed** and is treated as unverified
+  residual risk (`docs/DEPLOYMENT.md`, "Sliplane probe results").
+- **The context window is resolved from more sources, in a fixed order** (Phase
+  58.3.1): the per-model override `providers.<p>.models.<m>.context_length`, then
+  a window the model server reported or an earlier rejection taught
+  ironhermes, then the models cache or static table, then `model.context_length`,
+  then the default. `model.context_length` is now a ceiling for a probed or
+  learned window (the smaller wins), not an override. An unknown model on a
+  loopback or LAN server now defaults to 8,192 tokens instead of 128,000. See
+  `docs/CONFIGURATION.md`, "Context window and small models".
+- **Small windows get a tighter compression trigger.** Below 32,768 tokens the
+  trigger drops automatically (0.35 at 8,192). `compression.model_thresholds`
+  sets a per-model fraction that overrides it. Summaries are sized to the
+  window, so a summary cannot overflow a small model. Defaults for large windows
+  are unchanged.
+- **Requests to small windows send `max_tokens`.** When the compact profile is on
+  or the window is 32,768 tokens or less, the request carries a reply reserve
+  (1,024 tokens at 8,192, up to 4,096). Large-window requests are unchanged.
+- **A request that still does not fit is not sent.** The agent compresses up to
+  three times, then refuses the turn with a message that names the window and
+  how to fix it, instead of sending a request the provider will reject.
+- **The window is re-resolved on a model switch** (`/model`, the picker, a
+  fallback provider) instead of once at startup.
+- **Web: Settings and Models show the window and where it came from**
+  (`override`, `cache`, `pin`, `default`, `probed`, `learned`, `local default`).
+  `/usage` prints the same.
+- **BREAKING for `autonomous.yolo` and `skills.defcon_level`:** both keys still
+  load but are deprecated aliases for `security.defcon_level` and log a warning
+  (`autonomous.yolo: true` reads as level 5, `false` as 3). An install that sets
+  none of them runs at level 3, so approvals stay on. Bypass of a warned call
+  exists only at levels 4 and 5.
+- **`execute_code` source is screened** (Phase 57). At level 3 or stricter, code
+  that reaches `subprocess`, `socket`, `ctypes` or `importlib` is blocked.
+  A reconstructed call to a known mutation command, such as `wrangler delete`
+  through `subprocess`, is blocked at every level. A real `execute_code` sandbox
+  is still not built and is listed as an accepted risk in `docs/SECURITY.md`.
+- **`web_read` and `web_extract` ask for approval at levels 1 and 2 only.** At
+  levels 3 to 5 a clean URL runs; a critical URL is blocked at every level.
+- **MCP mutation tools are judged on their arguments**, not just their name, and
+  `delegate_task` subagents go through the same gate on every surface.
+- **The gateway and web units are memory-capped** (Phase 58.1, Linux).
+  `ironhermes-gateway.service` and `ironhermes-web.service` ship with
+  `MemoryHigh=6G`, `MemoryMax=8G` and `OOMPolicy=continue`, and the gateway unit
+  sets `KillMode=control-group` so everything left in its cgroup dies with it.
+  The gateway itself uses about 137 MB. `install.sh`, `update.sh` and
+  `web-install.sh` overwrite the installed unit; put overrides in a
+  `systemctl --user edit` drop-in.
+
+### Fixed
+
+- **Gateway yolo-bypass chat spam.** Yolo bypass notices are now log-only on the
+  gateway: zero bypass messages reach Telegram, Discord or Slack chat (target
+  `ironhermes::yolo` in the log). The audit rows are unchanged.
+- DEFCON wording is removed from gateway chat notices (the audit log keeps the
+  raw wording).
+- **The sidecar killed for timeouts now fails closed.** A sidecar killed after
+  repeated timeouts reports `killed_for_timeouts` for the whole backoff, so
+  subjects are Blocked at DEFCON 1-3 and Warned at 4-5 instead of passing on the
+  regex floor. The kill backoff is a flat 0.5 s, and timed-out checks keep
+  counting toward the queue budget (plan 57-24).
+- **A Block on the web card names its cause:** a named rule, the built-in
+  rules, "could not be screened (<reason>)" or "the security scanner is not
+  responding". A subject the sidecar refused no longer reads as a scanner outage
+  (plan 57-25).
+- **`/yolo 4` and `/yolo 5` now take effect on the web and in chat.** The model
+  is told the session's live DEFCON level on every turn, so after a refusal it
+  makes the call again and the gate bypasses it (audited). Before this, only the
+  CLI worked, because it puts every slash-command result into the model's
+  history. Blocks are still never bypassed.
+- **Context files are screened at the session's DEFCON level,** not the process
+  default, and their audit rows record that level and the session id.
+- **A context-window 400 no longer ends the turn** (Phase 58.3.1). On a
+  `context_length_exceeded` rejection the agent reads the real window from the
+  error, compresses to fit, and retries once. The learned window is saved in
+  `models-cache.json` (not `config.yaml`) per server URL and model. It covers
+  every surface that runs the agent loop and the helper-model calls (summarizer,
+  vision, and the other auxiliary roles). If the retry also fails, the error
+  names the window and the fix.
+- **Gateway hygiene no longer leaves orphaned tool calls** when it drops the
+  middle of a long conversation to fit a small window.
+- **Switching to a provider that has no default model no longer sends an empty
+  model id.** A blank model is refused with a message pointing at `/model` and
+  `/models refresh`, and the picker's empty list says the same.
+- **Delegated turns finish and reply** (Phase 58.1). A parent turn now aborts a
+  delegate child that blocks past its deadline, and a delegate waiting for a free
+  slot gives up at that deadline with `Subagent timed out after Ns waiting for a
+  delegate slot`, instead of waiting for ever and leaving the chat on "typing".
+  The model-supplied `timeout_seconds` is not clamped.
+
+### Security
+
+- **A Block always beats yolo** (Phase 57). A tirith Critical, a Tier-2 command
+  such as `rm -rf /`, or a recognised mutation verb is blocked at every level.
+  A Tier-1 command or a Python-table hit such as `curl` asks for approval at
+  levels 2 to 5 and is blocked only at level 1.
+- **A missing, crashed or timed-out sidecar fails closed for tools that change
+  things.** `terminal`, `execute_code`, `delegate_task`, `cronjob`, `write_file`,
+  `patch` and MCP mutation tools are blocked at levels 1 to 3 and raised to Warn
+  at 4 and 5; each event is audited with its reason.
+- **Inbound chat text and cron or kanban prompts are screened** for injection and
+  hidden characters.
+- **Secrets in `config.yaml` stay out of the browser** (Phase 54.13). The raw
+  editor masks any key ending in `api_key`, `token`, `secret`, `password` or
+  `passphrase` (and similar credential names), and a save is refused rather than
+  written with a placeholder it cannot match to an original. Backups are mode
+  0600.
+- **Tier 2 memory claims pass the memory scanner** (Phase 58.2). Claims come only
+  from user and assistant messages, never tool output or fetched pages, and a
+  rejected claim is logged to `audit.jsonl`.
+
+## [0.5.0] — Telegram stall fix, site deploys from chat, skills in installs (2026-10-17)
+
+A long-running Telegram gateway could stop answering without ever reporting a
+fault, MCP servers that need a browser sign-in could not be authorized from a
+headless install, and bundled skills only reached a checkout, not an install.
+This release closes all three and adds the first piece of the site-deploy
+workflow.
+
+### Fixed
+
+- **The Telegram gateway no longer stalls silently.** Every Telegram HTTP call
+  now has a bounded connect and request timeout, the long-poll loop has a
+  stalled-poll guard, and an in-process watchdog restarts a poller that stops
+  making progress. `status` reports what the poller is actually doing instead of
+  the last state it remembers, and a 10-minute poll trace is kept so a stall can
+  be diagnosed after the fact.
+- **A hung turn can no longer wedge a chat.** Each turn runs under a deadline,
+  and the cleanup after it (placeholder edits, typing indicator, queue drain) is
+  bounded as well, so one unresponsive adapter call cannot hold the session.
+- **The gateway writes a daily log file on every install**, not only under the
+  supervisor scripts, with a 14-file retention.
+- **Headless MCP authorization works.** A server that needs a browser sign-in can
+  be authorized from the CLI or from Telegram by pasting the redirect URL back;
+  no local browser is required.
+- **`auth.json` is safe across processes.** Concurrent writers no longer lose
+  each other's tokens.
+
+### Added
+
+- **Site deploys from chat.** A site registry (`ironhermes sites ...`), a
+  `doctor` preflight for each registered site, and a `site-deploy` skill that
+  builds and deploys a static site and reports the result back to the chat.
+- **A dev-tools container image** (`docker/dev-tools.Dockerfile`) layered on the
+  base image with git, the GitHub CLI, Node 22, npm and a pinned wrangler. The
+  base image stays lean.
+- **The wrangler skill is no longer gated** behind an extra toggle.
+- **Skills and optional skills are installed and upgraded by `install.sh` and by
+  the container** from the release archive. A history manifest
+  (`skills/.bundled-history`) lets an upgrade recognize every pristine bundled
+  version and replace it, while operator edits are kept.
+
+### Security
+
+- **Token-free Telegram errors.** Bot tokens no longer appear in error text or
+  logs produced by Telegram transport failures.
+- **OAuth values are redacted in logs.** Authorization codes, state values and
+  tokens are masked wherever an MCP authorization flow logs a URL.
+- **`${VAR}` in MCP headers fails closed.** An unset variable referenced from a
+  server header or URL now refuses to connect instead of sending an empty or
+  partial value.
+
 ## [0.4.5] — Release branch realigned with develop; project attribution (2026-09-20)
 
 `main` had been parked at the v0.3.1 divergence point (`a5e378ae9`, 2026-06-19)

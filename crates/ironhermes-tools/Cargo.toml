@@ -46,6 +46,17 @@ rodio = { workspace = true }        # Phase 36.17.5 D-15 Local arm
 rustls = "0.23"
 cpal = "0.18.1"                     # Phase 36.17.8 D-08 — mic capture backend
 hound = "3.5.1"                     # Phase 36.17.8 D-08 — WAV read/write for STT
+# Phase 49.8 D-01: rosbridge WebSocket transport for the `ros2` toolset. Already
+# resolved at exactly this version via ironhermes-gateway's own dep on the same
+# crate (Cargo.lock) — adds no new package to the dependency graph.
+tokio-tungstenite = "0.28"
+# Phase 49.8 D-13 (49.8-06): sensor_msgs Image/CompressedImage -> JPEG data URL
+# conversion for the ros2 camera vision path. Already resolved at 0.25.10 via
+# ironhermes-gateway (Cargo.toml:50) and ironhermes-cli (Cargo.toml:84) —
+# planner-verified [VERIFIED], adds no new package to the dependency graph.
+# Feature subset (jpeg/png) matches the two CompressedImage formats this
+# module supports.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # Phase 53 Plan 03 Task 1: SIGTERM for a locally-spawned `obscura serve` child in
 # BrowserSession::close()'s per-mode teardown (SIGTERM -> bounded grace ->
 # Child::start_kill() hard kill). `signal` feature needed for kill()/Signal;
@@ -65,7 +76,15 @@ nix = { workspace = true, features = ["signal", "process"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 wiremock = "0.6"
+# Phase 49.8-20 (CR-03): documented tracing_subscriber::fmt() global
+# subscriber for ros2_bridge_log_hygiene.rs's log-capture proofs. Already the
+# workspace's own pinned dependency (root Cargo.toml, tracing-subscriber =
+# "0.3") and already resolved in Cargo.lock as a transitive dev-dependency
+# via tracing-test — adds no new package to the dependency graph.
+tracing-subscriber = { workspace = true }
 # Phase 36.17.5 TTS-10: install rustls CryptoProvider before live Edge TTS network call.
 # msedge-tts tokio-runtime uses rustls 0.23 + aws-lc-rs; provider must be installed once
 # per process before any TLS connection attempt.
 rustls = "0.23"
+
+[features]

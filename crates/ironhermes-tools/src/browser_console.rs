@@ -25,6 +25,15 @@ use crate::browser_session::{
 };
 use crate::registry::{Prerequisite, Tool};
 
+/// Whether an eval-mode call must ask for approval (D-13 / D-21).
+///
+/// `browser_console` has no session id (the tool is one instance per runtime), so the
+/// decision uses the PROCESS default DEFCON level: the one the host fixed at boot from
+/// the profile, `--yolo` or a worker's env. A level 4-5 process bypasses; 1-3 asks.
+fn eval_needs_approval() -> bool {
+    should_prompt_for_approval(ironhermes_core::defcon::session_defcon().process_default())
+}
+
 /// JS injected on demand to install a console override that buffers entries.
 /// Idempotent — guarded by the `__ironhermes_console__` sentinel.
 const INJECT_CONSOLE_OVERRIDE_JS: &str = r#"
@@ -168,22 +177,21 @@ impl BrowserConsoleTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: expression (mode='eval')"))?
             .to_string();
 
-        // D-13: yolo+approval gate (mirrors terminal.rs).
-        let yolo = self.config.autonomous.yolo;
-        if should_prompt_for_approval(yolo) {
+        // D-13 / D-21: the approval gate follows the DEFCON level (mirrors terminal.rs).
+        if eval_needs_approval() {
             return Ok(json!({
                 "approval_needed": true,
                 "tool": "browser_console",
                 "mode": "eval",
                 "expression": expression,
-                "hint": "Set yolo=true or approve to execute JS in the browser page context"
+                "hint": "Approve (or raise the DEFCON level to 4-5) to execute JS in the browser page context"
             })
             .to_string());
         }
 
         debug!(
             expr_len = expression.len(),
-            "browser_console mode=eval (yolo on, gate bypassed)"
+            "browser_console mode=eval (DEFCON 4-5, gate bypassed)"
         );
 
         let mut guard = self.session.lock().await;
@@ -230,30 +238,56 @@ async fn ensure_session<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironhermes_core::config::{AutonomousConfig, Config};
+    use ironhermes_core::config::{Config, DefconLevel};
+    use ironhermes_core::defcon::session_defcon;
+    use std::sync::MutexGuard;
+
+    /// The process default level is a process-global, and the eval gate reads it, so every
+    /// test that depends on it holds this lock and restores the previous value on drop.
+    static LEVEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ProcessLevel {
+        previous: DefconLevel,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl ProcessLevel {
+        fn set(n: u8) -> Self {
+            let lock = LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = session_defcon().process_default();
+            session_defcon()
+                .set_process_default(DefconLevel::try_from(n).expect("valid DEFCON level"));
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ProcessLevel {
+        fn drop(&mut self) {
+            session_defcon().set_process_default(self.previous);
+        }
+    }
 
     fn dummy_session() -> Arc<Mutex<Option<BrowserSession>>> {
         Arc::new(Mutex::new(None))
     }
 
-    fn dummy_console_tool(yolo: bool) -> BrowserConsoleTool {
-        let config = Config {
-            autonomous: AutonomousConfig { yolo },
-            ..Default::default()
-        };
-        BrowserConsoleTool::new(dummy_session(), Arc::new(config))
+    fn dummy_console_tool() -> BrowserConsoleTool {
+        BrowserConsoleTool::new(dummy_session(), Arc::new(Config::default()))
     }
 
     #[test]
     fn name_and_toolset_match_d04() {
-        let t = dummy_console_tool(false);
+        let t = dummy_console_tool();
         assert_eq!(t.name(), "browser_console");
         assert_eq!(t.toolset(), "browser");
     }
 
     #[test]
     fn schema_default_mode_is_log() {
-        let t = dummy_console_tool(false);
+        let t = dummy_console_tool();
         let s = t.schema();
         let mode_default = s
             .function
@@ -267,8 +301,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_eval_without_expression_errors() {
-        // With yolo=true so the gate doesn't fire before the missing-expression check
-        let t = dummy_console_tool(true);
+        // Process level 5 so the gate doesn't fire before the missing-expression check
+        let _level = ProcessLevel::set(5);
+        let t = dummy_console_tool();
         let result = t.execute(json!({"mode": "eval"})).await;
         assert!(result.is_err());
         assert!(
@@ -281,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_unknown_mode_errors() {
-        let t = dummy_console_tool(false);
+        let t = dummy_console_tool();
         let result = t.execute(json!({"mode": "destroy"})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid mode"));
@@ -324,18 +359,19 @@ mod tests {
         assert!(DRAIN_CONSOLE_BUFFER_JS.contains("window.__ironhermes_console__ = []"));
     }
 
-    /// GAP-4 / T-25.1-02: when yolo=false (injected), eval returns approval_needed envelope.
+    /// GAP-4 / T-25.1-02: at DEFCON 3 (the default), eval returns the approval_needed envelope.
     /// No chromium needed — the gate fires before page.evaluate.
     #[tokio::test]
-    async fn execute_eval_returns_approval_envelope_when_yolo_is_false() {
-        let t = dummy_console_tool(false);
+    async fn execute_eval_returns_approval_envelope_at_level_three() {
+        let _level = ProcessLevel::set(3);
+        let t = dummy_console_tool();
         let result = t
             .execute(json!({"mode": "eval", "expression": "document.title"}))
             .await
             .unwrap();
         assert!(
             result.contains("\"approval_needed\":true"),
-            "expected approval_needed envelope when yolo=false, got: {result}"
+            "expected approval_needed envelope at DEFCON 3, got: {result}"
         );
         assert!(
             result.contains("\"tool\":\"browser_console\""),
@@ -351,13 +387,13 @@ mod tests {
         );
     }
 
-    /// GAP-4 / T-25.1-02: when yolo=true (injected), the approval gate is bypassed.
+    /// GAP-4 / T-25.1-02: at DEFCON 5 the approval gate is bypassed.
     /// Because no chromium is available in unit tests, ensure_session() will fail with
     /// a binary-not-found / spawn error — that's the expected path, NOT the approval envelope.
-    /// This proves yolo=true from the injected Config bypasses the gate.
     #[tokio::test]
-    async fn execute_eval_uses_injected_yolo_not_disk() {
-        let t = dummy_console_tool(true);
+    async fn execute_eval_bypasses_gate_at_level_five() {
+        let _level = ProcessLevel::set(5);
+        let t = dummy_console_tool();
         let result = t
             .execute(json!({"mode": "eval", "expression": "document.title"}))
             .await;
@@ -367,7 +403,7 @@ mod tests {
             Ok(s) => {
                 assert!(
                     !s.contains("\"approval_needed\""),
-                    "yolo=true must NOT produce approval_needed envelope: {s}"
+                    "DEFCON 5 must NOT produce approval_needed envelope: {s}"
                 );
             }
             Err(e) => {
@@ -376,9 +412,23 @@ mod tests {
                 let err_str = e.to_string();
                 assert!(
                     !err_str.contains("approval_needed"),
-                    "yolo=true must NOT produce approval_needed error: {err_str}"
+                    "DEFCON 5 must NOT produce approval_needed error: {err_str}"
                 );
             }
+        }
+    }
+
+    /// D-21: the eval-mode decision follows the process default level, read at each call
+    /// (never captured from config when the tool is built): 1-3 ask, 4-5 bypass.
+    #[test]
+    fn browser_console_eval_uses_level() {
+        for n in 1..=5u8 {
+            let _level = ProcessLevel::set(n);
+            assert_eq!(
+                eval_needs_approval(),
+                n <= 3,
+                "DEFCON {n}: eval approval must be required exactly at levels 1-3"
+            );
         }
     }
 }

@@ -119,6 +119,14 @@ web-sys = { version = "0.3", features = [
     "RtcPeerConnectionIceEvent",
     "RtcSignalingState",
     "MediaStreamTrackState",
+    # Phase 54.7 D-12 keyless realtime: FormData builds the multipart `sdp` +
+    # `session` calls POST. The RtcRtpTransceiver* features are used by plan 14's
+    # Test connection (a recvonly audio transceiver for the throwaway offer).
+    # Feature flags of the existing web-sys crate -- no new package.
+    "FormData",
+    "RtcRtpTransceiver",
+    "RtcRtpTransceiverInit",
+    "RtcRtpTransceiverDirection",
     # Phase 46.7 Plan 05 (D-05): paste-from-clipboard image attachment support.
     # dioxus-web's drag-drop FileEngine already uses File/FileList/FileReader
     # internally (feature-unified into this same web-sys build), but the
@@ -129,6 +137,14 @@ web-sys = { version = "0.3", features = [
     "File",
     "FileList",
     "FileReader",
+    # Phase 54.9 Plan 09 (D-13/D-15): OpenUI host bridge. MessageEvent for the one
+    # window `message` listener (source check), HtmlIFrameElement for content_window().
+    "MessageEvent",
+    "HtmlIFrameElement",
+    # Phase 54.10 Plan 06 (D-13): the dashboard canvas installs a raw NON-passive `wheel`
+    # listener so Ctrl+wheel / pinch zoom the board instead of the browser page.
+    "WheelEvent",
+    "AddEventListenerOptions",
 ] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
@@ -157,6 +173,9 @@ axum = { version = "=0.8.4", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Server-only deps — behind cfg gate so WASM client never compiles them
 ironhermes-core = { path = "../ironhermes-core" }
+# Phase 57 Plan 05 (D-02): spawns the tirith sidecar process, so it must never
+# enter the wasm graph. Native-only, same table as ironhermes-core.
+ironhermes-security = { path = "../ironhermes-security" }
 # Phase 47.4 Plan 02 (D-09/D-14): the profile VERIFY probe reaches
 # build_runtime_judge_fn_with_env_overrides, which lives in the CLI crate
 # per the locked ironhermes-kanban crate-isolation fence (judge.rs's module
@@ -292,6 +311,14 @@ ironhermes-hub = { path = "../ironhermes-hub" }
 # Already resolved in the lockfile via ironhermes-hub's own tarball.rs.
 flate2 = { workspace = true }
 
+# Phase 54.4 WR-05: logs_api.rs opens the log files with O_NOFOLLOW (and
+# O_NONBLOCK) so a symlink or FIFO swapped in between the lstat and the open is
+# refused by the kernel. Unix-only, so neither the wasm client nor a Windows
+# build sees it; `libc = "0.2"` matches ironhermes-exec/ironhermes-cron and is
+# already resolved in the workspace lockfile.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
 tokio = { version = "1", features = ["macros", "rt", "time"], default-features = false }
@@ -325,6 +352,14 @@ tower = { version = "0.5", features = ["util"] }
 # one `"dioxus-html",` edge line under this crate's entry — no new package and
 # no version change anywhere in the graph.
 dioxus-html = { version = "0.7.7", default-features = false, features = ["serialize"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# Phase 54.7 (plan 06): mock voice servers for the voice_api tests, the
+# `synth_voice_test` seam and the D-18 save-to-synthesis harness. Dev-only and
+# native-only (this table is cfg-gated away from the wasm32 graph), and no new
+# package: wiremock is already in Cargo.lock as a dev-dependency of
+# ironhermes-core and ironhermes-tools.
+wiremock = { workspace = true }
 
 [features]
 default = ["web"]

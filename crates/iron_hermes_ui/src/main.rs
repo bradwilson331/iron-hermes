@@ -1,16 +1,28 @@
+// Phase 54.4 Plan 07 (D-08/D-25): the client-side agent-activity ring that
+// the Logs screen (and plan 11's Logs mini-panel) read.
+mod activity_log;
 mod app;
+// Phase 54.10 Plan 02 (D-13/D-16/D-17/D-18): pure canvas geometry, shortcuts, frame cap, reorder.
+mod canvas_math;
 mod components;
+// Phase 54.10 Plan 11 (D-14): pure board presets (tiles, notes, AI prompts, layout, notice copy).
+mod dashboard_model;
 mod fonts;
 // Phase 36.3.7.11 Plan 02: client-side kanban utilities (transition
 // validator + drag-blocked hint copy). The server-side `kanban_api`
 // imports `kanban::transitions::is_drag_allowed` for D-14 defense-in-depth.
 mod kanban;
+// Phase 54.9 Plan 01 (D-03/D-05/D-08): menu layout catalog, default and validator.
+mod menu_layout;
 mod mocks;
 mod platform;
 mod protocol;
 mod server;
 mod state;
 mod ui_prefs;
+// Phase 54.7 Plan 02 (D-06): the single ungated, wasm-safe voice provider
+// registry + client validators. Every voice-panel list/default reads it.
+mod voice_registry;
 
 use app::App;
 
@@ -24,6 +36,33 @@ use app::App;
 #[cfg(feature = "server")]
 fn bind_guard_allows(ip: std::net::IpAddr, auth_enabled: bool) -> bool {
     ip.is_loopback() || auth_enabled
+}
+
+/// Phase 57 D-02 / D-09 / D-21: boot the detection sidecar and seed the DEFCON registry.
+///
+/// Spawns the one supervised sidecar for this process (`boot` is idempotent: a second
+/// call returns the same service), which also installs core's content screen, and sets
+/// the process-default session level from the config. A session that nobody has changed
+/// reads this default; a `/yolo <N>` changes only that session, in memory.
+///
+/// A sidecar that cannot start is recorded in its health and does not stop the server:
+/// every screen then reports it unavailable and fails closed by level (D-12).
+#[cfg(feature = "server")]
+fn boot_security_for_web(config: &ironhermes_core::config::Config) {
+    boot_security_with(
+        &ironhermes_security::service::BootOptions::from_home(ironhermes_core::get_hermes_home()),
+        config,
+    );
+}
+
+/// [`boot_security_for_web`] with explicit options, so a test can point it at a temp home.
+#[cfg(feature = "server")]
+fn boot_security_with(
+    opts: &ironhermes_security::service::BootOptions,
+    config: &ironhermes_core::config::Config,
+) {
+    ironhermes_security::service::boot(opts);
+    ironhermes_core::defcon::session_defcon().set_process_default(config.effective_defcon_level());
 }
 
 /// D-04 (49.1.1): a non-loopback bind with no configured
@@ -138,6 +177,10 @@ async fn main() {
     server::state::install_global_app_state(app_state.clone())
         .expect("Failed to install global AppState");
 
+    // Phase 57 D-02/D-09/D-21: boot the security sidecar and seed the process-default
+    // DEFCON level BEFORE the server accepts a single request.
+    boot_security_for_web(&app_state.config());
+
     let address = dioxus::cli_config::fullstack_address_or_localhost();
 
     // Explicit Level::INFO on both request and response callbacks is mandatory:
@@ -165,6 +208,9 @@ async fn main() {
     let origins_configured = auth_config.allowed_origins.is_configured();
     let auth_state = server::auth::AuthState::new(auth_config)
         .expect("web_ui.auth.password_hash is not a valid argon2id PHC string");
+    // Phase 57 D-22: record whether the auth layer is on, so the chat WebSocket can tell
+    // `/yolo <N>` that its sender passed `require_auth`. Off (the default) refuses.
+    server::state::set_web_auth_enabled(auth_state.enabled());
 
     // Phase 47.3 Plan 02 (D-10): the fail-closed bind guard. Must run BEFORE
     // TcpListener::bind so a refused configuration never opens a listening
@@ -288,6 +334,13 @@ async fn main() {
         .route(
             "/artifacts/{id}/raw",
             axum::routing::get(server::artifact_route::serve_artifact_raw),
+        )
+        // Phase 54.9 Plan 08 (D-13): the sandboxed OpenUI renderer document. Raw
+        // route (a server fn would JSON-encode the body), registered before the
+        // auth layer so require_auth wraps it; must mirror login_page.rs.
+        .route(
+            "/openui/frame",
+            axum::routing::get(server::openui_route::serve_openui_frame),
         )
         // Phase 46.7 Plan 05 (D-06): raw axum route for session-attachment
         // serving (sent-bubble image thumbnails + non-image download chips).
@@ -612,5 +665,53 @@ mod tests {
             "with no resolvable env var name, the message must point at the config key \
              instead, got: {msg}"
         );
+    }
+
+    /// Phase 57 D-02 / D-21: the web server's startup helper installs the sidecar
+    /// service and seeds the DEFCON process default from the effective config level.
+    #[tokio::test]
+    async fn web_server_startup_boots_sidecar() {
+        use ironhermes_core::config::{Config, DefconLevel};
+        use ironhermes_core::defcon::session_defcon;
+        use ironhermes_security::service::{BootOptions, installed};
+        use ironhermes_security::testing::clear_installed_for_tests;
+
+        let _env = crate::server::test_support::env_lock();
+        clear_installed_for_tests();
+        let saved_default = session_defcon().process_default();
+        // Start from a level that differs from what the config resolves to, so a helper
+        // that forgets to seed the default is caught.
+        session_defcon().set_process_default(DefconLevel::FIVE);
+
+        let home = tempfile::tempdir().unwrap();
+        let opts = BootOptions {
+            hermes_home: home.path().to_path_buf(),
+            binary: None,
+            extra_args: Vec::new(),
+        };
+        let config = Config::default();
+        assert_eq!(config.effective_defcon_level(), DefconLevel::THREE);
+        super::boot_security_with(&opts, &config);
+        assert!(
+            installed().is_some(),
+            "the sidecar service must be installed"
+        );
+        assert_eq!(
+            session_defcon().process_default(),
+            config.effective_defcon_level(),
+            "the process default must equal the effective level"
+        );
+
+        // A config that pins another level seeds that level.
+        let mut pinned = Config::default();
+        pinned.security.defcon_level = Some(DefconLevel::try_from(2).unwrap());
+        super::boot_security_with(&opts, &pinned);
+        assert_eq!(
+            session_defcon().process_default(),
+            DefconLevel::try_from(2).unwrap()
+        );
+
+        clear_installed_for_tests();
+        session_defcon().set_process_default(saved_default);
     }
 }

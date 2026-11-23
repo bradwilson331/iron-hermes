@@ -56,6 +56,9 @@ warn() { printf '[web-install] WARN: %s\n' "$*" >&2; }
 
 # ---------- preflight ----------
 [ -x "$BUNDLE_DIR/iron_hermes_ui" ] || die "no bundle binary at $BUNDLE_DIR/iron_hermes_ui (build with scripts/deploy/web-build.sh, or set IRONHERMES_UI_BUNDLE_DIR)"
+# Without the sidecar next to the binary, Warn-class tools and MCP configs are
+# Blocked at DEFCON 1-3. Refuse a bundle that lacks it rather than install one.
+[ -x "$BUNDLE_DIR/ironhermes-tirith" ] || die "no security sidecar at $BUNDLE_DIR/ironhermes-tirith (rebuild with scripts/deploy/web-build.sh, which builds and bundles it)"
 
 # ---------- stage the bundle as a whole directory ----------
 # Assets resolve as current_exe().parent()/public (dioxus-server) — copying
@@ -69,6 +72,12 @@ install -m 755 "$BUNDLE_DIR/iron_hermes_ui" "$WEB_STAGE_DIR/iron_hermes_ui"
 if [ -f "$BUNDLE_DIR/.manifest.json" ]; then
     install -m 644 "$BUNDLE_DIR/.manifest.json" "$WEB_STAGE_DIR/.manifest.json"
 fi
+# The security sidecar (AGPL-3.0-only) and its licence files sit next to the binary,
+# where the server's sidecar lookup looks first.
+install -m 755 "$BUNDLE_DIR/ironhermes-tirith" "$WEB_STAGE_DIR/ironhermes-tirith"
+for f in ironhermes-tirith.LICENSE ironhermes-tirith.NOTICE; do
+    [ -f "$BUNDLE_DIR/$f" ] && install -m 644 "$BUNDLE_DIR/$f" "$WEB_STAGE_DIR/$f"
+done
 log "staged bundle: $BUNDLE_DIR -> $WEB_STAGE_DIR"
 
 # ---------- stage scripts ----------

@@ -105,3 +105,75 @@ fn cloudflare_skills_load_as_official_and_names_valid() {
         }
     }
 }
+
+// =============================================================================
+// Test: wrangler_visible_without_bindings_others_gated
+// =============================================================================
+
+/// D-17 (Phase 54.8): the `wrangler` skill must be visible with no Cloudflare
+/// MCP server connected (the container never authorizes `cloudflare_bindings`),
+/// while the other four Cloudflare skills stay gated on that server.
+#[test]
+fn wrangler_visible_without_bindings_others_gated() {
+    use std::collections::HashSet;
+
+    let cloudflare_root = cloudflare_skills_root();
+    // `load_with_paths` establishes no catalog tiering, so every skill renders
+    // as a full `- name: description` line in `filtered_catalog_text`.
+    let registry = SkillRegistry::load_with_paths(std::slice::from_ref(&cloudflare_root));
+
+    // `requires_mcp_servers` lives on the typed `metadata.hermes` extraction.
+    let required = |name: &str| -> Vec<String> {
+        registry
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} skill loads"))
+            .hermes_metadata
+            .as_ref()
+            .map(|m| m.requires_mcp_servers.clone())
+            .unwrap_or_default()
+    };
+
+    let wrangler_requires = required("wrangler");
+    assert!(
+        wrangler_requires.is_empty(),
+        "wrangler must not declare requires_mcp_servers (D-17); got {wrangler_requires:?}"
+    );
+
+    let gated = [
+        "cloudflare",
+        "workers-best-practices",
+        "durable-objects",
+        "agents-sdk",
+    ];
+    for name in gated {
+        let requires = required(name);
+        assert!(
+            requires.iter().any(|s| s == "cloudflare_bindings"),
+            "{name} must keep requires_mcp_servers: [cloudflare_bindings] (D-17 prohibition); got {requires:?}"
+        );
+    }
+
+    let none: HashSet<String> = HashSet::new();
+    let catalog = registry.filtered_catalog_text(&none, &none, &none);
+    assert!(
+        catalog.contains("- wrangler: "),
+        "wrangler must be in the catalog with no MCP server connected; catalog:\n{catalog}"
+    );
+    for name in gated {
+        let needle = format!("- {name}: ");
+        assert!(
+            !catalog.contains(&needle),
+            "{name} must be filtered out with no MCP server connected; catalog:\n{catalog}"
+        );
+    }
+
+    let connected: HashSet<String> = ["cloudflare_bindings".to_string()].into_iter().collect();
+    let catalog = registry.filtered_catalog_text(&none, &none, &connected);
+    for name in CLOUDFLARE_SKILLS {
+        let needle = format!("- {name}: ");
+        assert!(
+            catalog.contains(&needle),
+            "{name} must pass once cloudflare_bindings is connected; catalog:\n{catalog}"
+        );
+    }
+}

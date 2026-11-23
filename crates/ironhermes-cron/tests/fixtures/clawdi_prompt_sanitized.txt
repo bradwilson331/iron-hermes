@@ -1,0 +1,13 @@
+Daily fork parity check. The host-side data step (script parity.sh) has already run git against /path/to/fork and the upstream repository; its output is in the "Script Output" section above and is the ONLY data source. Do not re-derive counts, and do not attempt git or shell commands.
+
+If the Script Output is missing or empty, fall back to the parity skill's no-terminal (web-only) procedure and label everything "DEGRADED — web-only mode".
+
+ANALYSIS (from Script Output):
+- Verdict line, ahead/behind, merge-base and its date, new upstream commit count.
+- Per new commit: PORTED or MERGED means already in the fork; PENDING with "files touched / missing" where missing == touched means NOT APPLICABLE; otherwise PENDING needs review. Cite PR numbers.
+
+OUTPUT:
+1. ONE self-contained Markdown artifact titled "Fork Parity — <today's date>": status line, table of new commits, and a short recommendation.
+2. Final reply under 1200 chars: one-line verdict with counts and artifact title.
+
+SAFETY: read-only. Never modify the repo or the state file (the script maintains it). No credentials are involved.

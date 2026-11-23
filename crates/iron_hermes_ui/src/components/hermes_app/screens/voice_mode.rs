@@ -35,8 +35,8 @@ use dioxus::prelude::*;
 
 use crate::components::hermes_app::orb_canvas::OrbCanvas;
 use crate::components::hermes_app::voice_settings::{
-    AudioPlaybackActiveCtx, AvatarErrorNoticeCtx, BargeInModeCtx, BargeInModeLoadedCtx,
-    RealtimeApprovalCtx, RealtimeDegradedCtx, RealtimeInFlightCtx, WakeSessionActiveCtx,
+    AudioPlaybackActiveCtx, AvatarErrorNoticeCtx, RealtimeApprovalCtx, RealtimeDegradedCtx,
+    RealtimeInFlightCtx, VoiceServiceCtx, VoiceServiceLoadedCtx, WakeSessionActiveCtx,
     WakeSessionStopCtx, WakeWordEnabledCtx, WakeWordPhraseCtx,
 };
 use crate::components::hermes_app::VoiceStatusState;
@@ -101,33 +101,34 @@ impl VoiceModeState {
 
 /// Which realtime path the voice-mode entry gate should start.
 ///
-/// Phase 36.17.12 Plan 03/04 shipped a STRICTLY EXCLUSIVE mode gate keyed off
-/// `BargeInModeCtx`. That context is seeded from `config.voice.barge_in_mode`
-/// asynchronously (mod.rs) after starting from a hardcoded literal default —
-/// so the gate must not decide until the real config value is in, or it
-/// silently strands `open_mic` users on the turn-based path forever (see
-/// debug session `avatar-not-hearing-voice`).
+/// Phase 36.17.12 Plan 03/04 shipped a STRICTLY EXCLUSIVE mode gate. Phase 54.7
+/// Plan 08 (D-15) re-keys it off the saved voice SERVICE (`VoiceServiceCtx`),
+/// not `barge_in_mode`. That context is seeded from `get_voice_config` at the
+/// HermesApp root asynchronously after starting from a default, so the gate
+/// must not decide until the real value is in, or it silently strands realtime
+/// users on the turn-based path forever (see debug session
+/// `avatar-not-hearing-voice`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VoiceEntryMode {
-    /// Provider-side realtime WebRTC session (`open_mic`).
+    /// Provider-side realtime WebRTC session (`voice.service = realtime`).
     Realtime,
-    /// Turn-based local STT/VAD loop (`push_to_interrupt` / `half_duplex` / any
-    /// other value — matches the pre-existing `else` branch's safe fallback).
+    /// Turn-based local STT/VAD loop (`turn_based` / any other value -- the
+    /// safe fallback matching the pre-existing `else` branch).
     TurnBased,
 }
 
 /// Pure decision function for the voice-mode entry gate.
 ///
 /// `config_loaded` is `false` until the root's `get_voice_config` fetch
-/// resolves (see `BargeInModeLoadedCtx`, mod.rs). Returns `None` while it is
-/// unsafe to decide — the caller must defer (not latch a decision) and try
+/// settles (see `VoiceServiceLoadedCtx`, mod.rs). Returns `None` while it is
+/// unsafe to decide -- the caller must defer (not latch a decision) and try
 /// again on the next reactive read, otherwise a cold page load would decide
-/// using the hardcoded default instead of the real config value.
-pub fn resolve_voice_entry_mode(barge_in_mode: &str, config_loaded: bool) -> Option<VoiceEntryMode> {
+/// using the default instead of the real config value.
+pub fn resolve_voice_entry_mode(service: &str, config_loaded: bool) -> Option<VoiceEntryMode> {
     if !config_loaded {
         return None;
     }
-    Some(if barge_in_mode == "open_mic" {
+    Some(if service == "realtime" {
         VoiceEntryMode::Realtime
     } else {
         VoiceEntryMode::TurnBased
@@ -245,19 +246,20 @@ pub fn VoiceModeScreen(on_exit: EventHandler<()>) -> Element {
     #[allow(unused_mut)]
     let mut fft_bins = use_signal(Vec::<u8>::new);
 
-    // Phase 36.17.12 Plan 04 (CR-01 gap closure): BargeInModeCtx and RealtimeDegradedCtx
-    // are provided at the HermesApp root (mod.rs) — NOT by VoiceSettings. Providing them
-    // in a child of this component caused a "Could not find context BargeInModeCtx" panic
-    // on every voice-mode entry. The fix mirrors the WakeWordEnabledCtx/WakeWordPhraseCtx
-    // root-provider pattern (mod.rs lines immediately after the wake-word providers).
+    // Phase 54.7 Plan 08 (D-15): VoiceServiceCtx, VoiceServiceLoadedCtx and
+    // RealtimeDegradedCtx are provided at the HermesApp root (mod.rs) — NOT by
+    // VoiceSettings. Providing them in a child of this component caused a "Could not
+    // find context" panic on every voice-mode entry (the earlier BargeInModeCtx
+    // incident). This mirrors the WakeWordEnabledCtx/WakeWordPhraseCtx root-provider
+    // pattern (mod.rs lines immediately after the wake-word providers).
     //
     // Debug session `avatar-not-hearing-voice`: keep the raw Signal handles (do NOT
-    // pre-`.clone()` into a plain local here) so the mode-gate effect below can
+    // pre-`.clone()` into a plain local here) so the entry effect below can
     // `.read()` them REACTIVELY from inside the closure — that reactive read is what
     // lets the effect defer its decision until the root's config seed lands, instead
-    // of deciding once, at mount, on the hardcoded default forever.
-    let barge_in_mode_ctx = use_context::<BargeInModeCtx>().0;
-    let barge_in_mode_loaded_ctx = use_context::<BargeInModeLoadedCtx>().0;
+    // of deciding once, at mount, on the default forever.
+    let voice_service_ctx = use_context::<VoiceServiceCtx>().0;
+    let voice_service_loaded_ctx = use_context::<VoiceServiceLoadedCtx>().0;
     let mut realtime_degraded = use_context::<RealtimeDegradedCtx>().0;
 
     // Phase 40.2 Plan 04 (FE-05): one-time per-session avatar error notice.
@@ -282,10 +284,10 @@ pub fn VoiceModeScreen(on_exit: EventHandler<()>) -> Element {
     // entry (teardown on unmount resets the latch).
     //
     // Phase 36.17.12 Plan 03 (D-01/D-06/D-07): STRICTLY EXCLUSIVE mode gate.
-    // - open_mic → spawn start_realtime_session; on Err (D-07 fallback) set
+    // - realtime service → spawn start_realtime_session; on Err (D-07 fallback) set
     //   RealtimeDegradedCtx true and start the existing turn-based loop.
-    //   start_voice_loop is NOT called on the open_mic success path (Pitfall 5).
-    // - push_to_interrupt / half_duplex → start_voice_loop unchanged.
+    //   start_voice_loop is NOT called on the realtime success path (Pitfall 5).
+    // - turn_based service → start_voice_loop unchanged.
     //
     // D-04 RC-4: read bubbles + next_id from context so realtime turns can be
     // pushed into the live chat surface.  Pattern B: read into Copy/Clone locals
@@ -323,18 +325,18 @@ pub fn VoiceModeScreen(on_exit: EventHandler<()>) -> Element {
     let mut started = use_signal(|| false);
     use_effect(move || {
         // Reactive read (NOT `.peek()`): this makes the effect re-run when
-        // barge_in_mode_loaded_ctx flips false -> true (mod.rs's root seeding
+        // voice_service_loaded_ctx flips false -> true (mod.rs's root seeding
         // effect), so the decision below is deferred rather than made on
-        // BargeInModeCtx's hardcoded "push_to_interrupt" literal default before
-        // the real config.voice.barge_in_mode value has been seeded. Debug
-        // session `avatar-not-hearing-voice`.
-        let config_loaded = *barge_in_mode_loaded_ctx.read();
-        let barge_in_mode_now = barge_in_mode_ctx.read().clone();
+        // VoiceServiceCtx's "turn_based" default before the real saved
+        // voice.service value has been seeded. Debug session
+        // `avatar-not-hearing-voice`.
+        let config_loaded = *voice_service_loaded_ctx.read();
+        let voice_service_now = voice_service_ctx.read().clone();
 
         if !stt_available || *started.peek() {
             return;
         }
-        let Some(entry_mode) = resolve_voice_entry_mode(&barge_in_mode_now, config_loaded) else {
+        let Some(entry_mode) = resolve_voice_entry_mode(&voice_service_now, config_loaded) else {
             // Config snapshot hasn't resolved yet — do nothing this run. The
             // reactive read above guarantees another run once it does; the
             // `started` latch above (unset) guarantees this path never spawns
@@ -345,7 +347,7 @@ pub fn VoiceModeScreen(on_exit: EventHandler<()>) -> Element {
         // Phase 36.17.10 (UAT zombie-loop fix): spawn EXACTLY ONCE per voice-mode
         // entry. This latch is what actually enforces "exactly once" — it holds
         // regardless of how many times the effect body above re-runs while
-        // waiting for config_loaded, and regardless of later barge_in_mode edits
+        // waiting for config_loaded, and regardless of later voice-service edits
         // from the VoiceSettings panel while this overlay stays mounted.
         started.set(true);
         match entry_mode {
@@ -583,9 +585,11 @@ pub fn VoiceModeScreen(on_exit: EventHandler<()>) -> Element {
                             onclick: {
                                 let call_id  = approval_call_id.clone();
                                 let turn_id  = approval_turn_id.clone();
+                                let tool_name = approval_tool_name.clone();
                                 move |_| {
                                     let call_id  = call_id.clone();
                                     let turn_id  = turn_id.clone();
+                                    let tool_name = tool_name.clone();
                                     #[cfg(target_arch = "wasm32")]
                                     let mut approval_sig = approval_pending;
                                     #[cfg(target_arch = "wasm32")]
@@ -594,37 +598,40 @@ pub fn VoiceModeScreen(on_exit: EventHandler<()>) -> Element {
                                     wasm_bindgen_futures::spawn_local(async move {
                                         // Clone dc BEFORE .await — Pattern B (no borrow across await).
                                         let dc_opt = crate::components::hermes_app::realtime_session::get_realtime_dc();
-                                        match crate::server::api::realtime_approve(
+                                        let outcome = crate::server::api::realtime_approve(
                                             turn_id,
                                             call_id.clone(),
                                             true,
-                                        ).await {
-                                            Ok(crate::server::api::RealtimeToolResult::Output { output }) => {
-                                                if let Some(dc) = dc_opt {
-                                                    crate::components::hermes_app::realtime_session::send_function_call_output(
-                                                        &dc, &call_id, &output,
-                                                    );
-                                                }
-                                            }
-                                            Ok(crate::server::api::RealtimeToolResult::Rejected { reason }) => {
-                                                // Turn ended or cancelled while card was showing.
-                                                // Send an error payload so the model is not left hanging.
-                                                if let Some(dc) = dc_opt {
-                                                    let err = format!("{{\"error\":\"{reason}\"}}");
-                                                    crate::components::hermes_app::realtime_session::send_function_call_output(
-                                                        &dc, &call_id, &err,
-                                                    );
-                                                }
-                                            }
-                                            Ok(_) | Err(_) => {
-                                                // Unexpected result — clear card, let session recover.
-                                            }
+                                        ).await;
+                                        if let Err(e) = &outcome {
+                                            web_sys::console::warn_1(
+                                                &format!(
+                                                    "[voice_mode] realtime_approve server fn error (call_id={call_id}): {e}"
+                                                )
+                                                .into(),
+                                            );
+                                        }
+                                        // Debug session web-extract-hangs-60s (round 2): the old
+                                        // `Ok(_) | Err(_) => {}` arm sent NO function_call_output, so
+                                        // with yolo=false a failing approved tool (then an HTTP 500 ->
+                                        // `Err`) left the model waiting forever: a silent avatar.
+                                        // D-05b requires exactly one output per call_id on EVERY path;
+                                        // `approve_outcome_output` is total over the outcomes, so the
+                                        // only way to skip the send is a missing data channel.
+                                        let output = crate::components::hermes_app::realtime_session::approve_outcome_output(
+                                            outcome,
+                                            &tool_name,
+                                        );
+                                        if let Some(dc) = dc_opt {
+                                            crate::components::hermes_app::realtime_session::send_function_call_output(
+                                                &dc, &call_id, &output,
+                                            );
                                         }
                                         approval_sig.set(None);
                                         inflight_sig.set(false);
                                     });
                                     #[cfg(not(target_arch = "wasm32"))]
-                                    { let _ = (call_id, turn_id, approval_pending, in_flight); }
+                                    { let _ = (call_id, turn_id, tool_name, approval_pending, in_flight); }
                                 }
                             },
                             "APPROVE"
@@ -780,58 +787,53 @@ pub fn WakeSessionIndicator() -> Element {
 //
 // Regression coverage for debug session `avatar-not-hearing-voice`: the gate
 // must defer its branch decision while `config_loaded` is false, rather than
-// deciding on BargeInModeCtx's hardcoded "push_to_interrupt" default.
+// deciding on VoiceServiceCtx's hardcoded default. Phase 54.7 Plan 08 (D-15):
+// the gate keys off the saved voice service, not `barge_in_mode`.
 
 #[cfg(test)]
 mod tests {
     use super::{resolve_voice_entry_mode, VoiceEntryMode};
 
     #[test]
-    fn defers_when_config_not_loaded_even_if_value_already_says_open_mic() {
-        // Regression case: even if the string already happens to equal
-        // "open_mic" (e.g. a stale signal from a prior mount), the gate must
-        // not act on it until config_loaded is true — deciding early is
-        // exactly the bug (it can also decide on the hardcoded default
-        // BEFORE the real config value has been seeded).
-        assert_eq!(resolve_voice_entry_mode("open_mic", false), None);
+    fn defers_until_loaded_for_either_service() {
+        // Even if the string already happens to equal "realtime" (a stale
+        // signal from a prior mount), the gate must not act on it until
+        // config_loaded is true: deciding early is exactly the bug.
+        assert_eq!(resolve_voice_entry_mode("realtime", false), None);
+        assert_eq!(resolve_voice_entry_mode("turn_based", false), None);
     }
 
     #[test]
-    fn defers_when_config_not_loaded_with_default_value() {
-        assert_eq!(resolve_voice_entry_mode("push_to_interrupt", false), None);
-    }
-
-    #[test]
-    fn open_mic_selects_realtime_once_loaded() {
+    fn voice_entry_mode_follows_service() {
         assert_eq!(
-            resolve_voice_entry_mode("open_mic", true),
+            resolve_voice_entry_mode("realtime", true),
             Some(VoiceEntryMode::Realtime),
+        );
+        assert_eq!(
+            resolve_voice_entry_mode("turn_based", true),
+            Some(VoiceEntryMode::TurnBased),
+        );
+        // Boundary neighbor: an unrecognized string must land in the safe
+        // turn-based fallback, not panic or silently pick realtime.
+        assert_eq!(
+            resolve_voice_entry_mode("bogus", true),
+            Some(VoiceEntryMode::TurnBased),
         );
     }
 
     #[test]
-    fn push_to_interrupt_selects_turn_based_once_loaded() {
+    fn barge_in_values_no_longer_choose_the_entry_mode() {
+        // D-15: a stored `open_mic` is a barge-in value, not a service.
+        assert_eq!(
+            resolve_voice_entry_mode("open_mic", true),
+            Some(VoiceEntryMode::TurnBased),
+        );
         assert_eq!(
             resolve_voice_entry_mode("push_to_interrupt", true),
             Some(VoiceEntryMode::TurnBased),
         );
-    }
-
-    #[test]
-    fn half_duplex_selects_turn_based_once_loaded() {
         assert_eq!(
             resolve_voice_entry_mode("half_duplex", true),
-            Some(VoiceEntryMode::TurnBased),
-        );
-    }
-
-    #[test]
-    fn unknown_value_falls_back_to_turn_based_once_loaded() {
-        // Boundary neighbor: an unrecognized string must land in the same
-        // safe fallback as the pre-existing `else` branch, not panic or
-        // silently default to realtime.
-        assert_eq!(
-            resolve_voice_entry_mode("bogus", true),
             Some(VoiceEntryMode::TurnBased),
         );
     }

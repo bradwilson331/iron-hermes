@@ -347,7 +347,9 @@ async fn ddg_results_are_parsed_from_the_html_endpoint() {
 
     let _de = EnvGuard::set("DDG_HTML_ENDPOINT_OVERRIDE", &server.uri());
 
-    let outcome = ddg::search("rust", 10).await.expect("ddg search must succeed");
+    let outcome = ddg::search("rust", 10)
+        .await
+        .expect("ddg search must succeed");
     assert_eq!(outcome.provider, "ddg");
     assert_eq!(outcome.hits.len(), 1);
     assert_eq!(outcome.hits[0].title, "Example Target");
@@ -521,4 +523,343 @@ async fn a_provider_configured_only_in_the_config_tier_is_called() {
         .await
         .expect("web_search must succeed using the config-tier-only credential");
     assert!(result.contains("Config Tier Exa"), "got: {result}");
+}
+
+// =============================================================================
+// Quick 261015-tcs — `category: "news"` vertical (Task 1 tracer).
+// =============================================================================
+
+/// Tool-level tracer: the model-supplied `category: "news"` (plus
+/// `freshness: "day"`) reaches the outgoing Exa `/search` body as
+/// `category: "news"`, and composes with the freshness mapping
+/// (`startPublishedDate`).
+#[tokio::test]
+async fn category_news_reaches_the_exa_request_body_through_execute() {
+    let _g = env_lock().lock().await;
+    let _ek = EnvGuard::unset("EXA_API_KEY");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .and(body_partial_json(json!({ "category": "news" })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"results":[{"url":"https://example.com/n","title":"Budget Passes Article","highlights":["Parliament passes the budget."]}]}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let _ee = EnvGuard::set(
+        "EXA_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/search", server.uri()),
+    );
+    let (_cfg_tmp, _home) =
+        write_web_search_config(&["exa"], &[("EXA_API_KEY", "tcs-news-exa-key")]);
+    let cfg = Config::load().unwrap_or_default();
+    let tool = build_tool(&cfg).await;
+
+    let result = tool
+        .execute(json!({
+            "query": "latest headlines",
+            "category": "news",
+            "freshness": "day",
+        }))
+        .await
+        .expect("web_search must succeed against the news-matched Exa mock");
+    assert!(result.contains("Budget Passes Article"), "got: {result}");
+
+    let received = server.received_requests().await.expect("recording enabled");
+    assert_eq!(received.len(), 1, "exactly one Exa request");
+    let body: serde_json::Value = received[0].body_json().expect("json body");
+    assert!(
+        body.get("startPublishedDate").is_some(),
+        "freshness mapping must compose with category news; body = {body}"
+    );
+}
+
+fn news_filters() -> SearchFilters {
+    SearchFilters {
+        category: Some("news".to_string()),
+        ..Default::default()
+    }
+}
+
+/// Quick 261015-tcs Task 3: category news routes Brave to the news endpoint
+/// (count clamped to 50, top-level `results[]`), never the web endpoint, and
+/// never sends an Authorization header.
+#[tokio::test]
+async fn brave_news_routes_to_the_news_endpoint() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/res/v1/news/search"))
+        .and(header("X-Subscription-Token", "tcs-brave-news-key"))
+        .and(query_param("count", "50"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"type":"news","results":[{"title":"Budget passes","url":"https://example.com/n","description":"D"}]}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let web_guard = Mock::given(path("/res/v1/web/search"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount_as_scoped(&server)
+        .await;
+    let no_auth_guard = Mock::given(header_exists("Authorization"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount_as_scoped(&server)
+        .await;
+
+    let _be = EnvGuard::set(
+        "BRAVE_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/res/v1/web/search", server.uri()),
+    );
+    let _bn = EnvGuard::set(
+        "BRAVE_NEWS_ENDPOINT_OVERRIDE",
+        &format!("{}/res/v1/news/search", server.uri()),
+    );
+
+    let api_key = SecretString::from("tcs-brave-news-key".to_string());
+    let outcome = brave::search("headlines", 60, &news_filters(), &api_key)
+        .await
+        .expect("brave news search must succeed against the news mock");
+    assert_eq!(outcome.provider, "brave");
+    assert_eq!(outcome.hits[0].title, "Budget passes");
+
+    drop(web_guard);
+    drop(no_auth_guard);
+}
+
+/// Without the news category Brave still calls the web endpoint exactly once
+/// and never touches the news endpoint.
+#[tokio::test]
+async fn brave_default_stays_on_the_web_endpoint() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/res/v1/web/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"web":{"results":[]}}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let news_guard = Mock::given(path("/res/v1/news/search"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount_as_scoped(&server)
+        .await;
+
+    let _be = EnvGuard::set(
+        "BRAVE_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/res/v1/web/search", server.uri()),
+    );
+    let _bn = EnvGuard::set(
+        "BRAVE_NEWS_ENDPOINT_OVERRIDE",
+        &format!("{}/res/v1/news/search", server.uri()),
+    );
+
+    let api_key = SecretString::from("tcs-brave-default-key".to_string());
+    brave::search("rust", 10, &SearchFilters::default(), &api_key)
+        .await
+        .expect("default brave search must use the web endpoint");
+
+    drop(news_guard);
+}
+
+/// Tavily: category news -> topic news (composes with time_range).
+#[tokio::test]
+async fn tavily_news_sets_topic_news() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .and(body_partial_json(
+            json!({ "topic": "news", "time_range": "day" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"results":[]}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _te = EnvGuard::set(
+        "TAVILY_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/search", server.uri()),
+    );
+
+    let filters = SearchFilters {
+        category: Some("news".to_string()),
+        freshness: Some("day".to_string()),
+        ..Default::default()
+    };
+    let api_key = SecretString::from("tcs-tavily-news-key".to_string());
+    tavily::search("headlines", 10, &filters, &api_key)
+        .await
+        .expect("tavily news search must match topic news + time_range day");
+}
+
+/// Tavily: absent or unrecognised category keeps topic general (allowlist).
+#[tokio::test]
+async fn tavily_default_and_unrecognised_category_keep_topic_general() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .and(body_partial_json(json!({ "topic": "general" })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"results":[]}"#))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let _te = EnvGuard::set(
+        "TAVILY_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/search", server.uri()),
+    );
+
+    let api_key = SecretString::from("tcs-tavily-general-key".to_string());
+    tavily::search("rust", 10, &SearchFilters::default(), &api_key)
+        .await
+        .expect("default tavily search must send topic general");
+    let people = SearchFilters {
+        category: Some("people".to_string()),
+        ..Default::default()
+    };
+    tavily::search("rust", 10, &people, &api_key)
+        .await
+        .expect("unrecognised category must keep topic general");
+}
+
+/// The news vertical survives chain fall-through: Exa errors, so Brave is
+/// reached on its NEWS endpoint, never the web endpoint.
+#[tokio::test]
+async fn chain_fall_through_keeps_the_news_vertical() {
+    let _g = env_lock().lock().await;
+    let _ek = EnvGuard::unset("EXA_API_KEY");
+    let _bk = EnvGuard::unset("BRAVE_API_KEY");
+
+    let exa_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&exa_server)
+        .await;
+
+    let brave_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/res/v1/news/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"results":[{"title":"Brave News Hit","url":"https://example.com/b","description":"D"}]}"#,
+        ))
+        .expect(1)
+        .mount(&brave_server)
+        .await;
+    let web_guard = Mock::given(path("/res/v1/web/search"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount_as_scoped(&brave_server)
+        .await;
+
+    let _ee = EnvGuard::set(
+        "EXA_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/search", exa_server.uri()),
+    );
+    let _be = EnvGuard::set(
+        "BRAVE_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/res/v1/web/search", brave_server.uri()),
+    );
+    let _bn = EnvGuard::set(
+        "BRAVE_NEWS_ENDPOINT_OVERRIDE",
+        &format!("{}/res/v1/news/search", brave_server.uri()),
+    );
+
+    let (_cfg_tmp, _home) = write_web_search_config(
+        &["exa", "brave"],
+        &[
+            ("EXA_API_KEY", "tcs-chain-exa-key"),
+            ("BRAVE_API_KEY", "tcs-chain-brave-key"),
+        ],
+    );
+    let cfg = Config::load().unwrap_or_default();
+    let tool = build_tool(&cfg).await;
+
+    let result = tool
+        .execute(json!({ "query": "latest headlines", "category": "news" }))
+        .await
+        .expect("web_search must succeed via brave news after exa's 500");
+    assert!(result.contains("Brave News Hit"), "got: {result}");
+
+    drop(web_guard);
+}
+
+/// Quick 261015-tcs Task 2: a result carrying both nav-boilerplate `text` and
+/// `highlights` renders the highlight; a text-only result still renders text.
+#[tokio::test]
+async fn exa_snippet_prefers_highlights_and_falls_back_to_text() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"results":[
+                {"url":"https://example.com/home","title":"Home","text":"Skip to content\nNews\nSport","highlights":["Parliament passes the budget."]},
+                {"url":"https://example.com/plain","title":"Plain","text":"Only body text here."}
+            ]}"#,
+        ))
+        .mount(&server)
+        .await;
+    let _ee = EnvGuard::set(
+        "EXA_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/search", server.uri()),
+    );
+
+    let api_key = SecretString::from("tcs-exa-snippet-key".to_string());
+    let outcome = exa::search("headlines", 10, &SearchFilters::default(), &api_key)
+        .await
+        .expect("exa search must succeed");
+    assert_eq!(outcome.hits.len(), 2);
+    assert_eq!(outcome.hits[0].snippet, "Parliament passes the budget.");
+    assert_eq!(outcome.hits[1].snippet, "Only body text here.");
+}
+
+/// Allowlist regression guard (threat T-261015-tcs-01): only the literal
+/// "news" ever reaches Exa's `category`. Absent and unrecognised values leave
+/// no `category` key at all.
+#[tokio::test]
+async fn exa_category_is_sent_only_for_the_news_allowlist() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"results":[]}"#))
+        .mount(&server)
+        .await;
+    let _ee = EnvGuard::set(
+        "EXA_SEARCH_ENDPOINT_OVERRIDE",
+        &format!("{}/search", server.uri()),
+    );
+
+    let api_key = SecretString::from("tcs-exa-allowlist-key".to_string());
+    exa::search("rust", 10, &SearchFilters::default(), &api_key)
+        .await
+        .expect("default filters must succeed");
+    let people = SearchFilters {
+        category: Some("people".to_string()),
+        ..Default::default()
+    };
+    exa::search("rust", 10, &people, &api_key)
+        .await
+        .expect("unrecognised category must be ignored, not rejected");
+
+    let received = server.received_requests().await.expect("recording enabled");
+    assert_eq!(received.len(), 2);
+    for req in &received {
+        let body: serde_json::Value = req.body_json().expect("json body");
+        assert!(
+            body.get("category").is_none(),
+            "a non-news category must never reach Exa; body = {body}"
+        );
+    }
 }

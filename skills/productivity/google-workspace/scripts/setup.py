@@ -28,10 +28,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
-TOKEN_PATH = HERMES_HOME / "google_token.json"
-CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
-PENDING_AUTH_PATH = HERMES_HOME / "google_oauth_pending.json"
+IRONHERMES_HOME = Path(os.getenv("IRONHERMES_HOME", Path.home() / ".ironhermes"))
+TOKEN_PATH = IRONHERMES_HOME / "google_token.json"
+CLIENT_SECRET_PATH = IRONHERMES_HOME / "google_client_secret.json"
+PENDING_AUTH_PATH = IRONHERMES_HOME / "google_oauth_pending.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",

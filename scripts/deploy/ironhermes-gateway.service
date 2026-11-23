@@ -3,6 +3,7 @@
 # Enable: systemctl --user daemon-reload && systemctl --user enable --now ironhermes-gateway
 # Logs:   ~/.ironhermes/logs/gateway.log (application output); journalctl --user -u ironhermes-gateway -f (unit lifecycle only)
 # Headless servers (no graphical login): loginctl enable-linger $USER
+# Memory cap and agent job scopes: docs/DEPLOYMENT.md "Memory cap and agent job scopes".
 #
 # NOTE: append: requires systemd 240 or newer. With StandardOutput=/StandardError=
 # set below, systemd cannot duplicate a stream to both destinations, so the
@@ -14,6 +15,9 @@
 Description=IronHermes Telegram Gateway
 After=network-online.target
 Wants=network-online.target
+# Cap restart storms: 5 starts in 60s window
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -25,12 +29,24 @@ StandardError=append:%h/.ironhermes/logs/gateway.log
 EnvironmentFile=-%h/.ironhermes/.env
 Restart=always
 RestartSec=5
-# Cap restart storms: 5 starts in 60s window
-StartLimitIntervalSec=60
-StartLimitBurst=5
 # Gateway only catches SIGINT today; deliver it on stop.
 KillSignal=SIGINT
 TimeoutStopSec=15
+# 58.1 D-08 containment cap. Valid ONLY because agent-launched long-running
+# workloads run in their own ironhermes-job-*.scope (D-11), outside this unit;
+# the gateway itself is about 137 MB. MemoryHigh throttles before MemoryMax
+# kills. OOMPolicy=continue keeps the gateway running when a child is
+# OOM-killed (the 2026-11-02 incident was a child OOM failing the whole unit).
+# KillMode=control-group (the systemd default, written out) kills every process
+# left in this unit's cgroup on stop or crash, setsid escapees included, while
+# the job scopes survive (D-06). Limits need cgroup v2 and
+# `loginctl enable-linger $USER`. Tune with `systemctl --user edit
+# ironhermes-gateway` (a drop-in survives reinstall; install.sh overwrites
+# this file).
+MemoryHigh=6G
+MemoryMax=8G
+OOMPolicy=continue
+KillMode=control-group
 
 [Install]
 WantedBy=default.target

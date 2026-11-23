@@ -32,14 +32,14 @@
 //! `#[server]` fn signature — never `ironhermes_core`, `ironhermes_kanban`,
 //! or `ironhermes_vault` types, which do not exist on the wasm target.
 
-use crate::protocol::{ActiveProfileRecord, ProfileHealth, ProfileRow};
+use crate::protocol::{ProfileHealth, ProfileRow};
 use crate::server::profile_api::list_profiles;
 use dioxus::prelude::*;
 
 /// Phase 49.4 Plan 11 (D-19): whether `health` renders the OK (green) dot
 /// vs the GAP (amber) dot. Extracted from `ProfileSwitcher`'s own inline
-/// per-row check below so the topbar quick-switch
-/// (`crate::components::hermes_app::profile_topbar::TopbarProfileSwitch`)
+/// per-row check below so the header's Agent dropdown
+/// (`crate::components::hermes_app::header::agent_dropdown`)
 /// can reuse the identical ok/gap classification without a second
 /// implementation (D-19 prohibition: "Do not build a second
 /// profile-switcher component — extend or reuse the existing shared
@@ -78,24 +78,6 @@ pub(crate) fn profile_meta_line(row: &ProfileRow) -> String {
 pub(crate) const PROFILE_LIST_LOADING_TEXT: &str = "Loading profiles…";
 pub(crate) const PROFILE_LIST_ERROR_TEXT: &str =
     "Could not read ~/.ironhermes/profiles/. Check permissions and retry.";
-
-/// Phase 49.4 Plan 11 (D-19): the topbar's closed-state label — the
-/// currently active profile's name when a persisted activation record
-/// exists and resolved successfully, the environment-derived fallback name
-/// for every other outcome (no record persisted, a fetch failure, or the
-/// fetch not yet resolved). Never returns an empty label when
-/// `fallback_name` is non-empty — the topbar control must never render a
-/// blank control or a placeholder implying nothing is active
-/// (`must_haves.truths`, D-19).
-pub(crate) fn topbar_closed_label(
-    active_record_fetch: Option<&Result<Option<ActiveProfileRecord>, String>>,
-    fallback_name: &str,
-) -> String {
-    match active_record_fetch {
-        Some(Ok(Some(record))) => record.name.clone(),
-        _ => fallback_name.to_string(),
-    }
-}
 
 /// Phase 47.4 Plan 01 (D-05): board-header PROFILE dropdown. `active` is
 /// the D-05 assignee lens (shared with the parent `ScreenKanban`); `on_edit`
@@ -253,7 +235,6 @@ pub fn ProfileSwitcher(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ActivationScope;
 
     fn configured_row(name: &str) -> ProfileRow {
         ProfileRow {
@@ -299,54 +280,4 @@ mod tests {
         assert_eq!(profile_meta_line(&row), "no resolvable key");
     }
 
-    // -------------------------------------------------------------------
-    // topbar_closed_label — record-present, record-absent, fetch-failed.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn topbar_closed_label_record_present_returns_the_record_name() {
-        let record = ActiveProfileRecord {
-            name: "activated-bot".to_string(),
-            scope: ActivationScope::ChatOnly,
-            updated_at_ms: 1,
-        };
-        let fetch: Result<Option<ActiveProfileRecord>, String> = Ok(Some(record));
-        assert_eq!(
-            topbar_closed_label(Some(&fetch), "env-derived-bot"),
-            "activated-bot"
-        );
-    }
-
-    #[test]
-    fn topbar_closed_label_record_absent_returns_the_fallback_name() {
-        let fetch: Result<Option<ActiveProfileRecord>, String> = Ok(None);
-        assert_eq!(
-            topbar_closed_label(Some(&fetch), "env-derived-bot"),
-            "env-derived-bot"
-        );
-    }
-
-    #[test]
-    fn topbar_closed_label_fetch_failed_returns_the_fallback_name() {
-        let fetch: Result<Option<ActiveProfileRecord>, String> = Err("boom".to_string());
-        assert_eq!(
-            topbar_closed_label(Some(&fetch), "env-derived-bot"),
-            "env-derived-bot"
-        );
-    }
-
-    #[test]
-    fn topbar_closed_label_still_loading_returns_the_fallback_name() {
-        assert_eq!(
-            topbar_closed_label(None, "env-derived-bot"),
-            "env-derived-bot"
-        );
-    }
-
-    #[test]
-    fn topbar_closed_label_never_blank_when_fallback_is_non_empty() {
-        let fetch: Result<Option<ActiveProfileRecord>, String> = Ok(None);
-        let label = topbar_closed_label(Some(&fetch), "default");
-        assert!(!label.is_empty());
-    }
 }

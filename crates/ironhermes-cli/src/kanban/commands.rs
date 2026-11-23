@@ -1818,7 +1818,7 @@ fn build_runtime_decompose_fn(
             ];
 
             let response = client
-                .chat_completion(&messages, None, None, Some(4096), Some(0.2), None)
+                .chat_completion_fitting(&messages, None, None, Some(4096), Some(0.2), None)
                 .await
                 .map_err(|e| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!("{}", e)))?;
 

@@ -235,6 +235,7 @@ async fn set_toolsets_bulk_with_groups(
     groups: &[ToolsetGroup],
 ) -> Result<Vec<BulkToggleOutcome>, String> {
     // Step 1 — fresh, scope-resolved disk read (never the startup snapshot).
+    let _root_write = lock_scope_write(&scope);
     let (mut config, target) = resolve_scope_target(&scope)?;
 
     // Step 2 — fail-closed write gate.
@@ -259,6 +260,7 @@ async fn set_toolsets_bulk_with_groups(
         })
         .collect();
     save_scoped(&config, &target)?;
+    drop(_root_write);
 
     // Step 5 — live apply (D-12): the running registry sees the change in
     // this same request.
@@ -340,7 +342,7 @@ pub(crate) fn resolve_scope_target(
 /// disabled"` error string every other write-side `#[server]` fn in this
 /// crate already uses (`api.rs::update_voice_config`).
 #[cfg(not(target_arch = "wasm32"))]
-fn check_tools_write_gate() -> Result<(), String> {
+pub(crate) fn check_tools_write_gate() -> Result<(), String> {
     let root_config = ironhermes_core::config::Config::load()
         .map_err(|e| format!("Config load failed: {e}"))?;
     if !root_config.security.web_config_write_enabled {
@@ -353,7 +355,7 @@ fn check_tools_write_gate() -> Result<(), String> {
 /// fail-closed on any load error, never an `Err` — the page must still
 /// render (read-only) when the root config cannot be read.
 #[cfg(not(target_arch = "wasm32"))]
-fn root_gate_open() -> bool {
+pub(crate) fn root_gate_open() -> bool {
     ironhermes_core::config::Config::load()
         .map(|c| c.security.web_config_write_enabled)
         .unwrap_or(false)
@@ -379,6 +381,17 @@ pub(crate) fn save_scoped(
             .save_to(path)
             .map_err(|e| format!("Config save failed: {e}")),
     }
+}
+
+/// RR-05 (WR-06): serialises a load-modify-save of the ROOT `config.yaml` with every other
+/// root writer in this crate. `Some(guard)` for the root scope; a profile scope writes its own
+/// file and needs none. Take it BEFORE [`resolve_scope_target`] and `drop` it right after
+/// [`save_scoped`]: a `std::sync::Mutex` guard must not live across an `.await`, and the lock is
+/// not re-entrant, so nothing inside the window may take it again.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn lock_scope_write(scope: &ConfigScope) -> Option<std::sync::MutexGuard<'static, ()>> {
+    matches!(scope, ConfigScope::Root)
+        .then(crate::server::profile_activation_api::lock_root_config_write)
 }
 
 /// D-20: recover the `mcp_servers` config key whose sanitized form produced
@@ -579,7 +592,7 @@ async fn apply_live_toolset_config(scope: &ConfigScope, config: &ironhermes_core
 /// display group still gets the specific MCP error, not a generic "unknown
 /// toolset".
 #[cfg(not(target_arch = "wasm32"))]
-fn validate_toolset_target(
+pub(crate) fn validate_toolset_target(
     name: &str,
     known_groups: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
@@ -621,6 +634,7 @@ async fn toggle_toolset_with_known_groups(
     validate_toolset_target(&name, known_groups)?;
 
     // Step 2 — fresh, scope-resolved disk read (never the startup snapshot).
+    let _root_write = lock_scope_write(&scope);
     let (mut config, target) = resolve_scope_target(&scope)?;
 
     // Step 3 — fail-closed write gate.
@@ -629,6 +643,7 @@ async fn toggle_toolset_with_known_groups(
     // Step 4 — mutate + atomic save.
     apply_toolset_toggle(&mut config, &name, enable);
     save_scoped(&config, &target)?;
+    drop(_root_write);
 
     // Step 5 — live apply (D-12): the running registry sees the change in
     // this same request.
@@ -640,7 +655,7 @@ async fn toggle_toolset_with_known_groups(
 /// T-48.2-01-03 sibling for per-tool names: validate a tool name against
 /// `known_tools` before any disk I/O (Behavior 5).
 #[cfg(not(target_arch = "wasm32"))]
-fn validate_known_tool(
+pub(crate) fn validate_known_tool(
     name: &str,
     known_tools: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
@@ -648,6 +663,84 @@ fn validate_known_tool(
         return Err(format!("unknown tool: {name}"));
     }
     Ok(())
+}
+
+/// Phase 54.4 Plan 03 (D-16/D-17/D-18): the names a staged settings write
+/// may legitimately name — built-in display groups and the tools inside
+/// them. MCP groups (`mcp__*`) and every tool they contain are excluded by
+/// construction: `tools.toolsets.mcp__<x>` is a silent no-op key (Pitfall
+/// 7), and MCP tools are not part of the writable built-in catalog (D-17).
+///
+/// Injected into `profile_api::apply_tools_selection` rather than read from
+/// the live registry there, so the pure validate-then-apply core stays
+/// unit-testable without a running server (48.2 test-reachability rule).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToolNameCatalog {
+    pub toolsets: std::collections::HashSet<String>,
+    pub tools: std::collections::HashSet<String>,
+}
+
+/// Pure projection of an unfiltered catalog row set onto a
+/// [`ToolNameCatalog`]: toolsets are every non-`mcp__` `row.group`; tools
+/// are the `row.name` of every row in such a group.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tool_name_catalog_from_rows(
+    rows: &[ironhermes_tools::registry::ToolCatalogRow],
+) -> ToolNameCatalog {
+    let mut catalog = ToolNameCatalog::default();
+    for row in rows {
+        if row.group.starts_with("mcp__") {
+            continue;
+        }
+        catalog.toolsets.insert(row.group.clone());
+        catalog.tools.insert(row.name.clone());
+    }
+    catalog
+}
+
+/// The live registry's writable built-in catalog. Empty when no `AppState`
+/// is installed (see [`live_catalog_rows`]), which makes any tools field in
+/// a staged write fail closed with "unknown toolset/tool".
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn writable_tool_catalog() -> ToolNameCatalog {
+    tool_name_catalog_from_rows(&live_catalog_rows().await)
+}
+
+/// Phase 54.4 Plan 03 (D-19): the names of the built-in display groups the
+/// page state reports as disabled — BuiltIn kind, present in
+/// `state.bulk_targets` (so the flat `mcp` / `kanban` sentinels and MCP
+/// groups are excluded), and `enabled == false`. Sorted. Pure.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn disabled_builtin_groups(state: &ToolsPageState) -> Vec<String> {
+    let mut disabled: Vec<String> = state
+        .toolsets
+        .iter()
+        .filter(|g| matches!(g.kind, ToolsetKind::BuiltIn))
+        .filter(|g| !g.enabled)
+        .filter(|g| state.bulk_targets.iter().any(|t| t == &g.name))
+        .map(|g| g.name.clone())
+        .collect();
+    disabled.sort();
+    disabled.dedup();
+    disabled
+}
+
+/// Phase 54.4 Plan 03 (D-19): the built-in toolsets `config` has disabled,
+/// as the Tools page would report them for the ROOT scope (effective
+/// `is_toolset_enabled` state over the live catalog's display groups).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn root_disabled_builtin_toolsets(
+    config: &ironhermes_core::config::Config,
+) -> Vec<String> {
+    let rows = live_catalog_rows().await;
+    let state = build_tools_page_state(
+        rows,
+        config,
+        config.security.web_config_write_enabled,
+        ConfigScope::Root,
+    );
+    disabled_builtin_groups(&state)
 }
 
 /// Idempotent set operation on `config.tools.disabled`, keyed on `disable`
@@ -684,6 +777,7 @@ async fn toggle_tool_disabled_with_known_tools(
     validate_known_tool(&tool, known_tools)?;
 
     // Step 2 — fresh, scope-resolved disk read (never the startup snapshot).
+    let _root_write = lock_scope_write(&scope);
     let (mut config, target) = resolve_scope_target(&scope)?;
 
     // Step 3 — fail-closed write gate.
@@ -692,6 +786,7 @@ async fn toggle_tool_disabled_with_known_tools(
     // Step 4 — mutate + atomic save.
     apply_tool_disabled_toggle(&mut config, &tool, disable);
     save_scoped(&config, &target)?;
+    drop(_root_write);
 
     // Step 5 — live apply (D-12).
     apply_live_toolset_config(&scope, &config).await;
@@ -1046,6 +1141,7 @@ async fn update_tools_settings_with_known_tools(
     validate_tools_settings(&payload, known_tool_names)?;
 
     // Step 2 — fresh, scope-resolved disk read (never the startup snapshot).
+    let _root_write = lock_scope_write(&scope);
     let (mut config, target) = resolve_scope_target(&scope).map_err(|e| vec![e])?;
 
     // Step 3 — fail-closed write gate, read from ROOT regardless of the
@@ -1059,6 +1155,7 @@ async fn update_tools_settings_with_known_tools(
     // then atomic save.
     merge_tools_settings(&mut config, &payload);
     save_scoped(&config, &target).map_err(|e| vec![e])?;
+    drop(_root_write);
 
     // Step 5 — live apply (D-12 precedent): a root-scope save is visible to
     // the running agent without a restart.
@@ -1142,6 +1239,34 @@ mod tests {
             // gets its own dedicated row below.
             runtime_dependency: None,
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 54.4 Plan 03: tool_name_catalog_from_rows
+    // -------------------------------------------------------------------
+
+    /// MCP display groups and every tool inside them are excluded from the
+    /// writable catalog by construction (D-17, Pitfall 7).
+    #[test]
+    fn apply_tools_selection_catalog_from_rows_excludes_mcp_groups() {
+        let rows = vec![
+            row("web_search", "web", "web", true),
+            row("web_extract", "web", "web", true),
+            row("create_issue", "mcp__github", "mcp", true),
+        ];
+        let catalog = tool_name_catalog_from_rows(&rows);
+        assert_eq!(
+            catalog.toolsets,
+            ["web".to_string()].into_iter().collect::<HashSet<_>>(),
+            "only the built-in group may be a writable toolset"
+        );
+        assert_eq!(
+            catalog.tools,
+            ["web_search".to_string(), "web_extract".to_string()]
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            "tools inside an mcp__ group must not be writable built-ins"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1414,6 +1539,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -1493,6 +1619,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -1586,6 +1713,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -1637,6 +1765,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             tools: ToolsConfig {
                 disabled: vec!["web_search".to_string(), "browser_navigate".to_string()],
@@ -1847,6 +1976,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -1893,6 +2023,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             tools: ToolsConfig {
                 toolsets: seed_toolsets.clone(),
@@ -1971,6 +2102,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -2076,6 +2208,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -2136,6 +2269,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -2285,6 +2419,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         }
@@ -2589,5 +2724,63 @@ mod tests {
              — a write path was added without a matching live-apply call, which would ship a \
              silently-stale running agent"
         );
+    }
+    /// RR-05 (WR-06): every production root config writer in this crate must hold
+    /// `lock_root_config_write` across its load-modify-save. A new `save_scoped(&config, &target)`
+    /// call site without a matching `lock_scope_write(&scope)` fails here.
+    #[test]
+    fn every_scoped_writer_takes_the_root_config_lock() {
+        fn production(src: &str) -> String {
+            // Everything before the first `#[cfg(...test...)]` attribute.
+            let end = src
+                .lines()
+                .scan(0usize, |off, l| {
+                    let start = *off;
+                    *off += l.len() + 1;
+                    Some((start, l))
+                })
+                .find(|(_, l)| {
+                    let t = l.trim_start();
+                    t.starts_with("#[cfg(test)]") || t.starts_with("#[cfg(all(test")
+                })
+                .map_or(src.len(), |(start, _)| start);
+            src[..end]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        let files = [
+            ("tools_config_api", include_str!("tools_config_api.rs")),
+            ("mcp_admin_api", include_str!("mcp_admin_api.rs")),
+            ("platform_config_api", include_str!("platform_config_api.rs")),
+            ("webhook_route_api", include_str!("webhook_route_api.rs")),
+            ("api_server_config_api", include_str!("api_server_config_api.rs")),
+        ];
+        for (name, src) in files {
+            let code = production(src);
+            let saves = code.matches("save_scoped(&config, &target)").count();
+            let locks = code.matches("lock_scope_write(&scope)").count();
+            let drops = code.matches("drop(_root_write)").count();
+            assert!(saves > 0, "{name}: expected production save_scoped call sites");
+            assert_eq!(saves, locks, "{name}: a save_scoped call lacks lock_scope_write");
+            assert_eq!(saves, drops, "{name}: the guard must be dropped after each save");
+        }
+        // The api.rs writers load and save inline.
+        let api = include_str!("api.rs");
+        for f in [
+            "pub async fn update_voice_config(",
+            "pub async fn update_models_roles_config(",
+            "pub async fn update_kanban_config(",
+            "pub async fn update_agent_config(",
+            "pub async fn toggle_skill(",
+        ] {
+            let start = api.find(f).unwrap_or_else(|| panic!("{f}"));
+            let body = &api[start..start + api[start..].find("\n}\n").unwrap()];
+            assert!(body.contains("lock_root_config_write()"), "{f} lacks the root lock");
+        }
+        let creds = include_str!("tools_credentials_api.rs");
+        let prod = &creds[..creds.find("mod tests {").unwrap()];
+        assert_eq!(prod.matches("lock_root_config_write()").count(), 2);
     }
 }

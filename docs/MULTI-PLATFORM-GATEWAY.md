@@ -164,6 +164,50 @@ A future patch phase will introduce a `Vec<String>` whitelist alongside the `Vec
 
 Slack's Socket Mode requires acknowledgement within ~3 seconds. The IronHermes adapter builds `MessageEvent` + `ProcessedAttachments` synchronously in the callback, then `tokio::spawn(async move { … })`s the handler call so the callback returns immediately. Long-running agent runs do not block ACK.
 
+## SMS and telephony credentials
+
+The SMS gateway platform and the `productivity/telephony` skill use **separate** Twilio credentials:
+
+| Used by | Secret names | Sender number |
+|---|---|---|
+| Gateway (`Platform::Sms`, replies to inbound texts) | `SMS_TWILIO_ACCOUNT_SID`, `SMS_TWILIO_AUTH_TOKEN` | `gateway.platforms.sms.from_number` |
+| Telephony skill (`telephony.py`, agent-initiated sends/calls) | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` (plus `BLAND_API_KEY`, `VAPI_API_KEY`) | see "Sender selection" below |
+
+Both resolve the vault first, then the environment, then a legacy `.env` entry.
+
+### Moving the skill credentials into the vault
+
+Run these in your own terminal, never through the agent:
+
+1. In `~/.ironhermes/config.yaml`, set `vault.enabled: true` and `vault.backend: rusty-vault`. Both the CLI and the web server must be built with the `rusty-vault` feature. Run `ironhermes vault unlock` if your vault mode needs it.
+2. Store each secret through the masked prompt, so the value never reaches argv or shell history:
+   ```bash
+   ironhermes vault set TWILIO_ACCOUNT_SID
+   ironhermes vault set TWILIO_AUTH_TOKEN
+   ```
+3. With an editor, delete the `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and `TWILIO_PHONE_NUMBER_SID` lines from `~/.ironhermes/.env`. Leave `SMS_TWILIO_*` alone unless you also vault them. A later failed vault read then shows up as a credential error, instead of the skill quietly falling back to `.env`.
+4. Refresh the installed skill, because an older copy reads only `.env`:
+   ```bash
+   cp -R optional-skills/productivity/telephony/. ~/.ironhermes/optional-skills/productivity/telephony/
+   ironhermes doctor   # expect no [DRIFT] line for productivity/telephony
+   ```
+   Move any `~/.ironhermes/optional-skills.migration-backup-*` directory out of `~/.ironhermes`, so the agent cannot find a stale `telephony.py` in it.
+5. Restart the web server.
+
+`ironhermes vault list` shows only root provider keys, so it does not list these entries. To verify, approve one `telephony.py twilio-send-sms`. `~/.ironhermes/logs/audit.jsonl` should then show `vault_get` rows (key `kind`) for both names with `success: true`.
+
+### Sender selection
+
+`telephony.py twilio-send-sms` picks its From number in this order: `--from-number`, then `TWILIO_PHONE_NUMBER` (`.env` or `telephony.twilio.phone_number`), then the saved default in `~/.ironhermes/telephony_state.json` (`twilio-set-default`), then the only owned number, then `gateway.platforms.sms.from_number` if the account owns it. With several owned numbers and no default, it refuses.
+
+A `TWILIO_PHONE_NUMBER` in `.env` beats every fallback. If it names a number that is not A2P 10DLC-registered, every skill send goes out from that number and fails. Leave it unset and set the default with `twilio-set-default <registered number>`, or set it to the same number as `gateway.platforms.sms.from_number`.
+
+### Twilio error codes seen in practice
+
+- **30034**: the sender is not registered to an A2P 10DLC campaign. Twilio answers `queued`, then marks the message `undelivered`. Send from the registered number (Twilio Console → Messaging → Regulatory Compliance → A2P 10DLC).
+- **21617**: the body exceeds 1600 characters. Twilio counts UTF-16 code units, so each emoji counts as 2. `gateway.platforms.sms.max_reply_chars` (40–1600, default 1600) caps gateway replies. Until the 58.3-13 fix lands, the cap counts Unicode characters instead, so an emoji-heavy reply near the limit can still fail. Lowering `max_reply_chars` to about 1500 avoids it.
+- **30008**: unknown carrier failure, usually a reply sent to a sender that cannot receive it (spam, short code).
+
 ## Env var precedence
 
 For each platform, token resolution is:

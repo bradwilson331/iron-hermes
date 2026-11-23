@@ -7,9 +7,14 @@
 //!
 //! Allowed mutations (D-03 / D-24):
 //!   1. `<html data-theme="…">` attribute  (theme picker)
-//!   2. `<html style="--teal: …; --teal-bright: …">`  (accent override)
-//!   3. `<body class="no-breadcrumb no-footer has-rail
-//!                   density-dense on-chat">` toggles
+//!   2. `<html style="--teal: …; --teal-bright: …">`  (accent override; the
+//!      pair is theme-aware — dark inks on dark themes, dark-enough AA inks on
+//!      light themes, because the inline write beats every `[data-theme]`
+//!      block, G-54.4-18. Values still come from closed enum matches.)
+//!   3. `<body class="no-footer density-dense on-chat">` toggles
+//!      (Phase 54.4 Plan 02 retired `no-breadcrumb` and `has-rail`; the
+//!      density rule now pads by `calc(var(--ih-overhang-h) + 16px)`, per
+//!      plan 01)
 //!
 //! NOTHING ELSE in the DOM is touched here. Persistence to localStorage is
 //! owned by Plan 03's hydration-gated effects in `hermes_app/mod.rs`.
@@ -22,6 +27,29 @@ use dioxus::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+
+/// True exactly for the two light themes (a closed match, so an unknown or
+/// tampered name is never light).
+pub(crate) fn is_light_theme(theme: &str) -> bool {
+    matches!(theme, "slate-light" | "parchment-light")
+}
+
+/// The `(--teal, --teal-bright)` pair Effect 3 writes inline on `<html>`.
+///
+/// The inline write beats every `[data-theme]` block, so on a light theme the
+/// bright dark-theme accent would paint as illegible text. Light themes get the
+/// dark AA inks; every other name (including unknown ones) keeps `hex_pair()`.
+/// Values are `&'static str` from closed enum matches (T-26.2.1-16, T-54.4-46).
+pub(crate) fn accent_inline_pair(
+    theme: &str,
+    accent: crate::ui_prefs::AccentColor,
+) -> (&'static str, &'static str) {
+    if is_light_theme(theme) {
+        accent.light_hex_pair()
+    } else {
+        accent.hex_pair()
+    }
+}
 
 /// Render-free DOM mutation host — see module docs.
 ///
@@ -58,13 +86,13 @@ pub fn ThemeEffects() -> Element {
     });
 
     // -----------------------------------------------------------------------
-    // Effect 2 — toggle five classes on `<body>` from UiPrefs + Screen.
+    // Effect 2 — toggle three classes on `<body>` from UiPrefs + Screen.
     //
-    // Per D-17 + RESEARCH Pattern 6 + app.html lines 102–112:
-    //   body.no-breadcrumb .breadcrumb { display: none }
+    // Per D-17 + RESEARCH Pattern 6 (Phase 54.4 Plan 02 dropped the
+    // `no-breadcrumb` and `has-rail` toggles — their controls and CSS are gone):
     //   body.no-footer     .app-footer { display: none }
-    //   body.has-rail.on-chat #wheel-rail { display: flex !important }
-    //   body.density-dense .screen { padding-top: 70px; gap: 16px }
+    //   body.density-dense .screen { padding-top: calc(var(--ih-overhang-h) + 16px); gap: 16px }
+    //   body.on-chat       (chat-screen scoping hook)
     // -----------------------------------------------------------------------
     use_effect(move || {
         let p = prefs.read().clone();
@@ -76,9 +104,7 @@ pub fn ThemeEffects() -> Element {
                 .and_then(|d| d.body())
             {
                 let list = body.class_list();
-                let _ = list.toggle_with_force("no-breadcrumb", !p.breadcrumb);
                 let _ = list.toggle_with_force("no-footer", !p.footer);
-                let _ = list.toggle_with_force("has-rail", p.rail);
                 let _ = list.toggle_with_force(
                     "density-dense",
                     p.density == crate::ui_prefs::Density::Dense,
@@ -95,15 +121,19 @@ pub fn ThemeEffects() -> Element {
     // Effect 3 — write `--teal` / `--teal-bright` CSS custom properties on
     // `<html>` so accent-color rotation is a single DOM op.
     //
-    // The hex pair is sourced from a closed `AccentColor` enum match (Plan
-    // 02's `hex_pair()`) — no user-supplied string reaches `set_property`
-    // (T-26.2.1-16 disposition: accept).
+    // The pair is theme-aware (G-54.4-18): dark inks on dark themes and
+    // dark-enough AA inks on light themes, because this inline write beats
+    // every `[data-theme]` block. It reads the theme as well as the accent so a
+    // runtime light/dark switch rewrites `--teal` with no reload. The values
+    // come from closed enum matches (`accent_inline_pair`) — no user-supplied
+    // string reaches `set_property` (T-26.2.1-16 unchanged).
     // -----------------------------------------------------------------------
     use_effect(move || {
+        let theme_name = theme.read().clone();
         let accent = prefs.read().accent;
+        let (teal, teal_bright) = accent_inline_pair(&theme_name, accent);
         #[cfg(target_arch = "wasm32")]
         {
-            let (teal, teal_bright) = accent.hex_pair();
             if let Some(html) = web_sys::window()
                 .and_then(|w| w.document())
                 .and_then(|d| d.document_element())
@@ -114,8 +144,8 @@ pub fn ThemeEffects() -> Element {
                 let _ = style.set_property("--teal-bright", teal_bright);
             }
         }
-        // Silence "unused on non-WASM" — the borrow was dropped already.
-        let _ = accent;
+        // Silence "unused on non-WASM" — the borrows were dropped already.
+        let _ = (teal, teal_bright);
     });
 
     rsx! {}

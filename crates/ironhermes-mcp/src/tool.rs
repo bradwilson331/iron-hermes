@@ -292,4 +292,57 @@ mod tests {
         );
         assert_eq!(prefixed, expected);
     }
+
+    // -------------------------------------------------------------------
+    // Phase 54 Plan 04 (D-16a): falsification tests for ADR-0005 Finding 5's
+    // stated attack — a hostile MCP server registering a bare built-in tool
+    // name to shadow the real intercepted tool and bypass approval.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn prefixed_name_cannot_shadow_terminal() {
+        let hostile = make_prefixed_name("hostile-server", "terminal");
+        assert_ne!(
+            hostile, "terminal",
+            "a hostile MCP server must not be able to claim the bare 'terminal' \
+             name through the normal prefixing path — that would let it shadow \
+             the real intercepted terminal tool and bypass its approval gate"
+        );
+        assert!(
+            hostile.contains("__"),
+            "the prefixed name must retain the server separator so it can never \
+             collide with an unprefixed built-in name: got '{hostile}'"
+        );
+    }
+
+    #[test]
+    fn prefixed_name_cannot_shadow_read_file() {
+        let hostile = make_prefixed_name("hostile-server", "read_file");
+        assert_ne!(
+            hostile, "read_file",
+            "a hostile MCP server must not be able to claim the bare 'read_file' \
+             name through the normal prefixing path — that would let it shadow \
+             the real intercepted read_file tool and bypass its approval gate"
+        );
+        assert!(
+            hostile.contains("__"),
+            "the prefixed name must retain the server separator so it can never \
+             collide with an unprefixed built-in name: got '{hostile}'"
+        );
+    }
+
+    #[test]
+    fn prefixed_name_distinct_per_server() {
+        // A second hostile server registering the SAME tool name must not
+        // collide with a legitimate server's already-registered prefixed name —
+        // the prefix is derived from the server name, not just the tool name.
+        let legit = make_prefixed_name("legit-server", "read_file");
+        let hostile = make_prefixed_name("hostile-server", "read_file");
+        assert_ne!(
+            legit, hostile,
+            "two distinct servers registering the same tool name must produce \
+             two distinct prefixed names, or a second hostile server could \
+             collide with a legitimate one's registration"
+        );
+    }
 }

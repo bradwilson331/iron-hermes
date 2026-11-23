@@ -1,6 +1,11 @@
+use std::sync::LazyLock;
+
 use crate::config::{ErrorDetailLevel, HooksConfig};
+use crate::refusal::NO_CIRCUMVENTION_NOTICE;
 use ironhermes_core::DangerousCommandsConfig;
 use ironhermes_core::McpMutationGuardrailConfig;
+use ironhermes_core::config::DefconLevel;
+use ironhermes_security::policy::FloorClass;
 use regex::Regex;
 
 /// The outcome of a guardrail check on a tool call.
@@ -74,6 +79,10 @@ impl GuardrailHook for BlocklistGuardrail {
 /// Per D-06: `ErrorDetailLevel::Full` includes the tool name and reason for
 /// developer convenience; `ErrorDetailLevel::Minimal` returns a generic message
 /// for high-security deployments where leaking tool names is undesirable (T-06-05).
+///
+/// Phase 57 G-1: both levels say the call did not run and end with
+/// [`NO_CIRCUMVENTION_NOTICE`], so a Block reads as a refusal, not as an obstacle to route
+/// around. Minimal still names no tool.
 pub fn format_guardrail_error(
     tool_name: &str,
     reason: &str,
@@ -82,12 +91,15 @@ pub fn format_guardrail_error(
 ) -> String {
     match detail_level {
         ErrorDetailLevel::Full => {
+            let reason = reason.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
             format!(
-                "Tool '{}' blocked by guardrail '{}': {}",
-                tool_name, guardrail_name, reason
+                "Tool '{}' blocked by guardrail '{}': {}. It did not run. {}",
+                tool_name, guardrail_name, reason, NO_CIRCUMVENTION_NOTICE
             )
         }
-        ErrorDetailLevel::Minimal => "Tool call blocked by security policy".to_string(),
+        ErrorDetailLevel::Minimal => format!(
+            "Tool call blocked by security policy. It did not run. {NO_CIRCUMVENTION_NOTICE}"
+        ),
     }
 }
 
@@ -190,6 +202,450 @@ pub const DANGEROUS_PATTERNS: &[(&str, Tier)] = &[
     (r"/usr/bin/dd(?:[^a-zA-Z0-9_]|$)", Tier::One),
 ];
 
+/// Phase 54 Finding 1 (D-01/D-02): Python-source dangerous-pattern table, consulted
+/// ONLY when `check()`'s `tool_name == "execute_code"` — `DANGEROUS_PATTERNS` above
+/// targets shell syntax and is meaningless against Python source (this overturns
+/// D-11's "classify nothing" conclusion at `gated_exec.rs`, whose "shell patterns
+/// don't apply to Python" premise was correct but whose conclusion was not).
+///
+/// Same boundary convention as [`DANGEROUS_PATTERNS`], with `.` added to the negative
+/// character class so a dotted attribute access does not false-positive on the bare
+/// verb (e.g. `myobj.subprocess.run` is still caught correctly, but a hypothetical
+/// `notsubprocess.run` is not — the class excludes `.` so the prefix boundary requires
+/// a NON-identifier, non-dot character or start-of-string immediately before the
+/// pattern). **NEVER use `\b`** — see [`DANGEROUS_PATTERNS`]'s doc comment.
+///
+/// Every entry returns [`GuardrailDecision::Warn`], never `Block` (D-03: this is a
+/// speed bump, not a boundary — a hard block on a regex hit against Python source
+/// would be an over-promise; real effect-gating is a named successor phase).
+///
+/// Membership beyond the six items D-01 seeds from `54-RESEARCH.md` Pattern 1
+/// (`subprocess.*`, `os.(system|popen|exec*)`, `socket.*`, `requests.*`,
+/// `urllib.request`, `shutil.rmtree`, `ctypes.*`, `pty.spawn`) is Claude's Discretion
+/// per `54-CONTEXT.md`; this table extends it with `os.(remove|unlink)`,
+/// `shutil.move`, and `pickle.loads` (destructive filesystem ops and unsafe
+/// deserialization, the same class of risk as the seeded set).
+/// `pathlib.Path(...).unlink` was considered and skipped — its dynamic-argument
+/// shape (`Path(x).unlink()`) cannot be expressed under this boundary convention
+/// without either missing common call shapes or false-positiving on unrelated
+/// `.unlink()` calls on non-`Path` objects.
+pub const PYTHON_DANGEROUS_PATTERNS: &[&str] = &[
+    r"(?:(?:^|[^a-zA-Z0-9_.]))subprocess\.(?:run|Popen|call|check_output)(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))os\.(?:system|popen|exec[a-zA-Z]*)(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))socket\.(?:socket|connect)(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))requests\.(?:get|post|put|delete)(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))urllib\.request(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))shutil\.rmtree(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))ctypes\.",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))pty\.spawn(?:[^a-zA-Z0-9_.]|$)",
+    // Extension beyond D-01's seeded set (Claude's Discretion, see doc comment above).
+    r"(?:(?:^|[^a-zA-Z0-9_.]))os\.(?:remove|unlink)(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))shutil\.move(?:[^a-zA-Z0-9_.]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_.]))pickle\.loads(?:[^a-zA-Z0-9_.]|$)",
+    // Phase 57 D-23: `importlib.import_module('subpro' + 'cess')` reaches subprocess
+    // without a literal `subprocess` token, so the module itself is a FloorWarn hit.
+    r"(?:(?:^|[^a-zA-Z0-9_.]))importlib(?:[^a-zA-Z0-9_]|$)",
+];
+
+/// Phase 54 Finding 1 (D-03): classification-evasion markers. `getattr`, `eval`,
+/// `exec`, `__import__` and `base64` all defeat [`PYTHON_DANGEROUS_PATTERNS`] regex
+/// matching (e.g. `getattr(__builtins__, 'ev' + 'al')(...)` resolves `eval` at
+/// runtime with no literal dangerous-verb token in the source), and the ADR's own
+/// live evidence — `subprocess.run(['wrangler','delete',...])`, the **list-argument**
+/// form — proves the pattern table alone is not a reliable boundary. Presence of ANY
+/// marker forces [`GuardrailDecision::Warn`] **independent of** — and evaluated
+/// BEFORE — the pattern-table loop, so a source with zero pattern-table hits still
+/// requires approval. Plain substrings, not regexes: a marker is dangerous by mere
+/// presence in Python source, no word-boundary reasoning needed.
+pub const PYTHON_EVASION_MARKERS: &[&str] = &["getattr", "eval", "exec", "__import__", "base64"];
+
+// ---------------------------------------------------------------------------
+// Phase 57 (D-23 / D-13): ironhermes-side rules that do not depend on tirith
+// ---------------------------------------------------------------------------
+
+/// Rule id recorded when a call reconstructs to a known mutation verb (D-23).
+pub const RULE_MUTATION_COMMAND: &str = "mutation_command";
+
+/// Rule id recorded for the D-13 Python reach markers.
+pub const RULE_PYTHON_REACH: &str = "python_reach_d13";
+
+/// Phase 57 D-23: command lines that mutate or destroy remote state. A match on a
+/// terminal command, or on a string reconstructed from `execute_code` source
+/// ([`reconstruct_python_command_strings`]), is [`FloorClass::Critical`]: Blocked at
+/// every DEFCON level, ahead of any bypass. This is the rule that closes the Phase 46
+/// `subprocess.run(['wrangler','delete', ...])` incident without relying on the sidecar
+/// (research Pitfall 3).
+///
+/// Same boundary convention as [`DANGEROUS_PATTERNS`]: negative character classes, never
+/// the two-character `\b` sequence (the `regex_no_word_boundary` test covers this list).
+pub const MUTATION_COMMAND_PATTERNS: &[&str] = &[
+    r"(?:(?:^|[^a-zA-Z0-9_]))wrangler\s+(?:deploy|delete)(?:[^a-zA-Z0-9_]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_]))wrangler\s+(?:kv|r2|d1|queues|secret)(?:[^a-zA-Z0-9_]|$).*\s(?:delete|purge|bulk\s+delete)(?:[^a-zA-Z0-9_]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_]))gh\s+(?:repo|release)\s+delete(?:[^a-zA-Z0-9_]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_]))aws\s+s3\s+(?:rm|rb)(?:[^a-zA-Z0-9_]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_]))gcloud\s+.*\s+delete(?:[^a-zA-Z0-9_]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_]))kubectl\s+delete(?:[^a-zA-Z0-9_]|$)",
+    r"(?:(?:^|[^a-zA-Z0-9_]))terraform\s+destroy(?:[^a-zA-Z0-9_]|$)",
+];
+
+static MUTATION_COMMAND_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    MUTATION_COMMAND_PATTERNS
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern).unwrap_or_else(|e| {
+                panic!("invalid built-in mutation-command pattern '{pattern}': {e}")
+            })
+        })
+        .collect()
+});
+
+/// Whether `candidate` contains a [`MUTATION_COMMAND_PATTERNS`] command line. Shared by the
+/// terminal / `execute_code` rule and the Phase 57 plan 09 tool screen's MCP-argument check,
+/// so there is one table and one matcher.
+pub fn matches_mutation_command(candidate: &str) -> bool {
+    MUTATION_COMMAND_REGEXES
+        .iter()
+        .any(|r| r.is_match(candidate))
+}
+
+/// One lexical token of Python source, reduced to what argv reconstruction needs.
+#[derive(Debug, Clone, PartialEq)]
+enum PyTok {
+    /// A string literal, escapes resolved, prefix and quotes removed.
+    Str(String),
+    /// One of `[ ] ( ) , +`.
+    Punct(char),
+    /// Anything else (identifiers, numbers, operators). Only its presence matters.
+    Other,
+}
+
+fn is_string_prefix(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "r" | "b" | "f" | "u" | "rb" | "br" | "fr" | "rf"
+    )
+}
+
+/// Lex one string literal starting at the opening quote `chars[start]`. Returns the value
+/// and the index just past the literal. An unterminated literal ends at end of input (or at
+/// the line end for a single-quoted one); it never panics.
+fn lex_py_string(chars: &[char], start: usize, raw: bool) -> (String, usize) {
+    let quote = chars[start];
+    let triple = chars.get(start + 1) == Some(&quote) && chars.get(start + 2) == Some(&quote);
+    let mut i = start + if triple { 3 } else { 1 };
+    let mut out = String::new();
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            if raw {
+                out.push('\\');
+                out.push(next);
+                i += 2;
+                continue;
+            }
+            match next {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                '\\' | '\'' | '"' => out.push(next),
+                '\n' => {}
+                'x' => {
+                    let hex: String = chars.iter().skip(i + 2).take(2).collect();
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        Some(ch) if hex.len() == 2 => {
+                            out.push(ch);
+                            i += 4;
+                            continue;
+                        }
+                        _ => out.push_str("\\x"),
+                    }
+                }
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if c == quote {
+            if !triple {
+                return (out, i + 1);
+            }
+            if chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote) {
+                return (out, i + 3);
+            }
+        }
+        if c == '\n' && !triple {
+            return (out, i);
+        }
+        out.push(c);
+        i += 1;
+    }
+    (out, i)
+}
+
+fn lex_python(source: &str) -> Vec<PyTok> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '#' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            let (value, next) = lex_py_string(&chars, i, false);
+            toks.push(PyTok::Str(value));
+            i = next;
+            continue;
+        }
+        if c.is_alphanumeric() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let quoted = i < chars.len() && (chars[i] == '\'' || chars[i] == '"');
+            if quoted && is_string_prefix(&word) {
+                let raw = word.to_ascii_lowercase().contains('r');
+                let (value, next) = lex_py_string(&chars, i, raw);
+                toks.push(PyTok::Str(value));
+                i = next;
+            } else {
+                toks.push(PyTok::Other);
+            }
+            continue;
+        }
+        match c {
+            '[' | ']' | '(' | ')' | ',' | '+' => toks.push(PyTok::Punct(c)),
+            c if c.is_whitespace() => {}
+            _ => toks.push(PyTok::Other),
+        }
+        i += 1;
+    }
+    toks
+}
+
+/// Fold `'a' + 'b'` and the implicit `'a' 'b'` into one literal, in a single pass.
+fn fold_string_concatenations(toks: Vec<PyTok>) -> Vec<PyTok> {
+    let mut out: Vec<PyTok> = Vec::with_capacity(toks.len());
+    for tok in toks {
+        if let PyTok::Str(b) = &tok {
+            let n = out.len();
+            if n >= 2 && out[n - 1] == PyTok::Punct('+') && matches!(out[n - 2], PyTok::Str(_)) {
+                out.pop();
+                if let Some(PyTok::Str(a)) = out.last_mut() {
+                    a.push_str(b);
+                }
+                continue;
+            }
+            if let Some(PyTok::Str(a)) = out.last_mut() {
+                a.push_str(b);
+                continue;
+            }
+        }
+        out.push(tok);
+    }
+    out
+}
+
+/// Collects distinct candidate strings in first-seen order.
+#[derive(Default)]
+struct Candidates {
+    seen: std::collections::HashSet<String>,
+    out: Vec<String>,
+}
+
+impl Candidates {
+    fn add(&mut self, s: String) {
+        if !s.is_empty() && self.seen.insert(s.clone()) {
+            self.out.push(s);
+        }
+    }
+}
+
+/// What the current element of a bracketed list holds so far.
+#[derive(Default)]
+enum Elem {
+    #[default]
+    Empty,
+    /// Exactly one string literal.
+    One(String),
+    /// Anything else (a name, a call, an expression, a nested list).
+    Many,
+}
+
+/// One open `[` or `(`: a run of consecutive literal elements is joined with spaces when
+/// the run ends (a non-literal element, or the closing bracket).
+#[derive(Default)]
+struct Frame {
+    run: Vec<String>,
+    elem: Elem,
+}
+
+impl Frame {
+    fn end_elem(&mut self, found: &mut Candidates) {
+        match std::mem::take(&mut self.elem) {
+            Elem::One(s) => self.run.push(s),
+            Elem::Empty => {}
+            Elem::Many => self.flush(found),
+        }
+    }
+
+    fn flush(&mut self, found: &mut Candidates) {
+        if !self.run.is_empty() {
+            found.add(self.run.join(" "));
+            self.run.clear();
+        }
+    }
+}
+
+/// Phase 57 D-23: the command strings an `execute_code` script is plausibly building.
+///
+/// Not a Python parser: a small lexer plus two reconstructions, both linear in the source:
+///
+/// 1. every string literal, with `'a' + 'b'` and adjacent `'a' 'b'` folded (covers
+///    `os.system('wrangler delete x')`, `'subpro' + 'cess'`);
+/// 2. every list or tuple literal, as the space-joined run of consecutive string-literal
+///    elements (covers the argv form `subprocess.run(['wrangler', 'delete', name])` even
+///    when a later element is a variable, and the same list handed to
+///    `importlib.import_module(..).run(..)`).
+///
+/// Calls are never matched by name, so `subprocess.run`, `Popen`, `check_output`,
+/// `os.system`, `os.exec*` and a `.run([...])` on a dynamically imported module all reduce
+/// to the same strings. Comments are skipped. What this cannot see (a verb assembled from
+/// non-literals, `chr()` arithmetic, data read from disk) is the documented residual; the
+/// D-13 reach markers block that class at DEFCON 3 and stricter.
+pub fn reconstruct_python_command_strings(source: &str) -> Vec<String> {
+    let toks = fold_string_concatenations(lex_python(source));
+    let mut found = Candidates::default();
+
+    for tok in &toks {
+        if let PyTok::Str(s) = tok {
+            found.add(s.clone());
+        }
+    }
+
+    let mut stack: Vec<Frame> = Vec::new();
+    for tok in &toks {
+        match tok {
+            PyTok::Punct('[' | '(') => {
+                if let Some(parent) = stack.last_mut() {
+                    parent.elem = Elem::Many;
+                }
+                stack.push(Frame::default());
+            }
+            PyTok::Punct(']' | ')') => {
+                if let Some(mut frame) = stack.pop() {
+                    frame.end_elem(&mut found);
+                    frame.flush(&mut found);
+                }
+            }
+            PyTok::Punct(',') => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.end_elem(&mut found);
+                }
+            }
+            PyTok::Str(s) => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.elem = match std::mem::take(&mut frame.elem) {
+                        Elem::Empty => Elem::One(s.clone()),
+                        _ => Elem::Many,
+                    };
+                }
+            }
+            _ => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.elem = Elem::Many;
+                }
+            }
+        }
+    }
+    while let Some(mut frame) = stack.pop() {
+        frame.end_elem(&mut found);
+        frame.flush(&mut found);
+    }
+    found.out
+}
+
+/// Map a floor decision to its D-24 class: Block is Critical, Warn is FloorWarn,
+/// NeedsApproval stays NeedsApproval, Allow is None.
+pub fn floor_class(decision: &GuardrailDecision) -> FloorClass {
+    match decision {
+        GuardrailDecision::Block { .. } => FloorClass::Critical,
+        GuardrailDecision::Warn { .. } => FloorClass::FloorWarn,
+        GuardrailDecision::NeedsApproval { .. } => FloorClass::NeedsApproval,
+        GuardrailDecision::Allow => FloorClass::None,
+    }
+}
+
+/// Phase 57 D-13: Python source that imports or reaches a process, network or FFI
+/// primitive. Plain substrings, like [`PYTHON_EVASION_MARKERS`]: presence is the signal.
+///
+/// At DEFCON 3 and stricter ([`DefconLevel::at_least_as_strict_as`]`(3)`) a hit is
+/// [`FloorClass::Critical`]: the source is Blocked, because string-level classification
+/// cannot see what `getattr`/`importlib`/`__import__` will resolve at run time, and the
+/// effect gap (an OS sandbox) is the named successor phase, not this one. At levels 4-5 a
+/// hit is a bypassable [`FloorClass::FloorWarn`].
+pub const PYTHON_REACH_MARKERS: &[&str] = &[
+    "import subprocess",
+    "from subprocess",
+    "subprocess.",
+    "import socket",
+    "from socket",
+    "socket.",
+    "import ctypes",
+    "ctypes.",
+    "importlib",
+    "__import__",
+];
+
+/// The ironhermes-side rule class for a `terminal` / `execute_code` call, with the id of
+/// the rule that fired. Independent of the regex floor and of the sidecar.
+///
+/// - `terminal`: a [`MUTATION_COMMAND_PATTERNS`] match on the command is Critical (D-23).
+/// - `execute_code`: a match on any [`reconstruct_python_command_strings`] result is
+///   Critical (D-23). Otherwise a [`PYTHON_REACH_MARKERS`] hit is Critical at DEFCON 3 or
+///   stricter and a FloorWarn at 4-5 (D-13).
+/// - Anything else is `(None, None)`.
+pub fn ironhermes_rule_class(
+    tool_name: &str,
+    classify_arg: &str,
+    level: DefconLevel,
+) -> (FloorClass, Option<&'static str>) {
+    match tool_name {
+        "terminal" if matches_mutation_command(classify_arg) => {
+            (FloorClass::Critical, Some(RULE_MUTATION_COMMAND))
+        }
+        "execute_code" => {
+            if reconstruct_python_command_strings(classify_arg)
+                .iter()
+                .any(|s| matches_mutation_command(s))
+            {
+                return (FloorClass::Critical, Some(RULE_MUTATION_COMMAND));
+            }
+            if PYTHON_REACH_MARKERS
+                .iter()
+                .any(|m| classify_arg.contains(m))
+            {
+                let class = if level.at_least_as_strict_as(3) {
+                    FloorClass::Critical
+                } else {
+                    FloorClass::FloorWarn
+                };
+                return (class, Some(RULE_PYTHON_REACH));
+            }
+            (FloorClass::None, None)
+        }
+        _ => (FloorClass::None, None),
+    }
+}
+
 /// Two-tier dangerous-command guardrail (EXEC-02).
 ///
 /// Classifies shell command strings before dispatch:
@@ -206,13 +662,21 @@ pub const DANGEROUS_PATTERNS: &[(&str, Tier)] = &[
 /// and the approval gate). The hard invariants are D-03 (Tier-2 never approvable) and
 /// D-13 (yolo never overrides Tier-2). `check()` has no yolo input — Block is returned
 /// before any caller-side yolo bypass can apply.
+///
+/// Phase 54 Finding 1 (D-01/D-02): also hosts the `execute_code`-only Python
+/// classification branch (`python_tier1` + the evasion-marker check) — a SECOND,
+/// `tool_name`-selected pattern table inside this same struct, reusing the existing
+/// approval + audit wiring rather than a separate dedicated guardrail type for Python
+/// (D-02 is explicit that no such second struct should exist).
 pub struct DangerousCommandGuardrail {
     tier1: Vec<Regex>,
     tier2: Vec<Regex>,
+    python_tier1: Vec<Regex>,
 }
 
 impl DangerousCommandGuardrail {
-    /// Create a guardrail with the built-in [`DANGEROUS_PATTERNS`] compiled once.
+    /// Create a guardrail with the built-in [`DANGEROUS_PATTERNS`] and
+    /// [`PYTHON_DANGEROUS_PATTERNS`] compiled once.
     pub fn new() -> Self {
         let mut tier1 = Vec::new();
         let mut tier2 = Vec::new();
@@ -228,7 +692,21 @@ impl DangerousCommandGuardrail {
                 Tier::Two => tier2.push(regex),
             }
         }
-        Self { tier1, tier2 }
+        let python_tier1 = PYTHON_DANGEROUS_PATTERNS
+            .iter()
+            .map(|pattern| {
+                Regex::new(pattern).unwrap_or_else(|e| {
+                    panic!(
+                        "DangerousCommandGuardrail: invalid built-in Python pattern '{pattern}': {e}"
+                    )
+                })
+            })
+            .collect();
+        Self {
+            tier1,
+            tier2,
+            python_tier1,
+        }
     }
 
     /// Create a guardrail from operator config — adds/relaxes built-in patterns (D-10).
@@ -300,6 +778,14 @@ impl DangerousCommandGuardrail {
             || command.contains("$'") // ANSI-C quoting ($'\x72\x6d' = rm)
             || command.contains(r"\x") // hex escape in shell string
     }
+
+    /// Phase 54 Finding 1 (D-03): returns `true` when `source` contains ANY
+    /// [`PYTHON_EVASION_MARKERS`] entry as a plain substring. Independent of
+    /// [`PYTHON_DANGEROUS_PATTERNS`] — a source with zero pattern-table hits can
+    /// still trip this arm, which is the whole point (54-RESEARCH.md Pitfall 2).
+    fn has_python_evasion_marker(&self, source: &str) -> bool {
+        PYTHON_EVASION_MARKERS.iter().any(|m| source.contains(m))
+    }
 }
 
 impl Default for DangerousCommandGuardrail {
@@ -312,6 +798,9 @@ impl GuardrailHook for DangerousCommandGuardrail {
     /// Classify a command string before dispatch.
     ///
     /// **Check order — do not reorder (hard invariant):**
+    /// 0. `tool_name == "execute_code"` → the Python branch below, entirely separate
+    ///    from steps 1-3 (Phase 54 Finding 1, D-01/D-02). Never falls through to the
+    ///    shell tables — Python source is not shell syntax.
     /// 1. Tier-2 → [`GuardrailDecision::Block`] (D-03: short-circuits before any other
     ///    branch; no code path may reach approval or subprocess after a Tier-2 match).
     /// 2. Tier-1 OR metachar → [`GuardrailDecision::Warn`] (approval required).
@@ -319,11 +808,40 @@ impl GuardrailHook for DangerousCommandGuardrail {
     ///
     /// `check()` accepts no yolo parameter — Block is returned before any caller-side
     /// yolo bypass applies (D-13). This method is synchronous and performs no I/O.
-    fn check(&self, _tool_name: &str, args: &serde_json::Value) -> GuardrailDecision {
+    fn check(&self, tool_name: &str, args: &serde_json::Value) -> GuardrailDecision {
         let command = match args.get("command").and_then(|v| v.as_str()) {
             Some(c) => c,
             None => return GuardrailDecision::Allow,
         };
+
+        // ── Step 0: execute_code Python classification (D-01/D-02/D-03) ───
+        // Entirely separate from the shell tables below — Python source is not
+        // shell syntax, and this branch NEVER falls through to Steps 1-3.
+        if tool_name == "execute_code" {
+            // D-03: the evasion-marker arm fires BEFORE the pattern table and
+            // independent of it — a source with zero PYTHON_DANGEROUS_PATTERNS hits
+            // can still trip this arm (54-RESEARCH.md Pitfall 2).
+            if self.has_python_evasion_marker(command) {
+                return GuardrailDecision::Warn {
+                    reason: "Python source contains a classification-evasion marker \
+                             (getattr/eval/exec/__import__/base64) — approval required \
+                             regardless of pattern match (D-03)"
+                        .to_string(),
+                };
+            }
+            for regex in &self.python_tier1 {
+                if regex.is_match(command) {
+                    return GuardrailDecision::Warn {
+                        reason: format!(
+                            "Python source matches dangerous-pattern table entry — \
+                             approval required (D-01): {}",
+                            regex.as_str()
+                        ),
+                    };
+                }
+            }
+            return GuardrailDecision::Allow;
+        }
 
         // ── Step 1: Tier-2 hard-block (D-03) ─────────────────────────────
         // This branch MUST execute before any other decision. Tier-2 is never
@@ -499,7 +1017,12 @@ impl GuardrailHook for McpMutationGuardrail {
 
 #[cfg(test)]
 mod dangerous_tests {
-    use super::{DangerousCommandGuardrail, GuardrailDecision, GuardrailHook};
+    use super::{
+        DANGEROUS_PATTERNS, DangerousCommandGuardrail, DefconLevel, FloorClass, GuardrailDecision,
+        GuardrailHook, MUTATION_COMMAND_PATTERNS, PYTHON_DANGEROUS_PATTERNS, RULE_MUTATION_COMMAND,
+        RULE_PYTHON_REACH, Regex, floor_class, ironhermes_rule_class,
+        reconstruct_python_command_strings,
+    };
 
     fn cmd(s: &str) -> serde_json::Value {
         serde_json::json!({ "command": s })
@@ -840,6 +1363,424 @@ mod dangerous_tests {
             GuardrailDecision::Allow
         );
     }
+
+    // ── Phase 54 Finding 1 (D-01/D-02/D-03): execute_code Python classification ──
+
+    /// A Python source matching a `PYTHON_DANGEROUS_PATTERNS` entry (the ADR's own
+    /// evidence line, list-argument form) is Warn — never Allow.
+    #[test]
+    fn python_execute_code_dangerous_subprocess_warns() {
+        let g = DangerousCommandGuardrail::new();
+        let source = "import subprocess\nsubprocess.run(['wrangler', 'delete', 'x'])";
+        assert!(
+            matches!(
+                g.check("execute_code", &cmd(source)),
+                GuardrailDecision::Warn { .. }
+            ),
+            "dangerous Python source must Warn, not Allow"
+        );
+    }
+
+    /// Benign Python (no pattern hit, no evasion marker) is not gated.
+    #[test]
+    fn python_execute_code_benign_print_allows() {
+        let g = DangerousCommandGuardrail::new();
+        assert_eq!(
+            g.check("execute_code", &cmd("print('hello')")),
+            GuardrailDecision::Allow,
+            "benign Python source must Allow"
+        );
+    }
+
+    /// D-03: a source whose ONLY signal is an evasion marker — zero
+    /// `PYTHON_DANGEROUS_PATTERNS` hits — still Warns. Proven independently of the
+    /// pattern table (54-RESEARCH.md Pitfall 2); Task 3 covers all five markers and
+    /// asserts the zero-pattern-hit condition explicitly inside the test.
+    #[test]
+    fn python_execute_code_evasion_marker_without_pattern_warns() {
+        let g = DangerousCommandGuardrail::new();
+        let source = "getattr(__builtins__, 'pr' + 'int')('hi')";
+        assert!(
+            matches!(
+                g.check("execute_code", &cmd(source)),
+                GuardrailDecision::Warn { .. }
+            ),
+            "an evasion-marker-only Python source must Warn"
+        );
+    }
+
+    /// The Python branch changes no non-`execute_code` guardrail decision — a
+    /// `terminal` call with a Python-shaped command still runs through the unchanged
+    /// shell tables. Task 3 covers this exhaustively with a table of `terminal` cases.
+    #[test]
+    fn python_execute_code_branch_scoped_to_execute_code_tool() {
+        let g = DangerousCommandGuardrail::new();
+        assert!(
+            matches!(
+                g.check("terminal", &cmd("rm -rf /")),
+                GuardrailDecision::Block { .. }
+            ),
+            "terminal Tier-2 classification must be unaffected by the Python branch"
+        );
+    }
+
+    // ── Task 3 (D-03): the evasion arm proven to fire independently of the ─────
+    // ── pattern table; the shell path pinned unchanged (54-RESEARCH.md Pitfall 2) ─
+    //
+    // SECURITY NOTE: every "dangerous Python source" string below (eval/exec/
+    // getattr/subprocess/shell=True and friends) is a PLAIN STRING LITERAL used only
+    // as classifier input to `DangerousCommandGuardrail::check`. None of it is ever
+    // parsed or executed by this test file or by Rust — it is inert test fixture data
+    // whose only job is to be pattern-matched, exactly like the pre-existing shell
+    // command strings ("rm -rf /", "curl ...") in the tests above.
+
+    /// D-03: the evasion arm fires on a source with ZERO `PYTHON_DANGEROUS_PATTERNS`
+    /// hits. The zero-hit condition is asserted INSIDE the test, BEFORE the decision
+    /// assertion, so this test cannot be confused with a pattern-table test
+    /// (54-RESEARCH.md Pitfall 2: every case also matching a pattern-table entry would
+    /// leave the evasion arm's own contribution never exercised).
+    #[test]
+    fn python_evasion_marker_only_warns() {
+        // Builds the string "eval" at runtime via concatenation and resolves it
+        // through getattr on __builtins__ — no literal subprocess/os./socket./
+        // requests./urllib/shutil/ctypes/pty token anywhere in this source.
+        let source = "getattr(__builtins__, 'ev' + 'al')(payload)";
+
+        let zero_pattern_hits = PYTHON_DANGEROUS_PATTERNS
+            .iter()
+            .all(|p| !Regex::new(p).unwrap().is_match(source));
+        assert!(
+            zero_pattern_hits,
+            "test source must match ZERO PYTHON_DANGEROUS_PATTERNS entries, or this test \
+             cannot distinguish the evasion arm from the pattern table: {source}"
+        );
+
+        let g = DangerousCommandGuardrail::new();
+        assert!(
+            matches!(
+                g.check("execute_code", &cmd(source)),
+                GuardrailDecision::Warn { .. }
+            ),
+            "an evasion-marker-only source (zero pattern-table hits) must Warn"
+        );
+    }
+
+    /// Each of the five D-03 markers independently produces `Warn` when it is the
+    /// ONLY signal present.
+    #[test]
+    fn python_evasion_marker_each_alone_warns() {
+        let g = DangerousCommandGuardrail::new();
+        let cases = [
+            ("getattr(__builtins__, 'pr' + 'int')('a')", "getattr"),
+            ("eval('1 + 1')", "eval"),
+            ("exec('pass')", "exec"),
+            ("__import__('os')", "__import__"),
+            ("base64.b64decode('aGk=')", "base64"),
+        ];
+        for (source, marker) in cases {
+            assert!(
+                matches!(
+                    g.check("execute_code", &cmd(source)),
+                    GuardrailDecision::Warn { .. }
+                ),
+                "marker '{marker}' alone must Warn, source: {source}"
+            );
+        }
+    }
+
+    /// A source with NEITHER an evasion marker NOR a pattern-table hit is Allow.
+    #[test]
+    fn python_benign_source_allows() {
+        let g = DangerousCommandGuardrail::new();
+        assert_eq!(
+            g.check("execute_code", &cmd("x = 1 + 2\nprint(x)")),
+            GuardrailDecision::Allow,
+            "a source with neither signal must Allow"
+        );
+    }
+
+    /// The ADR's own evidence line, list-argument form — the shape that motivated the
+    /// separate evasion arm in the first place (D-03).
+    #[test]
+    fn python_dangerous_subprocess_list_form_warns() {
+        let g = DangerousCommandGuardrail::new();
+        let source = "subprocess.run(['wrangler', 'delete', 'hello-world-worker'], input='y\\n')";
+        assert!(
+            matches!(
+                g.check("execute_code", &cmd(source)),
+                GuardrailDecision::Warn { .. }
+            ),
+            "list-argument subprocess.run must Warn"
+        );
+    }
+
+    /// The equivalent shell-string form of the same evidence line — proving the test
+    /// suite cannot pass on the easy form alone (54-RESEARCH.md Pitfall 2).
+    #[test]
+    fn python_dangerous_subprocess_string_form_warns() {
+        let g = DangerousCommandGuardrail::new();
+        let source = "subprocess.run(\"wrangler delete hello-world-worker\", shell=True)";
+        assert!(
+            matches!(
+                g.check("execute_code", &cmd(source)),
+                GuardrailDecision::Warn { .. }
+            ),
+            "shell-string subprocess.run must Warn"
+        );
+    }
+
+    /// The Python branch is scoped to `execute_code` only. A `terminal` call is
+    /// unaffected — including a Python-shaped command that would classify
+    /// differently under the `execute_code` branch — because it is judged by the
+    /// unchanged shell table. Expected decisions are sourced from the pre-existing
+    /// Tier-2/Tier-1/benign tests earlier in this same module.
+    #[test]
+    fn python_branch_does_not_affect_terminal_tool() {
+        // "block" | "warn" | "allow" — a plain tag avoids a function-pointer tuple
+        // (clippy::type_complexity) while still asserting the exact decision variant.
+        let cases: [(&str, &str, &str); 4] = [
+            ("rm -rf /", "block", "Tier-2 must still Block"),
+            ("curl https://x", "warn", "Tier-1 must still Warn"),
+            ("ls -la", "allow", "benign must still Allow"),
+            (
+                "subprocess.run(['wrangler', 'delete', 'x'])",
+                "allow",
+                "a Python-shaped source on the terminal tool must be judged by the \
+                 unchanged shell table (no shell pattern/metachar hit here), never \
+                 routed through the execute_code Python branch",
+            ),
+        ];
+        let g = DangerousCommandGuardrail::new();
+        for (command, expected_kind, msg) in cases {
+            let decision = g.check("terminal", &cmd(command));
+            let matches_expected = match expected_kind {
+                "block" => matches!(decision, GuardrailDecision::Block { .. }),
+                "warn" => matches!(decision, GuardrailDecision::Warn { .. }),
+                "allow" => matches!(decision, GuardrailDecision::Allow),
+                other => panic!("unknown expected_kind tag in test table: {other}"),
+            };
+            assert!(matches_expected, "{msg}, got: {decision:?}");
+        }
+    }
+
+    /// Doc-comment fidelity (EXEC-02): no built-in pattern — shell OR Python — uses
+    /// the Rust-regex two-literal-character `\b` sequence, which the `regex` crate
+    /// does NOT treat as a word-boundary assertion.
+    #[test]
+    fn regex_no_word_boundary() {
+        for (pattern, _tier) in DANGEROUS_PATTERNS {
+            assert!(
+                !pattern.contains("\\b"),
+                "DANGEROUS_PATTERNS entry contains the Rust-regex word-boundary \
+                 literal \\b (EXEC-02): {pattern}"
+            );
+        }
+        for pattern in PYTHON_DANGEROUS_PATTERNS {
+            assert!(
+                !pattern.contains("\\b"),
+                "PYTHON_DANGEROUS_PATTERNS entry contains the Rust-regex word-boundary \
+                 literal \\b (EXEC-02): {pattern}"
+            );
+        }
+    }
+
+    /// Phase 57 D-23: the mutation-verb list follows the same no-`\b` convention.
+    #[test]
+    fn mutation_command_patterns_have_no_word_boundary_literal() {
+        for pattern in MUTATION_COMMAND_PATTERNS {
+            assert!(
+                !pattern.contains("\\b"),
+                "MUTATION_COMMAND_PATTERNS entry contains the Rust-regex word-boundary \
+                 literal \\b: {pattern}"
+            );
+        }
+    }
+
+    fn rule(tool: &str, arg: &str) -> (FloorClass, Option<&'static str>) {
+        ironhermes_rule_class(tool, arg, DefconLevel::THREE)
+    }
+
+    /// D-23: terminal commands naming a mutation verb are Critical; read-only ones are not.
+    #[test]
+    fn terminal_mutation_verbs_are_critical() {
+        for command in [
+            "wrangler delete hello-world-worker",
+            "npx wrangler deploy",
+            "./node_modules/.bin/wrangler delete x",
+            "wrangler r2 bucket delete my-bucket",
+            "wrangler kv namespace delete --namespace-id abc",
+            "gh repo delete owner/name --yes",
+            "gh release delete v1.0",
+            "aws s3 rm s3://bucket --recursive",
+            "aws s3 rb s3://bucket",
+            "gcloud compute instances delete vm-1",
+            "kubectl delete pod web-1",
+            "terraform destroy -auto-approve",
+        ] {
+            assert_eq!(
+                rule("terminal", command),
+                (FloorClass::Critical, Some(RULE_MUTATION_COMMAND)),
+                "{command}"
+            );
+        }
+        for command in [
+            "wrangler whoami",
+            "wrangler tail my-worker",
+            "ls -la",
+            "gh repo view owner/name",
+            "aws s3 ls",
+            "kubectl get pods",
+            "terraform plan",
+            "echo awrangler deploy",
+        ] {
+            assert_eq!(
+                rule("terminal", command),
+                (FloorClass::None, None),
+                "{command}"
+            );
+        }
+    }
+
+    /// D-23: the rule applies only to the tools it names.
+    #[test]
+    fn rule_class_ignores_other_tools() {
+        assert_eq!(
+            rule("read_file", "wrangler delete x"),
+            (FloorClass::None, None)
+        );
+    }
+
+    /// D-23: argv list form, string form, concatenation, importlib hop, tuple, a trailing
+    /// variable element, escapes and raw prefixes.
+    #[test]
+    fn execute_code_reconstruction_catches_the_phase46_shapes() {
+        for source in [
+            "import subprocess\nsubprocess.run(['wrangler','delete','hello-world-worker'])",
+            "import subprocess\nsubprocess.Popen([\"wrangler\", \"delete\", \"x\"])",
+            "import os\nos.system('wrangler delete hello-world-worker')",
+            "import os\nos.system('wrang' + 'ler delete x')",
+            "import os\nos.system('wrang' 'ler delete x')",
+            "import importlib\nm = importlib.import_module('subpro'+'cess')\nm.run(['wrangler','delete','hello-world-worker'])",
+            "import subprocess\nsubprocess.run(('wrangler', 'delete', 'x'))",
+            "import subprocess\nsubprocess.run(['wrangler', 'delete', worker_name])",
+            "import subprocess\nsubprocess.run([binary, 'wrangler', 'delete'])",
+            "import subprocess\nsubprocess.run(['npx', 'wrangler', 'delete', n], check=True)",
+            "import subprocess\nsubprocess.run(['\\x77rangler', 'delete', 'x'])",
+            "import subprocess\nsubprocess.run([r'wrangler', 'delete', 'x'])",
+        ] {
+            assert_eq!(
+                rule("execute_code", source),
+                (FloorClass::Critical, Some(RULE_MUTATION_COMMAND)),
+                "{source}"
+            );
+        }
+    }
+
+    /// D-23 stays quiet on benign and merely similar code.
+    #[test]
+    fn execute_code_reconstruction_leaves_benign_code_alone() {
+        for source in [
+            "print('hello')",
+            "# wrangler delete x is documented here\nprint(1)",
+            "x = ['wrangler', 'tail']\nprint(x)",
+            "x = ['gh', 'repo', 'view']\nprint(x)",
+            "print('wrangler' + ' is a tool')",
+        ] {
+            assert_eq!(
+                rule("execute_code", source),
+                (FloorClass::None, None),
+                "{source}"
+            );
+        }
+    }
+
+    /// D-13: a reach marker is Critical at DEFCON 3 and stricter, a FloorWarn at 4-5, and a
+    /// non-mutating `subprocess` call is never mistaken for a D-23 mutation.
+    #[test]
+    fn python_reach_markers_are_critical_at_three_and_floorwarn_above() {
+        let five = DefconLevel::FIVE;
+        let three = DefconLevel::THREE;
+        let four = DefconLevel::try_from(4).expect("level 4");
+        for source in [
+            "import subprocess\nsubprocess.run(['ls'])",
+            "from subprocess import run",
+            "import socket",
+            "from socket import create_connection",
+            "import ctypes",
+            "import importlib",
+            "x = __import__('os')",
+        ] {
+            assert_eq!(
+                ironhermes_rule_class("execute_code", source, three),
+                (FloorClass::Critical, Some(RULE_PYTHON_REACH)),
+                "{source}"
+            );
+            assert_eq!(
+                ironhermes_rule_class("execute_code", source, DefconLevel::ONE),
+                (FloorClass::Critical, Some(RULE_PYTHON_REACH)),
+                "{source}"
+            );
+            for level in [four, five] {
+                assert_eq!(
+                    ironhermes_rule_class("execute_code", source, level),
+                    (FloorClass::FloorWarn, Some(RULE_PYTHON_REACH)),
+                    "{source}"
+                );
+            }
+        }
+        assert_eq!(
+            ironhermes_rule_class("execute_code", "print(1)", three),
+            (FloorClass::None, None)
+        );
+        // D-13 is an execute_code rule: a terminal command is not scanned for markers.
+        assert_eq!(
+            ironhermes_rule_class("terminal", "python3 -c 'import socket'", three),
+            (FloorClass::None, None)
+        );
+    }
+
+    /// The reconstruction never panics and stays linear on hostile input.
+    #[test]
+    fn reconstruction_survives_unterminated_and_deeply_nested_input() {
+        let nested = "(".repeat(50_000) + &"'x',".repeat(1000);
+        let _ = reconstruct_python_command_strings(&nested);
+        let _ = reconstruct_python_command_strings("subprocess.run(['wrangler', 'delete");
+        let _ = reconstruct_python_command_strings("x = '''never closed");
+        let _ = reconstruct_python_command_strings("'\\x4'");
+        assert!(reconstruct_python_command_strings("").is_empty());
+    }
+
+    /// `floor_class` maps each decision to its D-24 class.
+    #[test]
+    fn floor_class_maps_each_decision() {
+        let r = || "r".to_string();
+        assert_eq!(
+            floor_class(&GuardrailDecision::Block { reason: r() }),
+            FloorClass::Critical
+        );
+        assert_eq!(
+            floor_class(&GuardrailDecision::Warn { reason: r() }),
+            FloorClass::FloorWarn
+        );
+        assert_eq!(
+            floor_class(&GuardrailDecision::NeedsApproval { reason: r() }),
+            FloorClass::NeedsApproval
+        );
+        assert_eq!(floor_class(&GuardrailDecision::Allow), FloorClass::None);
+    }
+
+    /// `importlib` is a FloorWarn Python-table hit (Phase 57 D-23).
+    #[test]
+    fn importlib_is_a_python_table_warn() {
+        let g = DangerousCommandGuardrail::new();
+        assert!(matches!(
+            g.check(
+                "execute_code",
+                &cmd("import importlib\nimportlib.reload(x)")
+            ),
+            GuardrailDecision::Warn { .. }
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +1850,14 @@ mod tests {
             msg.contains("blocklist"),
             "expected guardrail name in full message: {msg}"
         );
+        assert!(
+            msg.contains("It did not run."),
+            "expected the did-not-run statement: {msg}"
+        );
+        assert!(
+            msg.ends_with(crate::refusal::NO_CIRCUMVENTION_NOTICE),
+            "expected the no-circumvention notice at the end: {msg}"
+        );
     }
 
     #[test]
@@ -919,7 +1868,13 @@ mod tests {
             "blocklist",
             &ErrorDetailLevel::Minimal,
         );
-        assert_eq!(msg, "Tool call blocked by security policy");
+        assert_eq!(
+            msg,
+            format!(
+                "Tool call blocked by security policy. It did not run. {}",
+                crate::refusal::NO_CIRCUMVENTION_NOTICE
+            )
+        );
         assert!(
             !msg.contains("terminal"),
             "tool name must not appear in minimal message: {msg}"
@@ -1108,6 +2063,79 @@ mod guardrail_mcp_tests {
         assert!(
             matches!(decision, GuardrailDecision::NeedsApproval { .. }),
             "LO-02: destructive verb in a non-final __ segment must NeedsApproval, got: {decision:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 54 Plan 04 (D-16b): pin McpMutationGuardrail's decision boundary
+    // in both directions and prove it selective.
+    // -----------------------------------------------------------------
+
+    /// Table-driven over the REAL `DEFAULT_VERBS` constant (not hardcoded
+    /// strings), so the test tracks the set rather than a snapshot of it.
+    /// At least three distinct destructive verbs each independently trigger
+    /// NeedsApproval on a server-prefixed name.
+    #[test]
+    fn mcp_mutation_fires_on_prefixed_destructive_verb() {
+        let g = McpMutationGuardrail::new();
+        assert!(
+            DEFAULT_VERBS.len() >= 3,
+            "test needs at least three default verbs so it is not accidentally \
+             specific to one"
+        );
+        for verb in DEFAULT_VERBS.iter().take(3) {
+            let tool_name = format!("some_server__{verb}_resource");
+            let decision = g.check(&tool_name, &serde_json::Value::Null);
+            assert!(
+                matches!(decision, GuardrailDecision::NeedsApproval { .. }),
+                "verb '{verb}' on a prefixed name must NeedsApproval, got: \
+                 {decision:?} (tool_name={tool_name})"
+            );
+        }
+    }
+
+    /// A name with NO server separator is NEVER intercepted by
+    /// `McpMutationGuardrail` — local tools are gated by the separate
+    /// `DangerousCommandGuardrail` (plan 01's Python branch and the existing
+    /// shell-syntax tables), not this guardrail. This is the correct division
+    /// of labor, not a gap: a reader who saw this test without this note
+    /// would reasonably mistake it for a hole.
+    #[test]
+    fn mcp_mutation_allows_unprefixed_local_tool_name() {
+        let g = McpMutationGuardrail::new();
+        // Bare built-in tool name.
+        let decision = g.check("terminal", &serde_json::Value::Null);
+        assert_eq!(
+            decision,
+            GuardrailDecision::Allow,
+            "bare built-in tool name must Allow under McpMutationGuardrail \
+             (DangerousCommandGuardrail is the control for local tools), got: \
+             {decision:?}"
+        );
+        // Bare name that LOOKS destructive (contains a default verb) but has
+        // no server separator — still Allow under THIS guardrail.
+        let decision = g.check("delete_all_files", &serde_json::Value::Null);
+        assert_eq!(
+            decision,
+            GuardrailDecision::Allow,
+            "unprefixed name containing a destructive verb must still Allow \
+             under McpMutationGuardrail — DangerousCommandGuardrail is the \
+             control that gates local tools, not this one; got: {decision:?}"
+        );
+    }
+
+    /// Selectivity companion: a prefixed MCP tool name whose verb portion is
+    /// NOT in the destructive set must Allow. Without this, a guardrail that
+    /// returned NeedsApproval for every prefixed name would also pass the
+    /// destructive-verb test above.
+    #[test]
+    fn mcp_mutation_allows_prefixed_non_destructive_verb() {
+        let g = McpMutationGuardrail::new();
+        let decision = g.check("some_server__list_resources", &serde_json::Value::Null);
+        assert_eq!(
+            decision,
+            GuardrailDecision::Allow,
+            "prefixed name with a non-destructive verb must Allow, got: {decision:?}"
         );
     }
 }

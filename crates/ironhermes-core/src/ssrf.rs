@@ -10,7 +10,7 @@
 //! switch to `tokio::net::lookup_host` at the call site. Phase 4 will handle async wrapping.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::LazyLock;
 use tracing::warn;
 use url::Url;
@@ -67,25 +67,78 @@ pub fn is_safe_url(url_str: &str) -> bool {
         }
     };
 
-    let addrs: Vec<_> = addrs.collect();
-    if addrs.is_empty() {
-        warn!("SSRF blocked: no addresses resolved for: {}", host);
-        return false;
-    }
-
-    // Check EVERY resolved IP -- block if ANY is unsafe
-    for addr in &addrs {
-        if is_blocked_ip(addr.ip()) {
-            warn!(
-                "SSRF blocked: {} resolved to blocked IP {}",
-                url_str,
-                addr.ip()
-            );
-            return false;
+    // Check EVERY resolved IP -- block if ANY is unsafe (D-14 foundation): this is
+    // the SAME shared helper `resolve_safe_addrs` calls, so the two never carry two
+    // independently-drifting copies of the block predicate.
+    match filter_safe_addrs(addrs) {
+        Ok(_) => true,
+        Err(e) => {
+            warn!("SSRF blocked: {} rejected by policy: {}", url_str, e);
+            false
         }
     }
+}
 
-    true
+/// Apply the SAME block predicate `is_safe_url` uses to an already-resolved set of
+/// addresses, with a **whole-host-refusal** posture: if ANY address is blocked, the
+/// entire set is refused (`Err`) rather than silently returning only the "safe"
+/// remainder.
+///
+/// This matches `is_safe_url`'s own pre-existing semantics exactly (see the loop
+/// this function replaces above: it returns `false` for the WHOLE URL the instant
+/// any resolved IP is blocked, never a partial pass) — a host that resolves to a
+/// mix of a public and an internal address is a classic DNS-rebinding signature,
+/// and connecting to "the safe one" would still resolve the redirect/next request
+/// through the same rebinding-capable name. Whole-host refusal is deliberately
+/// chosen over a partial-allow posture for this reason; this function is not free
+/// to invent a divergent policy.
+///
+/// Never returns an empty `Ok`: an empty address list handed back to a caller (in
+/// particular, `web_client`'s `reqwest::dns::Resolve` implementation, which treats
+/// an `Ok` iterator as "these are the addresses to connect to") would be
+/// indistinguishable from "resolver legitimately found nothing" and could let a
+/// caller fall through to its own, unchecked resolution.
+fn filter_safe_addrs<I>(addrs: I) -> anyhow::Result<Vec<SocketAddr>>
+where
+    I: IntoIterator<Item = SocketAddr>,
+{
+    let addrs: Vec<SocketAddr> = addrs.into_iter().collect();
+    if addrs.is_empty() {
+        anyhow::bail!("SSRF: no addresses to evaluate (empty resolution)");
+    }
+    for addr in &addrs {
+        if is_blocked_ip(addr.ip()) {
+            anyhow::bail!(
+                "SSRF: resolved address {} is blocked by policy (whole-host refusal)",
+                addr.ip()
+            );
+        }
+    }
+    Ok(addrs)
+}
+
+/// Resolve `host:port` and return only the addresses that pass the same block
+/// predicate `is_safe_url` already applies (`filter_safe_addrs`) — the ONE shared
+/// predicate a custom `reqwest::dns::Resolve` implementation (see
+/// `ironhermes_tools::web_client`) consults for EVERY hostname resolution it
+/// performs, including a redirect's new host, before connecting to it. Sharing
+/// this one function is what prevents `is_safe_url` and the resolver from drifting
+/// onto two different, independently-maintained definitions of "safe" — the drift
+/// itself is the hole (D-14).
+///
+/// Returns `Err` rather than an empty `Ok` when nothing survives filtering (see
+/// `filter_safe_addrs`'s doc comment for why).
+///
+/// Note for callers building a `reqwest::dns::Resolve` implementation: reqwest
+/// replaces a port of `0` in a returned `SocketAddr` with the scheme's
+/// conventional port (80/443/...), and an explicit port in the original URL
+/// always wins over both. A caller that has no specific port to resolve against
+/// may therefore pass `0` safely.
+pub fn resolve_safe_addrs(host: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| anyhow::anyhow!("SSRF: DNS resolution failed for {host}: {e}"))?;
+    filter_safe_addrs(addrs)
 }
 
 /// Check whether an IP address belongs to a blocked range.
@@ -327,5 +380,99 @@ mod tests {
     fn ipv4_mapped_public_address_still_allowed() {
         let ip: IpAddr = "::ffff:93.184.216.34".parse().unwrap();
         assert!(!is_blocked_ip(ip));
+    }
+
+    // --- D-15 regression pins (54-03) ---
+    //
+    // These pin behavior that is ALREADY CORRECT — CONTEXT.md's roadmap correction
+    // (`.planning/phases/54-adr-0005-security-audit-findings-hardening/54-CONTEXT.md`,
+    // verified against this file on 2026-09-29) found that `is_blocked_v4`,
+    // `is_unique_local_v6` and `is_unicast_link_local_v6` already handle every
+    // spelling ROADMAP.md's SC-3 wrongly claimed was missing. These tests exist so a
+    // future refactor of those predicates cannot silently regress coverage that
+    // already works. Per the same correction: DO NOT rebuild these predicates.
+
+    #[test]
+    fn metadata_literal_addr_aws_blocked() {
+        assert!(
+            !is_safe_url("http://169.254.169.254"),
+            "the AWS/GCP cloud-metadata literal IPv4 address (link-local range) must be blocked"
+        );
+    }
+
+    #[test]
+    fn metadata_literal_addr_alibaba_blocked() {
+        assert!(
+            !is_safe_url("http://100.100.100.200"),
+            "the Alibaba Cloud metadata literal IPv4 address (CGNAT range) must be blocked"
+        );
+    }
+
+    #[test]
+    fn metadata_literal_addr_v4_mapped_v6_blocked() {
+        let ip: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(
+            is_blocked_ip(ip),
+            "v4-mapped IPv6 spelling of the AWS metadata address must delegate through \
+             to_ipv4_mapped() to is_blocked_v4 and be blocked"
+        );
+    }
+
+    #[test]
+    fn ipv6_ula_and_link_local_still_blocked() {
+        let ula: IpAddr = "fd00::1".parse().unwrap();
+        assert!(
+            is_blocked_ip(ula),
+            "a unique-local IPv6 address (fc00::/7) must still be blocked"
+        );
+        let link_local: IpAddr = "fe80::1".parse().unwrap();
+        assert!(
+            is_blocked_ip(link_local),
+            "a unicast link-local IPv6 address (fe80::/10) must still be blocked"
+        );
+    }
+
+    // --- resolve_safe_addrs (D-14 foundation) ---
+
+    #[test]
+    fn resolve_safe_addrs_returns_addrs_for_public_ip() {
+        // A literal IP address avoids any live DNS lookup.
+        let addrs =
+            resolve_safe_addrs("93.184.216.34", 443).expect("a public IP literal must resolve");
+        assert!(!addrs.is_empty(), "must return at least one address");
+        assert!(
+            addrs.iter().all(|a| !is_blocked_ip(a.ip())),
+            "every returned address must satisfy the same block predicate is_safe_url uses"
+        );
+    }
+
+    #[test]
+    fn resolve_safe_addrs_errs_for_host_resolving_only_to_blocked_addresses() {
+        // 127.0.0.1 is a literal loopback address; to_socket_addrs needs no DNS.
+        let result = resolve_safe_addrs("127.0.0.1", 80);
+        assert!(
+            result.is_err(),
+            "a host resolving only to blocked addresses must error, never return an empty Ok"
+        );
+    }
+
+    #[test]
+    fn resolve_safe_addrs_whole_host_refuses_mixed_resolution() {
+        // Exercises the shared filter directly with a synthetic mixed set (one
+        // public address, one blocked address) since a literal-IP hostname cannot
+        // resolve to more than itself. This is the posture documented on
+        // `filter_safe_addrs`: is_safe_url already blocks the WHOLE url the instant
+        // any resolved address is unsafe, and resolve_safe_addrs matches that
+        // semantics exactly rather than inventing a divergent partial-allow policy.
+        let mixed = vec![
+            SocketAddr::new("93.184.216.34".parse().unwrap(), 443),
+            SocketAddr::new("169.254.169.254".parse().unwrap(), 443),
+        ];
+        let result = filter_safe_addrs(mixed);
+        assert!(
+            result.is_err(),
+            "a mix of allowed and blocked addresses must refuse the WHOLE host, matching \
+             is_safe_url's block-on-any semantics — never silently return only the safe one"
+        );
     }
 }

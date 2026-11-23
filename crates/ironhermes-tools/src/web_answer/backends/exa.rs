@@ -1,25 +1,35 @@
 //! Phase 41.3 D-07/D-13/D-14 (Plan 08): Exa `web_answer` backend.
 //!
 //! Endpoint: POST https://api.exa.ai/search — the SAME endpoint the sibling
-//! `web_search` Exa backend (Plan 07) uses; Exa's `/search` endpoint serves
-//! both a ranked-results surface AND an answer surface depending on the
-//! requested `contents` shape. Auth: `Authorization: Bearer $EXA_API_KEY` —
-//! the SAME convention `web_search`'s Exa backend uses, DIFFERENT from the
-//! existing `web_extract` Exa backend (which targets `/contents` with an
-//! `x-api-key` header); do not import or mirror that backend's header line
-//! here.
+//! `web_search` Exa backend (Plan 07) uses. Auth: `Authorization: Bearer
+//! $EXA_API_KEY` — the SAME convention `web_search`'s Exa backend uses,
+//! DIFFERENT from the existing `web_extract` Exa backend (which targets
+//! `/contents` with an `x-api-key` header); do not import or mirror that
+//! backend's header line here.
 //!
 //! Body: `query`, `type: "auto"` (the docs-recommended agent default),
-//! `contents.summary: true` (COVERAGE.md §2.1 — the answer surface).
-//! Response: `output.content` mapped to `AnswerResult.text`, each
+//! `outputSchema: {"type": "text"}`, `contents.summary: true`.
+//!
+//! **`outputSchema` is what makes Exa answer.** Per Exa's published OpenAPI
+//! contract (exa.ai/docs/reference/search) the top-level `output` object is
+//! returned only when the request supplies `outputSchema` (or uses a `deep*`
+//! search type); a plain `type: "auto"` request returns `results[]` and NO
+//! `output`. The original Plan 08 request omitted it (its assumption that
+//! `contents.summary` was "the answer surface" was never checked against the
+//! live API), so in production every call failed with `Exa answer response
+//! carried no output` and `web_answer` silently fell through to DuckDuckGo.
+//! A root-`text` schema keeps D-07's single honest contract — the answer is
+//! prose, exactly like the other three `web_answer` backends; the structured
+//! `object` schema and `systemPrompt` (COVERAGE.md §2.1 OPT-OUT) stay unused.
+//! Synthesis adds ~2s on top of the search type (Exa docs).
+//!
+//! Response: `output.content` mapped to `AnswerResult.text`; each
 //! `output.grounding[].citations[]` entry flattened into
-//! `AnswerResult.citations`, and `costDollars.total` captured into
-//! `cost_dollars` (D-14, capture-only — never enforced). Deliberately
-//! omits the two prompt/schema-control request parameters COVERAGE.md
-//! §2.1 marks OPT-OUT for this backend — either would make Exa's answer
-//! shape diverge from the other three `web_answer` backends and break
-//! D-07's single honest contract; see COVERAGE.md for the exact parameter
-//! names (neither is named in this file).
+//! `AnswerResult.citations`. Citations are `{url, title}` OBJECTS in Exa's
+//! contract (not bare strings, as Plan 08's fixture assumed); both shapes are
+//! accepted and anything unrecognised is skipped rather than failing the
+//! answer. `costDollars.total` is captured into `cost_dollars` (D-14,
+//! capture-only — never enforced).
 
 use std::time::Duration;
 
@@ -53,7 +63,28 @@ struct ExaOutput {
 #[derive(Debug, Default, Deserialize)]
 struct ExaGrounding {
     #[serde(default)]
-    citations: Vec<String>,
+    citations: Vec<ExaCitation>,
+}
+
+/// One `output.grounding[].citations[]` entry. Exa's contract is a `{url, title}`
+/// object; a bare URL string is also accepted (the shape the original fixture
+/// assumed). `Other` swallows any unrecognised entry so a decoration problem can
+/// never discard a good answer.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExaCitation {
+    Url(String),
+    Object { url: String },
+    Other(#[allow(dead_code)] serde_json::Value),
+}
+
+impl ExaCitation {
+    fn into_url(self) -> Option<String> {
+        match self {
+            ExaCitation::Url(url) | ExaCitation::Object { url } => Some(url),
+            ExaCitation::Other(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -77,6 +108,9 @@ pub async fn answer(query: &str, api_key: &SecretString) -> Result<AnswerResult>
     let body = json!({
         "query": query,
         "type": "auto",
+        // Required for Exa to return the top-level `output` object at all — see the
+        // module docs. Root `text` => `output.content` is prose, not a JSON object.
+        "outputSchema": { "type": "text" },
         "contents": { "summary": true },
     });
 
@@ -107,10 +141,12 @@ pub async fn answer(query: &str, api_key: &SecretString) -> Result<AnswerResult>
     }
 
     let mut citations: Vec<String> = Vec::new();
-    for grounding in &output.grounding {
-        for citation in &grounding.citations {
-            if !citations.contains(citation) {
-                citations.push(citation.clone());
+    for grounding in output.grounding {
+        for citation in grounding.citations {
+            if let Some(url) = citation.into_url()
+                && !citations.contains(&url)
+            {
+                citations.push(url);
             }
         }
     }

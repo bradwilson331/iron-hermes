@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ironhermes_core::{Config, ExecConfig, SubagentConfig, ToolSchema};
-use ironhermes_tools::delegate_task::{ChildToolProgressCallback, DelegateTaskTool, SubagentRunner};
+use ironhermes_tools::delegate_task::{
+    ChildToolProgressCallback, DelegateTaskTool, SubagentRunner,
+};
 use ironhermes_tools::execute_code::ExecuteCodeTool;
 use ironhermes_tools::fal::FalClient;
 use ironhermes_tools::image_gen::ImageGenTool;
@@ -97,9 +99,7 @@ async fn execute_tool_abandons_a_hanging_http_tool() {
         .await;
 
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(HangingHttpTool {
-        url: server.uri(),
-    }));
+    registry.register(Box::new(HangingHttpTool { url: server.uri() }));
 
     let start = Instant::now();
     let result = registry.execute_tool("hanging_http", json!({})).await;
@@ -129,9 +129,7 @@ async fn execute_tool_releases_the_socket_on_expiry() {
         .await;
 
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(HangingHttpTool {
-        url: server.uri(),
-    }));
+    registry.register(Box::new(HangingHttpTool { url: server.uri() }));
 
     let start = Instant::now();
     let result = registry.execute_tool("hanging_http", json!({})).await;
@@ -178,9 +176,7 @@ async fn timeout_counter_increments_only_on_expiry() {
         .await;
 
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(HangingHttpTool {
-        url: server.uri(),
-    }));
+    registry.register(Box::new(HangingHttpTool { url: server.uri() }));
     registry.register(Box::new(FastTool));
 
     assert_eq!(registry.timeout_count(), 0, "counter must start at 0");
@@ -261,9 +257,7 @@ async fn handle_tool_call_abandons_a_hanging_http_tool() {
         .await;
 
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(HangingHttpTool {
-        url: server.uri(),
-    }));
+    registry.register(Box::new(HangingHttpTool { url: server.uri() }));
 
     let start = Instant::now();
     let result = registry.handle_tool_call("hanging_http", json!({})).await;
@@ -290,9 +284,7 @@ async fn dispatch_with_hook_abandons_a_hanging_http_tool() {
         .await;
 
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(HangingHttpTool {
-        url: server.uri(),
-    }));
+    registry.register(Box::new(HangingHttpTool { url: server.uri() }));
 
     let start = Instant::now();
     let result = registry
@@ -324,9 +316,7 @@ async fn dispatch_abandons_a_hanging_http_tool() {
         .await;
 
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(HangingHttpTool {
-        url: server.uri(),
-    }));
+    registry.register(Box::new(HangingHttpTool { url: server.uri() }));
 
     let start = Instant::now();
     let result = registry.dispatch("hanging_http", json!({})).await;
@@ -382,9 +372,7 @@ async fn skills_rewrite_tail_is_bounded() {
     // Overwrite the real (instant-return) `SkillsTool` with a stand-in that
     // performs a genuine hanging HTTP call, so the wrap is proven against a
     // real hang rather than a synthetic sleep.
-    registry.register(Box::new(HangingSkillsTool {
-        url: server.uri(),
-    }));
+    registry.register(Box::new(HangingSkillsTool { url: server.uri() }));
 
     let start = Instant::now();
     // "arxiv" is not a registered tool, but IS a known skill — resolves
@@ -581,6 +569,7 @@ fn declared_budgets_snapshot() {
     let image_gen = ImageGenTool::new(Arc::new(Config::default()), FalClient::new());
     assert_eq!(image_gen.timeout_secs(), Some(300), "image_gen");
 
-    let execute_code = ExecuteCodeTool::new(Arc::new(ToolRegistry::new()), ExecConfig::default(), None);
+    let execute_code =
+        ExecuteCodeTool::new(Arc::new(ToolRegistry::new()), ExecConfig::default(), None);
     assert_eq!(execute_code.timeout_secs(), Some(360), "execute_code");
 }

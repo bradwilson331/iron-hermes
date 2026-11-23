@@ -20,6 +20,18 @@ use std::sync::Arc;
 
 use crate::registry::Tool;
 
+/// Default output path `<audio_dir>/<uuid>.<ext>` when the caller gave none.
+///
+/// The extension comes from `tts::audio_format::extension_for` (D-09): it follows the
+/// bytes the provider actually returns, so MP3 is never mislabelled `.opus`.
+fn default_output_path(
+    audio_dir: &std::path::Path,
+    tts: &ironhermes_core::config::TtsConfig,
+) -> PathBuf {
+    let ext = crate::tts::audio_format::extension_for(tts);
+    audio_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext))
+}
+
 /// LLM-callable tool that synthesizes text via the configured TTS provider and
 /// returns the path of the written audio file (D-06).
 pub struct TextToSpeechTool {
@@ -141,15 +153,7 @@ impl Tool for TextToSpeechTool {
 
             p
         } else {
-            // Determine extension from provider type
-            let ext = if self.config.tts.provider == "elevenlabs"
-                && self.config.tts.elevenlabs.output_format == "opus"
-            {
-                "opus"
-            } else {
-                "mp3"
-            };
-            audio_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext))
+            default_output_path(&audio_dir, &self.config.tts)
         };
 
         // Step e: synthesize
@@ -178,5 +182,27 @@ impl Tool for TextToSpeechTool {
 
         // Step f: D-06 — return path string only (no base64, no side-channel)
         Ok(written_path.to_string_lossy().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironhermes_core::config::TtsConfig;
+
+    #[test]
+    fn tts_tool_names_elevenlabs_output_mp3() {
+        let mut tts = TtsConfig {
+            provider: "elevenlabs".to_string(),
+            ..Default::default()
+        };
+        tts.elevenlabs.output_format = "opus".to_string();
+        let path = default_output_path(std::path::Path::new("/cache"), &tts);
+        assert_eq!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("mp3"),
+            "ElevenLabs always returns MP3 bytes; the file must not be named .opus: {path:?}"
+        );
+        assert!(path.starts_with("/cache"));
     }
 }

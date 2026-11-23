@@ -70,10 +70,17 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Build release binary
-        run: cargo build --release --bin ironhermes
+      # Phase 57 (D-02): the security sidecar ships from the SAME build as the main
+      # binary, so the two can never drift apart. With the default DEFCON level 3 a
+      # missing sidecar blocks terminal/execute_code (D-12).
+      - name: Build release binaries
+        run: cargo build --release --bin ironhermes --bin ironhermes-tirith
 
-      - name: Sign binary (macOS only)
+      # T-57-62: refuse to publish a sidecar that is not the pinned tirith-core.
+      - name: Check sidecar pin
+        run: target/release/ironhermes-tirith --version | grep -q 'tirith-core 0.4.2'
+
+      - name: Sign binaries (macOS only)
         if: runner.os == 'macOS'
         run: |
           # Phase 37.1: ad-hoc sign (no Apple Developer account yet — D-07 deferred)
@@ -94,13 +101,45 @@ jobs:
           # The quarantine-strip in install.sh (xattr -d com.apple.quarantine) can
           # remain as a no-op safety net once notarization is active.
           codesign -s - target/release/ironhermes
+          codesign -s - target/release/ironhermes-tirith
 
+      # The sidecar is AGPL-3.0-only (it links tirith-core), so its LICENSE and a
+      # NOTICE carrying the source link travel in the same tarball (D-01, Pitfall 11).
+      # install.sh copies the two files next to the installed sidecar.
       - name: Package tarball
         run: |
           cp target/release/ironhermes ironhermes
-          tar czf ${{ matrix.artifact }}.tar.gz ironhermes
+          cp target/release/ironhermes-tirith ironhermes-tirith
+          cp crates/ironhermes-tirith/LICENSE LICENSE-AGPL-ironhermes-tirith
+          cp crates/ironhermes-tirith/NOTICE NOTICE-ironhermes-tirith
+          tar czf ${{ matrix.artifact }}.tar.gz ironhermes ironhermes-tirith LICENSE-AGPL-ironhermes-tirith NOTICE-ironhermes-tirith
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: ${{ matrix.artifact }}.tar.gz
+
+  # Bundled skills archive (phase 54.8, D-24): install.sh seeds ironhermes-skills.tar.gz
+  # (plus its .sha256) into $IRONHERMES_HOME/skills and optional-skills. It runs after
+  # `build` so the release already exists, and still runs when one platform leg fails.
+  # --check-history is deliberately NOT run here: the public repo's history is a series
+  # of showcase snapshots, so a regenerated manifest would differ from the committed
+  # (develop-derived) skills/.bundled-history by design. Freshness is enforced on develop
+  # at release time, before publishing.
+  skills:
+    name: Package bundled skills
+    needs: build
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Package skills archive
+        run: bash scripts/release/package-skills.sh dist
+
+      - name: Upload skills archive to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            dist/ironhermes-skills.tar.gz
+            dist/ironhermes-skills.tar.gz.sha256

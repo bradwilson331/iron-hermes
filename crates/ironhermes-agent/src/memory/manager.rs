@@ -22,6 +22,7 @@ use std::time::Duration;
 use ironhermes_core::config_schema::MemoryAction;
 use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider};
 use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
+use ironhermes_core::tier2::Tier2Handle;
 use ironhermes_core::types::{ChatMessage, ToolSchema};
 use tokio::sync::Mutex;
 
@@ -37,6 +38,10 @@ pub struct MemoryManager {
     /// rejected at the manager level so all code paths (tool, direct calls)
     /// respect the config toggle. Default: true.
     user_profile_enabled: bool,
+    /// Phase 58.2 D-10: optional Tier 2 handle. Deliberately NOT the `mirror` slot: the mirror is a
+    /// write-only observer of one event; Tier 2 re-reads the whole Tier 1 snapshot after each
+    /// successful write (D-03 "index, don't move") and is also a read surface (`memory_search`).
+    tier2: Option<Arc<dyn Tier2Handle>>,
 }
 
 impl MemoryManager {
@@ -57,7 +62,34 @@ impl MemoryManager {
             primary,
             mirror,
             user_profile_enabled: true,
+            tier2: None,
         })
+    }
+
+    /// Attach the Tier 2 handle (58.2 D-10).
+    pub fn set_tier2(&mut self, h: Arc<dyn Tier2Handle>) {
+        self.tier2 = Some(h);
+    }
+
+    pub fn tier2(&self) -> Option<Arc<dyn Tier2Handle>> {
+        self.tier2.clone()
+    }
+
+    /// Tier 1 snapshot for a Tier 2 sync, taken under the caller's primary guard so it reflects
+    /// exactly the write that just succeeded. `None` when no Tier 2 is attached.
+    fn tier2_snapshot(&self, p: &dyn MemoryProvider) -> Option<MemoryEntries> {
+        self.tier2.as_ref().map(|_| p.to_memory_entries())
+    }
+
+    /// Push the snapshot to Tier 2. Failure is logged and swallowed: the Tier 1 write already
+    /// succeeded and its result must reach the caller unchanged (D-03, T-58.2-04). The primary
+    /// guard is NOT held here.
+    async fn sync_tier2(&self, snapshot: Option<MemoryEntries>) {
+        if let (Some(t2), Some(entries)) = (&self.tier2, snapshot)
+            && let Err(e) = t2.sync_tier1(&entries).await
+        {
+            tracing::warn!(error = %e, "tier2 sync_tier1 failed; Tier 1 write succeeded");
+        }
     }
 
     /// Set whether the User profile target (USER.md) is enabled.
@@ -105,11 +137,17 @@ impl MemoryManager {
         }
 
         // 1. Run the write on the primary. Drop guard before mirror call.
-        let (outcome, action_target_content) = {
+        let (outcome, action_target_content, t2_snapshot) = {
             let mut p = self.primary.lock().await;
             let outcome = p.handle_tool_call(name, args.clone())?;
             let inferred = infer_action_target_content(name, &args);
-            (outcome, inferred)
+            // Only writes change Tier 1; a read-only action never syncs.
+            let snapshot = if inferred.is_some() {
+                self.tier2_snapshot(&*p)
+            } else {
+                None
+            };
+            (outcome, inferred, snapshot)
         };
 
         // 2. Fire the mirror if one is configured. Errors logged, not propagated.
@@ -142,6 +180,7 @@ impl MemoryManager {
             }
         }
 
+        self.sync_tier2(t2_snapshot).await;
         Ok(outcome)
     }
 
@@ -207,9 +246,10 @@ impl MemoryManager {
         }
 
         // 1. Run the write on the primary. Drop guard before mirror call.
-        let outcome = {
+        let (outcome, t2_snapshot) = {
             let mut p = self.primary.lock().await;
-            p.replace_at(target, idx, expected_text, new_content)?
+            let outcome = p.replace_at(target, idx, expected_text, new_content)?;
+            (outcome, self.tier2_snapshot(&*p))
         };
 
         // 2. Fire the mirror if one is configured (T-50.4-09c). The triple is
@@ -245,6 +285,7 @@ impl MemoryManager {
             }
         }
 
+        self.sync_tier2(t2_snapshot).await;
         Ok(outcome)
     }
 
@@ -262,9 +303,10 @@ impl MemoryManager {
                 .to_string());
         }
 
-        let outcome = {
+        let (outcome, t2_snapshot) = {
             let mut p = self.primary.lock().await;
-            p.remove_at(target, idx, expected_text)?
+            let outcome = p.remove_at(target, idx, expected_text)?;
+            (outcome, self.tier2_snapshot(&*p))
         };
 
         // `expected_text` is the `old_text` analog here: the body of the
@@ -299,6 +341,7 @@ impl MemoryManager {
             }
         }
 
+        self.sync_tier2(t2_snapshot).await;
         Ok(outcome)
     }
 
@@ -391,6 +434,10 @@ fn target_as_str(t: MemoryTarget) -> &'static str {
 impl ironhermes_tools::MemoryManagerHandle for MemoryManager {
     async fn handle_tool_call(&self, name: &str, args: serde_json::Value) -> MemoryResult {
         MemoryManager::handle_tool_call(self, name, args).await
+    }
+
+    fn tier2(&self) -> Option<Arc<dyn Tier2Handle>> {
+        MemoryManager::tier2(self)
     }
 }
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use ironhermes_core::MessageResponse;
+use ironhermes_core::{MessageResponse, Platform};
 
 // Phase 36.7.1 Plan 01 Task 3: `MessageHandler` and `PlatformAdapter` moved
 // to `ironhermes_core::adapter` so `ironhermes-restgw`'s `WebhookAdapter`
@@ -119,5 +119,70 @@ pub trait MediaSender: Send + Sync {
                     .await
             }
         }
+    }
+}
+
+/// A platform that can open (or reuse) a direct-message channel to a USER id and post
+/// into it. Discord and Slack implement it; both otherwise treat `send_message`'s
+/// `chat_id` as a channel id.
+#[async_trait]
+pub trait DirectMessageSender: Send + Sync {
+    fn platform(&self) -> Platform;
+
+    /// Post `content` to `user_id`'s DM with the bot. `user_id` is a user id, never a
+    /// channel id.
+    async fn send_direct_message(&self, user_id: &str, content: &str) -> Result<MessageResponse>;
+}
+
+/// The adapter an approval coordinator is bound to on Discord and Slack: every
+/// `send_message` target is a USER id and is delivered to that user's DM. The
+/// encoding is explicit (the coordinator's adapter type), not guessed from the id's
+/// shape, so an approval prompt can never be posted to a channel through it. Editing
+/// and deleting are unsupported because the coordinator only ever sends.
+pub struct DmOnlyAdapter<T: DirectMessageSender>(pub T);
+
+#[async_trait]
+impl<T: DirectMessageSender> PlatformAdapter for DmOnlyAdapter<T> {
+    fn platform(&self) -> Platform {
+        self.0.platform()
+    }
+
+    async fn send_message(
+        &self,
+        user_id: &str,
+        content: &str,
+        _thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        self.0.send_direct_message(user_id, content).await
+    }
+
+    async fn send_message_markdown_v2(
+        &self,
+        user_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        self.send_message(user_id, content, thread_id).await
+    }
+
+    async fn edit_message(&self, _chat_id: &str, _message_id: &str, _content: &str) -> Result<()> {
+        anyhow::bail!("DmOnlyAdapter does not support edit_message")
+    }
+
+    async fn edit_message_markdown_v2(
+        &self,
+        _chat_id: &str,
+        _message_id: &str,
+        _content: &str,
+    ) -> Result<()> {
+        anyhow::bail!("DmOnlyAdapter does not support edit_message_markdown_v2")
+    }
+
+    async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {
+        anyhow::bail!("DmOnlyAdapter does not support delete_message")
+    }
+
+    fn is_running(&self) -> bool {
+        false
     }
 }

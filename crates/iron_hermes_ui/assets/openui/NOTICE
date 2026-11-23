@@ -1,0 +1,54 @@
+THIRD-PARTY NOTICE: OpenUI renderer assets
+==========================================
+
+The files in this directory named openui-bundle.min.js and openui-styles.css are
+vendored, unmodified, from the npm package
+
+  @openuidev/browser-bundle@0.2.1
+  Source repository: github.com/thesysdev/openui
+  Copyright (c) 2011-2024 Thesys Inc.
+  Licence: MIT (full text in the LICENSE file next to this NOTICE)
+
+system-prompt.txt is generated offline by scripts/openui/gen-system-prompt.mjs from
+the component library of
+
+  @openuidev/react-ui@0.18.1      (MIT, Thesys Inc.)
+  @openuidev/react-lang@1.0.2     (MIT, Thesys Inc.)
+  @openuidev/lang-core@1.0.2      (MIT, Thesys Inc.)
+
+The minified bundle embeds NO licence banners of its own: it inlines React,
+React DOM, zod and the dependencies of the packages above. This NOTICE stands in
+for them. The production dependency closure of react-ui + react-lang + lang-core
++ react + react-dom + zod (210 packages, audited 2026-10-29, ADR-0007) is:
+
+  185  MIT
+   15  ISC            (for example lucide-react, d3-*)
+    1  BSD-2-Clause   (entities)
+    1  BSD-3-Clause   (highlight.js 10.7.3)
+    1  CC0-1.0        (highlightjs-vue 1.0.0)
+    1  0BSD           (tslib)
+    2  MIT, resolved by hand (@ag-ui/core, from its LICENSE file; format, from its
+       legacy "licenses" array)
+
+No copyleft licence (GPL, LGPL, AGPL, MPL, SSPL, CC-BY-SA) and no unlicensed
+package is in that closure. The MIT, ISC and BSD licences require the copyright
+and permission notice of each package to accompany redistributed copies; the
+notices are in each package's own LICENSE file in the upstream npm tarballs listed
+below, and the copyright holders are the authors named there.
+
+Integrity pins (SHA-256)
+------------------------
+
+npm tarballs (npm pack --ignore-scripts, 2026-10-29):
+  @openuidev/browser-bundle@0.2.1  d4a9915ff3053fa388ea69e8dd165382de77611f2b414dadb0609b9236f45d06
+  @openuidev/lang-core@1.0.2       165597c31b551f5321be09be36d5210f547a943cf0bb6c6132b8974d6cd5dbe0
+  @openuidev/react-lang@1.0.2      1619705a7b4e50ee235923d9311a63dcd297d64687b3e936bac7a71b31dc75fc
+  @openuidev/react-ui@0.18.1       db14d4c2477f7cef87903fef4ad5087bc37be9353701ea7ceddcf2c720689ac9
+
+vendored files (also enforced by a unit test in src/server/openui_route.rs):
+  openui-bundle.min.js  bba936ff93f31a2955460f40d80bcd329b6a5848d6a05df54427e5dd137181df
+  openui-styles.css     93b69b218203bd054a88b7c8821d6c0dc6944af38119ada37e8082e59c0a18f3
+
+To upgrade: install the new versions into a scratch directory with --ignore-scripts and
+OPENUI_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1, re-run the licence audit, re-run
+scripts/openui/gen-system-prompt.mjs, and update every hash above and in openui_route.rs.

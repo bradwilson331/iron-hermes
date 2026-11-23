@@ -3,8 +3,9 @@
 //! 49.5-04 (D-20).
 
 use anyhow::Result;
+use ironhermes_core::defcon::session_defcon;
 use ironhermes_core::{SkillRegistry, get_hermes_home};
-use ironhermes_cron::{CronJob, scan_cron_prompt};
+use ironhermes_cron::{CronJob, scan_cron_prompt_screened};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -248,9 +249,11 @@ async fn resolve_continuity(job: &CronJob) -> String {
 ///    read and cap as step 4, under its own previous-run header — D-20)
 /// 6. The user-supplied `job.prompt`
 ///
-/// After assembly, `ironhermes_cron::scan_cron_prompt` is called on the full
-/// assembled string.  A non-`None` `blocked_reason` means the caller SHOULD
-/// emit a BLOCKED delivery doc instead of running the agent.
+/// After assembly, `ironhermes_cron::scan_cron_prompt_screened` is called on the
+/// full assembled string: the regex floor first, then the detection sidecar
+/// (Phase 57 D-04a), at the process default DEFCON level. A non-`None`
+/// `blocked_reason` means the caller SHOULD emit a BLOCKED delivery doc instead
+/// of running the agent.
 pub async fn build_job_prompt(
     job: &CronJob,
     script_output: Option<&str>,
@@ -283,7 +286,12 @@ pub async fn build_job_prompt(
 
     // Post-assembly threat rescan — operates on the FULL assembled view so
     // injection hidden in skill content or context_from blocks is caught.
-    let blocked_reason = scan_cron_prompt(&assembled).err();
+    let blocked_reason = scan_cron_prompt_screened(
+        &assembled,
+        session_defcon().process_default(),
+        &job_label(job),
+    )
+    .err();
 
     Ok(AssembledPrompt {
         system_addendum: String::new(),
@@ -292,12 +300,24 @@ pub async fn build_job_prompt(
     })
 }
 
+/// The label a blocked job is reported under (UI-SPEC R6): the job's name,
+/// trimmed, or its id when the name is empty. Never any prompt text.
+fn job_label(job: &CronJob) -> String {
+    let name = job.name.trim();
+    if name.is_empty() {
+        job.id.clone()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Convenience wrapper: re-scan an already-assembled prompt string.
 ///
 /// Returns the scanner's verdict (`Some(reason)` if blocked, `None` if clean).
-/// This runs AFTER the five-step assembly, not before.
-pub fn scan_assembled(assembled: &str) -> Option<String> {
-    scan_cron_prompt(assembled).err()
+/// This runs AFTER the five-step assembly, not before. `job_label` is the
+/// label a blocked run is reported under (see [`job_label`]).
+pub fn scan_assembled(assembled: &str, job_label: &str) -> Option<String> {
+    scan_cron_prompt_screened(assembled, session_defcon().process_default(), job_label).err()
 }
 
 // ---------------------------------------------------------------------------
@@ -983,12 +1003,20 @@ mod tests {
 
         let self_output_dir = tmp.path().join("cron").join("output").join(&job.id);
         fs::create_dir_all(&self_output_dir).unwrap();
-        fs::write(self_output_dir.join("20260515_120000_000.md"), "self output").unwrap();
+        fs::write(
+            self_output_dir.join("20260515_120000_000.md"),
+            "self output",
+        )
+        .unwrap();
 
         let other_uuid = Uuid::new_v4().to_string();
         let other_output_dir = tmp.path().join("cron").join("output").join(&other_uuid);
         fs::create_dir_all(&other_output_dir).unwrap();
-        fs::write(other_output_dir.join("20260515_120000_000.md"), "other output").unwrap();
+        fs::write(
+            other_output_dir.join("20260515_120000_000.md"),
+            "other output",
+        )
+        .unwrap();
         job.context_from = Some(vec![other_uuid.clone()]);
 
         let _guard = env_lock().lock().await;

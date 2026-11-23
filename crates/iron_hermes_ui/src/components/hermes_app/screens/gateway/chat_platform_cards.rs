@@ -53,8 +53,6 @@ use crate::server::platform_config_api::{
 use crate::server::tools_config_api::ConfigScope;
 use dioxus::prelude::*;
 
-use super::chat_config_form::ChatConfigForm;
-
 /// Which of the four chat platforms a card/form instance targets — shared
 /// across `chat_platform_cards.rs`, `chat_config_form.rs`, and
 /// `whitelist_editor.rs` (the per-platform ID-format hint) so no file
@@ -80,67 +78,13 @@ impl ChatPlatformKind {
     }
 }
 
-/// The four chat platform cards, plus the (at most one) open CONFIGURE
-/// form. `open_configure` is `None` when no form is open — clicking
-/// CONFIGURE on any card sets it to that platform, closing whichever
-/// other form (if any) was open (only one form is ever mounted at a time).
-#[component]
-pub fn ChatPlatformCards(
-    scope: ReadSignal<ConfigScope>,
-    refresh_tick: Signal<u32>,
-    platform_status: Option<PlatformStatusMap>,
-) -> Element {
-    // ALL hooks register unconditionally on every render (Pattern E).
-    let open_configure: Signal<Option<ChatPlatformKind>> = use_signal(|| None);
-
-    rsx! {
-        TelegramCard {
-            scope,
-            refresh_tick,
-            platform_status: platform_status.clone(),
-            open_configure,
-        }
-        DiscordCard {
-            scope,
-            refresh_tick,
-            platform_status: platform_status.clone(),
-            open_configure,
-        }
-        SlackCard {
-            scope,
-            refresh_tick,
-            platform_status: platform_status.clone(),
-            open_configure,
-        }
-        BuzzCard {
-            scope,
-            refresh_tick,
-            platform_status: platform_status.clone(),
-            open_configure,
-        }
-        if let Some(kind) = *open_configure.read() {
-            ChatConfigForm {
-                kind,
-                scope,
-                refresh_tick,
-                on_close: {
-                    let mut open_configure_sig = open_configure;
-                    move |_: ()| {
-                        open_configure_sig.set(None);
-                    }
-                },
-            }
-        }
-    }
-}
-
 // =============================================================================
 // Per-platform data components — each owns its own resource + toggle-write
 // state, then renders through the shared `PlatformCardShell`.
 // =============================================================================
 
 #[component]
-fn TelegramCard(
+pub(super) fn TelegramCard(
     scope: ReadSignal<ConfigScope>,
     refresh_tick: Signal<u32>,
     platform_status: Option<PlatformStatusMap>,
@@ -226,7 +170,7 @@ fn TelegramCard(
 }
 
 #[component]
-fn DiscordCard(
+pub(super) fn DiscordCard(
     scope: ReadSignal<ConfigScope>,
     refresh_tick: Signal<u32>,
     platform_status: Option<PlatformStatusMap>,
@@ -312,7 +256,7 @@ fn DiscordCard(
 }
 
 #[component]
-fn SlackCard(
+pub(super) fn SlackCard(
     scope: ReadSignal<ConfigScope>,
     refresh_tick: Signal<u32>,
     platform_status: Option<PlatformStatusMap>,
@@ -398,7 +342,7 @@ fn SlackCard(
 }
 
 #[component]
-fn BuzzCard(
+pub(super) fn BuzzCard(
     scope: ReadSignal<ConfigScope>,
     refresh_tick: Signal<u32>,
     platform_status: Option<PlatformStatusMap>,

@@ -78,6 +78,78 @@ pub struct ApprovalPendingInfo {
     pub arguments: String,
 }
 
+// ── Approve-path outcome -> the ONE function_call_output (D-05b) ─────────────
+//
+// Debug session web-extract-hangs-60s (round 2). The Approve handler used to match
+// `Ok(Output) | Ok(Rejected) | Ok(_) | Err(_)` and send NOTHING for the last two, so
+// with `autonomous.yolo: false` a failing approved tool (then an HTTP 500 -> `Err`)
+// left the model waiting for a function_call_output forever — a silent avatar.
+//
+// This function is TOTAL over the outcomes and always returns the string to send, so
+// "exactly one output per call_id on every path" (D-05b) is a property of the type,
+// not of four hand-written match arms. Target-independent so it is natively tested.
+
+// ── SDP calls request shape (Phase 54.7 D-12) ────────────────────────────────
+
+/// How the browser POSTs its SDP offer to the server-provided `calls_url`.
+///
+/// Pure and target-independent so the branch choice is natively tested; only
+/// the request construction (headers / `FormData`) is wasm-only.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CallsRequestKind {
+    /// `Authorization: Bearer <ephemeral token>` + `Content-Type: application/sdp`
+    /// with the raw offer as the body -- the shape used with OpenAI today.
+    BearerSdp,
+    /// Keyless (no token): `multipart/form-data` with an `sdp` part (the offer)
+    /// and a `session` part (the full session JSON). No Authorization header and
+    /// no explicit Content-Type, so the browser sets the multipart boundary.
+    /// UAT-unverified against a non-OpenAI server (Open Question 2).
+    MultipartSdpSession,
+    /// Neither a token nor a session: raw SDP with no Authorization header.
+    PlainSdp,
+}
+
+/// Pick the calls request shape from what `issue_realtime_token` returned. A
+/// token always wins, so the Bearer path never also sends the session.
+pub fn calls_request_kind(
+    token: &Option<String>,
+    session_json: &Option<String>,
+) -> CallsRequestKind {
+    match (token, session_json) {
+        (Some(_), _) => CallsRequestKind::BearerSdp,
+        (None, Some(_)) => CallsRequestKind::MultipartSdpSession,
+        (None, None) => CallsRequestKind::PlainSdp,
+    }
+}
+
+/// The `function_call_output` string to send after `realtime_approve(.., true)`.
+///
+/// - `Output` -> the tool result (or the server's `tool_failed` payload — see
+///   `server::api::realtime_tool_error_output`).
+/// - `Rejected` -> `{"error": reason}` (turn ended / cancelled while the card was up).
+/// - `ApprovalPending` -> an `unexpected_response` error payload (`realtime_approve`
+///   resolves a pending call and never returns this, but the model must still be answered).
+/// - `Err` (transport / server fault) -> a `server_error` payload naming the tool and
+///   the cause, in the same self-describing shape as a server-side tool failure.
+pub fn approve_outcome_output<E: std::fmt::Display>(
+    outcome: Result<crate::server::api::RealtimeToolResult, E>,
+    tool_name: &str,
+) -> String {
+    use crate::server::api::{realtime_tool_error_output, RealtimeToolResult};
+    match outcome {
+        Ok(RealtimeToolResult::Output { output }) => output,
+        Ok(RealtimeToolResult::Rejected { reason }) => {
+            serde_json::json!({ "error": reason }).to_string()
+        }
+        Ok(RealtimeToolResult::ApprovalPending { .. }) => realtime_tool_error_output(
+            "unexpected_response",
+            Some(tool_name),
+            "approval flow returned an unexpected result",
+        ),
+        Err(e) => realtime_tool_error_output("server_error", Some(tool_name), &e.to_string()),
+    }
+}
+
 // ── Single shared DataChannel send helper (D-05b) ────────────────────────────
 //
 // The ONLY site that emits function_call_output + response.create into the
@@ -409,6 +481,11 @@ pub async fn start_realtime_session(
         })?;
     // Extract owned values before any await (Pattern B — no borrow across .await).
     let token = token_result.token;
+    // Phase 54.7 (D-10/D-12): the SDP offer goes to the server-provided calls URL
+    // (`{realtime.base_url}/realtime/calls`), never a hard-coded address.
+    let calls_url = token_result.calls_url;
+    // Keyless path (D-12): the full session JSON, sent as the `session` part.
+    let session_json = token_result.session_json;
     let turn_id_str = token_result.turn_id;
     // session_id is the turn-derived realtime id (internal use only post RC-1).
     let session_id_str = token_result.session_id;
@@ -878,6 +955,9 @@ pub async fn start_realtime_session(
                                                 let tid = turn_id_for_msg.clone();
                                                 let cid = call_id.clone();
                                                 let name_c = fn_name.clone();
+                                                // Kept for the transport-failure payload below: `name_c`
+                                                // is moved into the server-fn call.
+                                                let name_for_err = fn_name.clone();
                                                 let args_c = arguments.clone();
                                                 let dc_relay = dc_for_msg.clone();
                                                 // Clone the signal values (Copy of the pointer)
@@ -951,10 +1031,20 @@ pub async fn start_realtime_session(
                                                                     .into(),
                                                                 );
                                                                 // Send error output so model is not left hung.
-                                                                let error_output = serde_json::json!({
-                                                                    "error": "server_error"
-                                                                })
-                                                                .to_string();
+                                                                //
+                                                                // Tool failures no longer land here (the server now
+                                                                // returns them as an `Output` payload); this arm is
+                                                                // for genuine relay failures (network drop, invalid
+                                                                // turn_id, malformed args, server panic). It used to
+                                                                // send the constant `{"error":"server_error"}` —
+                                                                // answered, but with no tool name, no cause, and no
+                                                                // hint that the model could recover. Use the same
+                                                                // self-describing shape the server uses.
+                                                                let error_output = crate::server::api::realtime_tool_error_output(
+                                                                    "server_error",
+                                                                    Some(&name_for_err),
+                                                                    &e.to_string(),
+                                                                );
                                                                 send_function_call_output(&dc_relay, &cid, &error_output);
                                                                 // D-05a: clear in-flight badge on server error.
                                                                 in_flight.set(false);
@@ -1088,40 +1178,70 @@ pub async fn start_realtime_session(
         .and_then(|v| v.as_string())
         .ok_or_else(|| wasm_bindgen::JsValue::from_str("no sdp in offer"))?;
 
-    // POST SDP to OpenAI Realtime calls endpoint.
-    // Per docs: POST https://api.openai.com/v1/realtime/calls
-    // Authorization: Bearer {ephemeral_token}, Content-Type: application/sdp
-    let headers = web_sys::Headers::new().map_err(|e| {
-        web_sys::console::warn_1(&format!("[realtime_session] Headers::new: {e:?}").into());
-        e
-    })?;
-    let auth_header = format!("Bearer {token}");
-    headers.set("Authorization", &auth_header).map_err(|e| {
-        web_sys::console::warn_1(&format!("[realtime_session] auth header: {e:?}").into());
-        e
-    })?;
-    headers
-        .set("Content-Type", "application/sdp")
-        .map_err(|e| {
-            web_sys::console::warn_1(
-                &format!("[realtime_session] content-type header: {e:?}").into(),
-            );
-            e
-        })?;
-
+    // POST SDP to the realtime calls endpoint (`calls_url`, from the mint result).
+    // Shape follows what the mint returned (D-12), see `calls_request_kind`:
+    //   BearerSdp           -> Authorization: Bearer {ephemeral_token} + application/sdp
+    //   MultipartSdpSession -> keyless: multipart `sdp` + `session` parts, NO
+    //                          Authorization and NO explicit Content-Type (the
+    //                          browser sets the multipart boundary itself)
+    //   PlainSdp            -> application/sdp, no Authorization
     let request_init = web_sys::RequestInit::new();
     request_init.set_method("POST");
-    request_init.set_headers(&headers);
-    request_init.set_body(&wasm_bindgen::JsValue::from_str(&sdp_str));
+    match calls_request_kind(&token, &session_json) {
+        CallsRequestKind::MultipartSdpSession => {
+            let form = web_sys::FormData::new().map_err(|e| {
+                web_sys::console::warn_1(
+                    &format!("[realtime_session] FormData::new: {e:?}").into(),
+                );
+                e
+            })?;
+            form.append_with_str("sdp", &sdp_str).map_err(|e| {
+                web_sys::console::warn_1(&format!("[realtime_session] form sdp: {e:?}").into());
+                e
+            })?;
+            form.append_with_str("session", session_json.as_deref().unwrap_or("{}"))
+                .map_err(|e| {
+                    web_sys::console::warn_1(
+                        &format!("[realtime_session] form session: {e:?}").into(),
+                    );
+                    e
+                })?;
+            request_init.set_body(form.as_ref());
+        }
+        kind => {
+            let headers = web_sys::Headers::new().map_err(|e| {
+                web_sys::console::warn_1(&format!("[realtime_session] Headers::new: {e:?}").into());
+                e
+            })?;
+            if kind == CallsRequestKind::BearerSdp {
+                if let Some(token) = token.as_deref() {
+                    let auth_header = format!("Bearer {token}");
+                    headers.set("Authorization", &auth_header).map_err(|e| {
+                        web_sys::console::warn_1(
+                            &format!("[realtime_session] auth header: {e:?}").into(),
+                        );
+                        e
+                    })?;
+                }
+            }
+            headers
+                .set("Content-Type", "application/sdp")
+                .map_err(|e| {
+                    web_sys::console::warn_1(
+                        &format!("[realtime_session] content-type header: {e:?}").into(),
+                    );
+                    e
+                })?;
+            request_init.set_headers(&headers);
+            request_init.set_body(&wasm_bindgen::JsValue::from_str(&sdp_str));
+        }
+    }
 
-    let request = web_sys::Request::new_with_str_and_init(
-        "https://api.openai.com/v1/realtime/calls",
-        &request_init,
-    )
-    .map_err(|e| {
-        web_sys::console::warn_1(&format!("[realtime_session] Request::new: {e:?}").into());
-        e
-    })?;
+    let request =
+        web_sys::Request::new_with_str_and_init(&calls_url, &request_init).map_err(|e| {
+            web_sys::console::warn_1(&format!("[realtime_session] Request::new: {e:?}").into());
+            e
+        })?;
 
     let response_val = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -1514,7 +1634,7 @@ mod tests {
     // added instructions+tools to the data-channel session.update and pushed it
     // to 480,128 measured bytes (1.83x the 262,144-byte limit).
 
-    use super::{RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES, check_data_channel_payload_size};
+    use super::{check_data_channel_payload_size, RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES};
 
     #[test]
     fn size_guard_accepts_small_audio_only_payload() {
@@ -1599,6 +1719,121 @@ mod tests {
             result,
             Err(RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES + 1),
             "one byte over the limit must be rejected with the exact length"
+        );
+    }
+}
+
+// ── Native unit tests for approve_outcome_output (D-05b: one output, every path) ──
+
+#[cfg(test)]
+mod approve_outcome_tests {
+    use super::approve_outcome_output;
+    use crate::server::api::RealtimeToolResult;
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s)
+            .expect("approve outcome output must always be valid JSON or a tool result")
+    }
+
+    /// THE hang: `Err(_)` used to send nothing. It must now yield a payload naming the
+    /// tool and the cause so the model is answered and can recover.
+    #[test]
+    fn server_error_is_answered_with_a_self_describing_payload() {
+        let out = approve_outcome_output::<String>(
+            Err("error running server function: tool dispatch error: boom".to_string()),
+            "web_answer",
+        );
+        let v = parse(&out);
+        assert_eq!(v["error"], "server_error");
+        assert_eq!(v["tool"], "web_answer");
+        assert!(v["reason"].as_str().unwrap_or_default().contains("boom"));
+        assert!(!v["hint"].as_str().unwrap_or_default().is_empty());
+    }
+
+    /// The other silent arm: an unexpected `ApprovalPending` from `realtime_approve`.
+    #[test]
+    fn unexpected_approval_pending_is_answered_not_dropped() {
+        let out = approve_outcome_output::<String>(
+            Ok(RealtimeToolResult::ApprovalPending {
+                call_id: "c1".into(),
+                tool_name: "web_answer".into(),
+                arguments: "{}".into(),
+            }),
+            "web_answer",
+        );
+        let v = parse(&out);
+        assert_eq!(v["error"], "unexpected_response");
+        assert_eq!(v["tool"], "web_answer");
+    }
+
+    /// Controls: the two arms that already worked keep their exact behavior.
+    #[test]
+    fn output_passes_through_and_rejected_keeps_the_error_shape() {
+        assert_eq!(
+            approve_outcome_output::<String>(
+                Ok(RealtimeToolResult::Output {
+                    output: "RESULT".into()
+                }),
+                "t",
+            ),
+            "RESULT"
+        );
+        let v = parse(&approve_outcome_output::<String>(
+            Ok(RealtimeToolResult::Rejected {
+                reason: "turn cancelled".into(),
+            }),
+            "t",
+        ));
+        assert_eq!(v["error"], "turn cancelled");
+    }
+}
+
+// Phase 54.7 Plan 11 (D-10/D-12): the browser POSTs its SDP offer to the
+// server-provided calls URL; the api.openai.com literal is gone.
+#[cfg(test)]
+mod calls_url_tests {
+    use super::{calls_request_kind, CallsRequestKind};
+
+    /// D-12: the SDP POST shape follows from what the mint returned.
+    #[test]
+    fn calls_request_kind_selects_branch() {
+        assert_eq!(
+            calls_request_kind(&Some("ek".to_string()), &None),
+            CallsRequestKind::BearerSdp
+        );
+        assert_eq!(
+            calls_request_kind(&None, &Some("{}".to_string())),
+            CallsRequestKind::MultipartSdpSession
+        );
+        assert_eq!(calls_request_kind(&None, &None), CallsRequestKind::PlainSdp);
+        // A token always wins: the Bearer path never also sends the session.
+        assert_eq!(
+            calls_request_kind(&Some("ek".to_string()), &Some("{}".to_string())),
+            CallsRequestKind::BearerSdp
+        );
+    }
+
+    /// UI-SPEC Interaction Rule 4: connection values come from the mint
+    /// response (resolved from saved config), not from a hard-coded address.
+    #[test]
+    fn realtime_session_uses_server_calls_url() {
+        let src = include_str!("realtime_session.rs");
+        let needle = ["https://api.openai.com/v1", "/realtime/calls"].concat();
+        assert!(
+            !src.contains(&needle),
+            "the hard-coded OpenAI calls URL must be gone"
+        );
+        // Needles are assembled so this test's own source never satisfies them.
+        let from_result = ["token_result", ".calls_url"].concat();
+        assert!(
+            src.contains(&from_result),
+            "the calls URL must come from the mint result"
+        );
+        let squashed: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        let fetch_arg = ["new_with_str_and_init(&calls", "_url,"].concat();
+        assert!(
+            squashed.contains(&fetch_arg),
+            "the SDP fetch must use the server-provided calls_url"
         );
     }
 }

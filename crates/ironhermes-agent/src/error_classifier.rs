@@ -184,7 +184,7 @@ const DETAIL_TRUNCATION_MARKER: &str = " …[truncated]";
 /// Truncate `s` to at most `max_chars` **characters** (never a byte index —
 /// a byte-index cut of multi-byte text panics), appending
 /// [`DETAIL_TRUNCATION_MARKER`] only when truncation actually occurred.
-fn truncate_chars_with_marker(s: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars_with_marker(s: &str, max_chars: usize) -> String {
     let mut out: String = s.chars().take(max_chars).collect();
     if s.chars().count() > max_chars {
         out.push_str(DETAIL_TRUNCATION_MARKER);
@@ -312,6 +312,16 @@ pub fn classify_llm_error_typed(err: &anyhow::Error) -> ProviderError {
         };
     }
 
+    // No HTTP status: the in-stream SSE error path carries the provider's
+    // machine code without a status (Phase 58.3.1 D-06).
+    {
+        let lower = err_str.to_lowercase();
+        if lower.contains("context_length_exceeded") || lower.contains("exceed_context_size_error")
+        {
+            return ProviderError::ContextLength;
+        }
+    }
+
     // No HTTP status — check transport markers via the existing helper.
     if AgentLoop::is_transport_failure(&err_str) {
         return ProviderError::Transport;
@@ -375,6 +385,68 @@ fn parse_retry_after(err_str: &str) -> Option<Duration> {
     None
 }
 
+/// Numbers a provider's context-overflow rejection carries (Phase 58.3.1 D-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextOverflow {
+    /// The model's real window, when the error text states one.
+    pub window: Option<usize>,
+    /// The size the provider counted for the rejected request.
+    pub requested: Option<usize>,
+}
+
+/// Digits immediately after `marker` (optional whitespace between), else None.
+fn digits_after(lower: &str, marker: &str) -> Option<usize> {
+    let idx = lower.find(marker)?;
+    let digits: String = lower[idx + marker.len()..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Digits immediately before `marker`, else None.
+fn digits_before(lower: &str, marker: &str) -> Option<usize> {
+    let idx = lower.find(marker)?;
+    let rev: String = lower[..idx]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    rev.chars().rev().collect::<String>().parse().ok()
+}
+
+/// Learn the window and the provider-counted size from an overflow error text.
+///
+/// No regex (same digit-scan style as `parse_retry_after`). The text is
+/// untrusted: only marker-adjacent digits are read, a window must lie in
+/// `1_024..=MAX_PLAUSIBLE_CONTEXT_LENGTH` and a requested size in
+/// `1..=MAX_PLAUSIBLE_CONTEXT_LENGTH`; anything else is `None`.
+pub fn parse_context_overflow(err_text: &str) -> ContextOverflow {
+    use ironhermes_core::constants::MAX_PLAUSIBLE_CONTEXT_LENGTH as MAX;
+    let lower = err_text.to_lowercase();
+    let window = [
+        digits_before(&lower, "-token context window"),
+        digits_after(&lower, "available context size ("),
+        digits_after(&lower, "maximum context length is "),
+        digits_after(&lower, "loaded with context length of only "),
+        digits_after(&lower, "\"n_ctx\":"),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|w| (1_024..=MAX).contains(w));
+    let requested = [
+        digits_before(&lower, " tokens exceeds"),
+        digits_after(&lower, "request ("),
+        digits_after(&lower, "resulted in "),
+        digits_after(&lower, "\"n_prompt_tokens\":"),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|r| (1..=MAX).contains(r));
+    ContextOverflow { window, requested }
+}
+
 /// Disambiguate HTTP 400 by message contents (Anthropic / OpenRouter /
 /// llama.cpp / OAuth beta sub-cases).
 fn classify_400_subcases(err_str: &str) -> ProviderError {
@@ -384,6 +456,11 @@ fn classify_400_subcases(err_str: &str) -> ProviderError {
         || lower.contains("maximum context length")
         || (lower.contains("context") && lower.contains("too long"))
         || (lower.contains("context") && lower.contains("overflow"))
+        || lower.contains("exceed_context_size_error")
+        || lower.contains("context size")
+        || lower.contains("context window")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("n_ctx")
     {
         return ProviderError::ContextLength;
     }

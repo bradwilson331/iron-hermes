@@ -548,3 +548,72 @@ fn test_400_multimodal_tool_content_unsupported() {
     let result = classify_llm_error_typed(&err);
     assert!(matches!(result, ProviderError::ToolError), "got {result:?}");
 }
+
+// =========================================================================
+// Phase 58.3.1 D-06: learn the window from a context-overflow error text.
+// =========================================================================
+use ironhermes_agent::error_classifier::{ContextOverflow, parse_context_overflow};
+
+#[test]
+fn context_overflow_parses_observed_8192_shape() {
+    let o = parse_context_overflow(
+        "Streaming chat completion failed (400 Bad Request): {\"error\":{\"message\":\"Message too long: 27652 tokens exceeds the 8192-token context window. Try increasing the Context Length in Model settings, or shorten the conversation.\",\"code\":\"context_length_exceeded\"}}",
+    );
+    assert_eq!(o.window, Some(8192));
+    assert_eq!(o.requested, Some(27652));
+}
+
+#[test]
+fn context_overflow_parses_llamacpp_lmstudio_openai_shapes() {
+    let o = parse_context_overflow(r#"{"error":{"n_ctx": 4096,"n_prompt_tokens":5000}}"#);
+    assert_eq!((o.window, o.requested), (Some(4096), Some(5000)));
+
+    let o = parse_context_overflow(
+        "request (5000 tokens) exceeds the available context size (4096 tokens), try increasing it",
+    );
+    assert_eq!((o.window, o.requested), (Some(4096), Some(5000)));
+
+    let o = parse_context_overflow("the model is loaded with context length of only 4096 tokens");
+    assert_eq!((o.window, o.requested), (Some(4096), None));
+
+    let o = parse_context_overflow(
+        "This model's maximum context length is 16384 tokens. However, your messages resulted in 20000 tokens",
+    );
+    assert_eq!((o.window, o.requested), (Some(16384), Some(20000)));
+}
+
+#[test]
+fn context_overflow_no_number_returns_none_window() {
+    assert_eq!(
+        parse_context_overflow("context length exceeded"),
+        ContextOverflow::default()
+    );
+}
+
+#[test]
+fn context_overflow_rejects_implausible_numbers() {
+    for w in ["0", "500", "99999999", "99999999999999999999999999"] {
+        let o = parse_context_overflow(&format!("a {w}-token context window"));
+        assert_eq!(o.window, None, "window {w} must be rejected");
+    }
+    // requested is bounded too
+    let o = parse_context_overflow("99999999 tokens exceeds the 8192-token context window");
+    assert_eq!((o.window, o.requested), (Some(8192), None));
+}
+
+#[test]
+fn classify_exceed_context_size_error_is_context_length() {
+    let err = anyhow::anyhow!(
+        "Streaming chat completion failed (400 Bad Request): {{\"error\":{{\"type\":\"exceed_context_size_error\",\"message\":\"request exceeds the available context size\"}}}}"
+    );
+    assert!(matches!(
+        classify_llm_error_typed(&err),
+        ProviderError::ContextLength
+    ));
+    // In-stream SSE errors arrive with no HTTP status.
+    let err = anyhow::anyhow!("provider error: context_length_exceeded");
+    assert!(matches!(
+        classify_llm_error_typed(&err),
+        ProviderError::ContextLength
+    ));
+}

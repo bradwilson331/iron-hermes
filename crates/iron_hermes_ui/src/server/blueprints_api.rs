@@ -265,7 +265,13 @@ fn create_from_blueprint_in_store(
     // Injection scan before persist — same safeguard schedules_api.rs applies to
     // the manual create/edit path; a blueprint fill is no less arbitrary once a
     // slot value reaches prompt_template.
-    ironhermes_cron::scan_cron_prompt(&filled.prompt)?;
+    // Now also the detection sidecar (Phase 57 D-04a); the blueprint's fixed title labels
+    // a block (UI-SPEC R6), never the slot text.
+    ironhermes_cron::scan_cron_prompt_screened(
+        &filled.prompt,
+        ironhermes_core::defcon::session_defcon().process_default(),
+        &filled.name,
+    )?;
     let parsed = ironhermes_cron::parse_schedule(&filled.schedule_expr)
         .map_err(|e| format!("Invalid schedule: {e}"))?;
     let display = crate::server::schedules_api::schedule_display_of(&parsed);
@@ -319,7 +325,13 @@ fn create_from_saved_blueprint_in_store(
     let prompt = bp.prompt.clone().unwrap_or_default();
     // Injection scan before persist — same safeguard every other create path
     // in this crate applies; see this function's own doc comment.
-    ironhermes_cron::scan_cron_prompt(&prompt)?;
+    // Now also the detection sidecar (Phase 57 D-04a); the saved blueprint's skill name
+    // labels a block (UI-SPEC R6). The job it would create is named the same way below.
+    ironhermes_cron::scan_cron_prompt_screened(
+        &prompt,
+        ironhermes_core::defcon::session_defcon().process_default(),
+        &record.name,
+    )?;
 
     let parsed = ironhermes_cron::parse_schedule(&bp.schedule)
         .map_err(|e| format!("Invalid schedule: {e}"))?;
@@ -513,6 +525,136 @@ mod blueprints_api_tests {
         )
         .expect("create second job");
         assert_ne!(row.id, row2.id, "two fills must produce two distinct job ids");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 57 D-04a: the detection sidecar screens blueprint prompts
+    // -------------------------------------------------------------------
+
+    /// A core-level screen that Blocks any text containing `CANARY-CRON`.
+    #[cfg(feature = "server")]
+    struct CanaryScreen;
+
+    #[cfg(feature = "server")]
+    impl ironhermes_core::content_screen::ContentScreen for CanaryScreen {
+        fn screen(
+            &self,
+            req: &ironhermes_core::content_screen::ContentScreenRequest<'_>,
+        ) -> ironhermes_core::content_screen::ContentScreenOutcome {
+            use ironhermes_core::content_screen::{ContentScreenOutcome, ScreenVerdict};
+            let hit = req.text.contains("CANARY-CRON");
+            ContentScreenOutcome {
+                verdict: if hit {
+                    ScreenVerdict::Block
+                } else {
+                    ScreenVerdict::Allow
+                },
+                rules: if hit {
+                    vec!["FakeBlock".to_string()]
+                } else {
+                    Vec::new()
+                },
+                max_severity: hit.then(|| "CRITICAL".to_string()),
+                unavailable: None,
+            }
+        }
+    }
+
+    /// Points `IRONHERMES_HOME` at a temp dir (screening writes audit rows there) and
+    /// installs [`CanaryScreen`]; restores both on drop. Tests run `--test-threads=1`.
+    #[cfg(feature = "server")]
+    struct ScreenGuard {
+        _home: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(feature = "server")]
+    impl ScreenGuard {
+        fn new() -> Self {
+            let home = tempfile::tempdir().expect("tempdir");
+            let prev = std::env::var_os("IRONHERMES_HOME");
+            // SAFETY: this crate's tests run with `--test-threads=1`.
+            unsafe { std::env::set_var("IRONHERMES_HOME", home.path()) };
+            ironhermes_core::content_screen::install_content_screen(std::sync::Arc::new(
+                CanaryScreen,
+            ));
+            Self { _home: home, prev }
+        }
+    }
+
+    #[cfg(feature = "server")]
+    impl Drop for ScreenGuard {
+        fn drop(&mut self) {
+            ironhermes_core::content_screen::clear_content_screen_for_tests();
+            // SAFETY: see `new`.
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("IRONHERMES_HOME", v) },
+                None => unsafe { std::env::remove_var("IRONHERMES_HOME") },
+            }
+        }
+    }
+
+    /// A slot value that reaches the prompt is screened before anything is persisted, and
+    /// the blocked job is labelled with the blueprint's fixed title (never the slot text).
+    #[test]
+    #[cfg(feature = "server")]
+    fn blueprint_fill_refuses_screened_prompt() {
+        let _g = ScreenGuard::new();
+        let mut rx = ironhermes_core::subscribe_security_events();
+        let (_dir, mut store) = tmp_store();
+        let values: std::collections::BTreeMap<String, String> =
+            [("topic".to_string(), "CANARY-CRON".to_string())]
+                .into_iter()
+                .collect();
+
+        let err = create_from_blueprint_in_store(
+            &mut store,
+            "news-digest",
+            values,
+            None,
+            false,
+            "default",
+        )
+        .expect_err("a screened prompt must be refused");
+
+        assert!(err.contains("security screen"), "got: {err}");
+        assert!(store.list_jobs().is_empty(), "a refused fill writes nothing");
+        let event = rx.try_recv().expect("a JobBlocked event is published");
+        assert_eq!(event.kind, ironhermes_core::SecurityEventKind::JobBlocked);
+        assert_eq!(event.summary, "Topic news digest");
+        assert!(!event.summary.contains("CANARY-CRON"));
+    }
+
+    /// The saved-blueprint path screens the captured prompt and labels the block with the
+    /// blueprint skill name.
+    #[test]
+    #[cfg(feature = "server")]
+    fn saved_blueprint_refuses_screened_prompt() {
+        let _g = ScreenGuard::new();
+        let mut rx = ironhermes_core::subscribe_security_events();
+        let (_tmp_skills_dir, skills_dir, _registry) = registry_with_skills_dir();
+        write_blueprint_skill(
+            &skills_dir,
+            "canary-bp",
+            "      schedule: \"every 30m\"\n      prompt: \"Digest CANARY-CRON\"\n",
+        );
+        let registry = reload(&skills_dir);
+        let (_dir, mut store) = tmp_store();
+
+        let err = create_from_saved_blueprint_in_store(
+            &registry,
+            &mut store,
+            "canary-bp",
+            None,
+            false,
+            "default",
+        )
+        .expect_err("a screened prompt must be refused");
+
+        assert!(err.contains("security screen"), "got: {err}");
+        assert!(store.list_jobs().is_empty());
+        let event = rx.try_recv().expect("a JobBlocked event is published");
+        assert_eq!(event.summary, "canary-bp");
     }
 
     // -------------------------------------------------------------------

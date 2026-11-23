@@ -133,8 +133,9 @@ pub struct TurnRequest {
     /// Per-session trajectory writer (gateway). `None` = no trajectory capture.
     pub trajectory_writer:
         Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
-    /// Pre-built pressure tracker; `None` lets `attach_context_engine` make a
-    /// fresh one for the turn.
+    /// `None` uses the runtime's session-keyed tracker (once-per-session notice and
+    /// pressure hysteresis survive across turns). `Some` only for a caller that shares
+    /// its own tracker with other wiring (CLI REPL).
     pub pressure_tracker: Option<Arc<PressureTracker>>,
     /// State store for `session_search` tool interception (web). `None` skips it.
     pub state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
@@ -173,6 +174,17 @@ pub struct TurnRequest {
     /// `AgentRuntime::execute_code_tool_arc` for the underlying tool the closure
     /// wraps).
     pub execute_code_intercept: Option<ironhermes_tools::registry::InterceptHandler>,
+    /// Phase 54.3 D-03: flush-time delivery target for the per-turn yolo-bypass
+    /// notice. `run_turn` resolves `yolo_notifier.or(approval_gate)` and hands it the
+    /// ONE aggregated `notify_yolo_bypass_turn` at the end of the turn.
+    ///
+    /// It exists because the CLI's three `TurnRequest` literals and the TUI goal loop
+    /// deliberately leave `approval_gate` unset (their gate is built INSIDE the
+    /// intercept closures). Setting `approval_gate` there instead is forbidden by
+    /// `tests/turn_request_gating_sweep.rs`'s module doc: it would make `AgentLoop`'s
+    /// `NeedsApproval` arm start prompting on stdin mid-stream. This field is a
+    /// notice target ONLY — it is never consulted for an approval decision.
+    pub yolo_notifier: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>>,
 }
 
 /// Vision auto-routing (fix): true when any message carries inline image content
@@ -263,6 +275,11 @@ pub struct AgentRuntime {
     /// Phase 36.8 CR-01 (D-16): same capture as `write_file_tool_arc`, for
     /// `"patch"`.
     patch_tool_arc: Option<Arc<dyn ironhermes_tools::registry::Tool>>,
+    /// Once-per-session state (the D-05 compact notice, pressure hysteresis), keyed by
+    /// session id; used by `run_turn` when a `TurnRequest` carries no tracker.
+    // shortcut: one small struct per session id, never evicted for the process lifetime;
+    // upgrade to eviction on session end if a long-lived gateway shows growth.
+    pressure_tracker: Arc<PressureTracker>,
 }
 
 /// What `AgentRuntime::reload_skill_registry` changed, so callers can report it
@@ -447,6 +464,7 @@ impl AgentRuntime {
             execute_code_tool_arc,
             write_file_tool_arc,
             patch_tool_arc,
+            pressure_tracker: Arc::new(PressureTracker::new()),
         })
     }
 
@@ -635,6 +653,9 @@ impl AgentRuntime {
             session_intercept_installed = Some(req.session_id.clone());
         }
 
+        // Phase 58.3.1 D-10/D-12: ask a local server for its loaded window once per
+        // base_url+model, before the engine is sized from it.
+        ironhermes_core::observed_windows::probe_once(resolver.resolve_for_main()).await;
         let context_length = resolver.resolve_for_main().context_length();
 
         // ── Phase 36.15 Plan 04 (PROV-11): per-turn extras resolution ─────
@@ -829,6 +850,10 @@ impl AgentRuntime {
             self.bundle.registry.clone(),
             self.max_iterations,
         )
+        // Phase 58.3.1 D-09: the loop reads its window through this endpoint's tiers
+        // (observed/learned windows, per-model override, pin), not a fixed default.
+        .with_window_endpoint(resolver.resolve_for_main().clone())
+        .with_compact_profile_mode(config.agent.compact_profile)
         .with_budget(self.budget.clone())
         .with_hook_registry(self.bundle.hook_registry.clone())
         .with_browser_session(self.bundle.browser_session.clone())
@@ -892,6 +917,12 @@ impl AgentRuntime {
         // Fail-closed: when None, the NeedsApproval arm in AgentLoop returns
         // GateUnavailable (consistent with the headless-CLI and web surfaces
         // that never wire a gate). Moving the gate out of req avoids cloning.
+        //
+        // Phase 54.3 D-03: resolve the flush-time yolo-bypass notice target BEFORE the
+        // move below consumes `req.approval_gate`. An explicit `yolo_notifier` wins (the
+        // CLI / TUI goal loop, which deliberately leave `approval_gate` unset); gateway,
+        // web and the TUI main turn fall back to their `approval_gate`.
+        let yolo_notifier = req.yolo_notifier.clone().or_else(|| req.approval_gate.clone());
         if let Some(gate) = req.approval_gate {
             agent = agent.with_approval_gate(gate);
         }
@@ -954,6 +985,10 @@ impl AgentRuntime {
             agent = agent.with_context_file_paths(self.context_file_paths.clone());
         }
 
+        // D-05: a request with no tracker uses the runtime's session-keyed one, so
+        // once-per-session state survives across turns.
+        req.pressure_tracker
+            .get_or_insert_with(|| self.pressure_tracker.clone());
         agent = attach_context_engine(
             agent,
             &config,
@@ -992,7 +1027,18 @@ impl AgentRuntime {
         // Each surface (CLI, gateway, web) reads this field after run_turn returns and
         // renders the --- Context Warnings --- block out-of-band (not embedded in the
         // model-bound message text — that embedding was removed in Phase 34b Plan 03).
-        let run_result = agent.run(req.messages).await;
+        //
+        // Phase 54.3 D-03: scope a fresh per-turn yolo ledger around the agent run, so
+        // every yolo bypass inside this turn's tool dispatch is RECORDED rather than
+        // announced per call, then flushed once below. The task-local survives the
+        // inline `.await`s down through tool dispatch; it would NOT survive a
+        // `tokio::spawn` / `spawn_blocking` hop (see `ironhermes_hooks::yolo_ledger`).
+        // A fresh ledger per `run_turn` call keeps concurrent turns on one shared
+        // `Arc<AgentRuntime>` (Phase 39.1) from cross-contaminating.
+        let yolo_ledger = std::sync::Arc::new(ironhermes_hooks::yolo_ledger::YoloLedger::default());
+        let run_result = ironhermes_hooks::yolo_ledger::YOLO_LEDGER
+            .scope(yolo_ledger.clone(), agent.run(req.messages))
+            .await;
 
         // Phase 39.2: emit output or error stage event after run completes.
         match &run_result {
@@ -1038,6 +1084,22 @@ impl AgentRuntime {
             drop(reg);
         }
 
+        // Phase 54.3 D-03/D-05: flush the per-turn yolo ledger — one rollup audit row,
+        // then one aggregated, timeout-bounded `notify_yolo_bypass_turn`. The position
+        // is load-bearing: it MUST sit before the `?` below, or a provider error would
+        // skip the flush and a turn that already ran unapproved commands would end with
+        // no rollup row and no notice. It also runs on a cooperatively cancelled turn
+        // (`agent.run` returns `Ok` with `StopReason::Cancelled`). A turn whose future
+        // is dropped (`turn.handle.abort()`) never reaches here — an accepted gap; the
+        // per-call audit rows remain the forensic record.
+        ironhermes_hooks::yolo_ledger::flush_yolo_ledger(
+            &yolo_ledger,
+            &ironhermes_core::AuditLog::load(config.audit.clone()),
+            yolo_notifier.as_deref(),
+            req.turn_id,
+        )
+        .await;
+
         let mut out = run_result?;
 
         // Phase 34b Plan 02 (D-09): post-run per-turn usage hook. MUST appear
@@ -1046,7 +1108,10 @@ impl AgentRuntime {
             engine.update_from_response(&out.total_usage);
         }
 
-        out.context_warnings = context_warnings;
+        // Phase 58.3.1 D-05: @-ref warnings first, then the loop's own (compact notice,
+        // cache-break warnings) — assigning here used to discard the loop's.
+        let loop_warnings = std::mem::take(&mut out.context_warnings);
+        out.context_warnings = [context_warnings, loop_warnings].concat();
 
         // Phase 36.2 CR-04: snapshot the just-run model name + bump the turn
         // counter so the NEXT turn can compare and fire the model-swap cache-
@@ -1393,6 +1458,7 @@ impl AgentRuntime {
             execute_code_tool_arc: None,
             write_file_tool_arc: None,
             patch_tool_arc: None,
+            pressure_tracker: Arc::new(PressureTracker::new()),
         }
     }
 
@@ -2068,6 +2134,7 @@ mod tests {
             execute_code_tool_arc: None,
             write_file_tool_arc: None,
             patch_tool_arc: None,
+            pressure_tracker: Arc::new(PressureTracker::new()),
         }
     }
 
@@ -2643,6 +2710,7 @@ mod tests {
             execute_code_tool_arc: None,
             write_file_tool_arc: None,
             patch_tool_arc: None,
+            pressure_tracker: Arc::new(PressureTracker::new()),
         };
 
         let result = runtime.resolved_extras_for_test_turn();
@@ -3127,6 +3195,98 @@ mod tests {
             "exactly one occurrence of the context_length binding pattern (see binding_needle \
              above) must exist in this file; found {occurrences} — Test 4's premise is that \
              ONE binding feeds both consumers"
+        );
+    }
+
+    /// Canned chat-completions SSE reply: one text chunk, then a stop chunk.
+    fn sse_text_reply(text: &str) -> String {
+        format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"id":"c1","object":"chat.completion.chunk","created":1,
+                "model":"local-model","choices":[{"index":0,"delta":{"content":text}}]}),
+            serde_json::json!({"id":"c1","object":"chat.completion.chunk","created":1,
+                "model":"local-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+        )
+    }
+
+    /// Phase 58.3.1 G-58.3.1-2 (D-05): drives the REAL `run_turn` wiring with no
+    /// caller-supplied tracker. Before the runtime owned a tracker, every turn got a
+    /// fresh one, so the once-per-session compact-profile notice repeated every turn.
+    #[tokio::test]
+    async fn run_turn_shows_compact_notice_once_per_session() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The window probe / models cache may write under IRONHERMES_HOME: use a
+        // tempdir home and restore it afterwards (edition 2024: set_var is unsafe).
+        struct HomeGuard(Option<std::ffi::OsString>);
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                        None => std::env::remove_var("IRONHERMES_HOME"),
+                    }
+                }
+            }
+        }
+        let home = tempfile::tempdir().expect("tempdir home");
+        let _guard = HomeGuard(std::env::var_os("IRONHERMES_HOME"));
+        unsafe { std::env::set_var("IRONHERMES_HOME", home.path()) };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(sse_text_reply("ok"), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let (config, resolver) =
+            build_test_provider_config_with_window("local", &server.uri(), "local-model", 8192);
+        let mut config = (*config).clone();
+        config.agent.compact_profile = ironhermes_core::config::CompactProfileMode::On;
+        let config = Arc::new(config);
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            server.uri(),
+            "test-key",
+            "local-model",
+        ));
+        let runtime = build_runtime_for_reload_test(config, resolver, client);
+
+        let notices = |session: &'static str| {
+            let runtime = &runtime;
+            async move {
+                let req = TurnRequest {
+                    messages: vec![ChatMessage::user("hi")],
+                    session_id: session.to_string(),
+                    stream: Some(Box::new(|_delta: &str| {})),
+                    ..Default::default()
+                };
+                let out =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), runtime.run_turn(req))
+                        .await
+                        .expect("the turn must not hang")
+                        .expect("run_turn failed");
+                out.context_warnings
+                    .iter()
+                    .filter(|w| w.contains("compact profile") && w.contains("8192"))
+                    .count()
+            }
+        };
+
+        assert_eq!(notices("sess-a").await, 1, "turn 1 shows the notice");
+        assert_eq!(
+            notices("sess-a").await,
+            0,
+            "turn 2 of the same session repeats it"
+        );
+        assert_eq!(
+            notices("sess-b").await,
+            1,
+            "a new session gets its own notice once"
         );
     }
 }

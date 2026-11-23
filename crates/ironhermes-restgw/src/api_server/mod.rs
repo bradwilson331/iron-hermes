@@ -59,6 +59,20 @@ pub struct ApiServerConfig {
     /// D-07: whether the operator explicitly opted into exposing this
     /// listener on a non-loopback address. `false` unless set.
     pub public_opt_in: bool,
+    /// D-20: an optional cross-origin allowed-origin value. `None` unless
+    /// set, matching today's behavior (no cross-origin handling at all).
+    ///
+    /// **Setting this field does NOT currently cause any cross-origin
+    /// header to be emitted** — there is no `CorsLayer` and no
+    /// origin-echoing code anywhere in this crate (Finding 7's whole
+    /// premise). The field exists solely so
+    /// [`crate::bind_guard::cors_wildcard_guard_allows`] has something to
+    /// key on: if a future change adds an actual cross-origin layer, this
+    /// is the value it would read, and the startup guard already refuses
+    /// the dangerous combination (wildcard `"*"` on a non-loopback bind)
+    /// before that layer could ever run. A field that silently did nothing
+    /// would be a trap without this sentence — do not remove it.
+    pub allowed_origin: Option<String>,
 }
 
 /// Shared, process-wide runtime handles constructed ONCE in
@@ -110,6 +124,11 @@ pub struct ApiServerAdapter {
     host: String,
     port: u16,
     public_opt_in: bool,
+    /// D-20: the configured cross-origin allowed-origin value, carried
+    /// through from [`ApiServerConfig::allowed_origin`] so
+    /// [`run_api_server_adapter`] can evaluate
+    /// [`crate::bind_guard::cors_wildcard_guard_allows`] before binding.
+    allowed_origin: Option<String>,
     api_key: String,
     handles: ApiServerHandles,
     running: Arc<AtomicBool>,
@@ -153,6 +172,7 @@ impl ApiServerAdapter {
             host,
             port,
             public_opt_in: config.public_opt_in,
+            allowed_origin: config.allowed_origin,
             api_key,
             handles,
             running: Arc::new(AtomicBool::new(false)),
@@ -313,6 +333,11 @@ pub async fn serve_api_server_adapter(
 /// already enforced D-06 (a key is configured); this bind-time check adds
 /// the D-07 loopback/opt-in rail as defense-in-depth, mirroring
 /// `crate::webhook::run_webhook_adapter`'s own two-layer shape.
+///
+/// Also evaluates [`crate::bind_guard::cors_wildcard_guard_allows`] (D-20)
+/// at the same pre-bind point, independently of the D-07 check above — a
+/// wildcard cross-origin value on a non-loopback bind refuses even when
+/// D-07's own check already passed.
 pub async fn run_api_server_adapter(
     adapter: Arc<ApiServerAdapter>,
     handler: Arc<dyn MessageHandler>,
@@ -334,6 +359,24 @@ pub async fn run_api_server_adapter(
              public opt-in (D-07). Set gateway.platforms.api_server.public_opt_in: true to \
              expose this listener beyond loopback (IRONHERMES_API_SERVER_KEY is already \
              configured).",
+            adapter.host,
+            adapter.port
+        ));
+    }
+
+    // D-20: a SECOND, independent guard evaluated at the same pre-bind
+    // point as the one above — a wildcard cross-origin value configured on
+    // a non-loopback bind refuses, even though the bind_guard_allows check
+    // above already passed. Keyed on the WILDCARD VALUE specifically, not
+    // merely on the field being set (a configured, non-wildcard origin is
+    // allowed — see cors_wildcard_guard_derivation_non_wildcard_origin_is_not_refused
+    // in tests/bind_guard.rs).
+    let wildcard_configured = adapter.allowed_origin.as_deref() == Some("*");
+    if !crate::bind_guard::cors_wildcard_guard_allows(host_ip, wildcard_configured) {
+        return Err(anyhow!(
+            "API server adapter refusing to bind {}:{} — a wildcard cross-origin value ('*') is \
+             configured on a non-loopback bind (D-20). Bind to loopback instead, or configure a \
+             specific origin rather than the wildcard.",
             adapter.host,
             adapter.port
         ));

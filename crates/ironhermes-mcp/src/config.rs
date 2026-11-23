@@ -44,6 +44,11 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     /// HTTP headers to include in requests.
     ///
+    /// Values may use `${VAR}`, resolved from the process environment (the profile
+    /// `.env` is loaded into it at startup). A variable that is unset now fails the
+    /// connect with a name-only error instead of sending the literal text. Write `.env`
+    /// values single-quoted: dotenvy substitutes unquoted `${...}` itself.
+    ///
     /// Liveness (48.3 D-04 audit): FIXED in 48.3-01 — read at
     /// `transport.rs::connect_http`. Previously dead on every runtime path
     /// (the triggering Atomic Mail incident): deserialized, env-interpolated,
@@ -190,6 +195,78 @@ pub fn interpolate_env(value: &str) -> String {
     .into_owned()
 }
 
+/// One `${VAR}` that is still literal after [`interpolate_config`] ran, i.e. the
+/// variable is not set in the process environment.
+///
+/// Carries the field and the variable NAME only; never a value (T-54.8-06).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedPlaceholder {
+    /// Human-readable field, e.g. `header 'Authorization'`, `auth` or `url`.
+    pub field: String,
+    /// The environment variable name between `${` and `}`.
+    pub var: String,
+}
+
+fn placeholder_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\$\{([^}]+)\}").expect("static regex is valid"))
+}
+
+/// Find every `${VAR}` left in `url`, header values and `auth` of an
+/// already-interpolated config (D-18, T-54.8-06). Headers are visited in sorted
+/// name order so the result is deterministic.
+pub fn unresolved_placeholders(config: &McpServerConfig) -> Vec<UnresolvedPlaceholder> {
+    let re = placeholder_regex();
+    let mut found = Vec::new();
+    let mut scan = |field: String, text: &str| {
+        for caps in re.captures_iter(text) {
+            found.push(UnresolvedPlaceholder {
+                field: field.clone(),
+                var: caps[1].to_string(),
+            });
+        }
+    };
+    if let Some(url) = &config.url {
+        scan("url".to_string(), url);
+    }
+    let mut header_names: Vec<&String> = config.headers.keys().collect();
+    header_names.sort();
+    for name in header_names {
+        scan(format!("header '{name}'"), &config.headers[name]);
+    }
+    if let Some(auth) = &config.auth {
+        scan("auth".to_string(), auth);
+    }
+    found
+}
+
+/// Fail closed when `url`, a header or `auth` still holds a `${VAR}` after
+/// interpolation: sending the literal `${CLOUDFLARE_API_TOKEN}` as a bearer is a
+/// silent 401 at best and a credential-shaped string sent to a third party at worst.
+///
+/// The error text is `<field> references unset environment variable <VAR>` for each
+/// entry, joined by `; ` -- names only, never a value and never a whole header.
+///
+/// This closes the UNSET-variable case only. A variable that IS set and referenced by
+/// a config writer is still expanded and sent (T-54.8-43, accepted).
+pub fn ensure_placeholders_resolved(config: &McpServerConfig) -> anyhow::Result<()> {
+    let unresolved = unresolved_placeholders(config);
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    let message = unresolved
+        .iter()
+        .map(|p| {
+            format!(
+                "{} references unset environment variable {}",
+                p.field, p.var
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(anyhow::anyhow!(message))
+}
+
 /// Apply env interpolation to all string fields in a `McpServerConfig`.
 ///
 /// Mutates in-place: command, url, args, env values, header values, and auth.
@@ -224,9 +301,102 @@ pub fn interpolate_config(config: &mut McpServerConfig) {
     }
 }
 
+/// Value substituted for every `env` entry in [`render_mcp_json`].
+pub const REDACTED_ENV_VALUE: &str = "REDACTED";
+
+/// Render one server as the `mcp.json` document that the security sidecar screens
+/// (Phase 57 D-04(c)): `{"mcpServers":{"<name>":{command,args,url,env}}}`.
+///
+/// Only the keys the server actually has are present. `env` keeps its variable
+/// names (a name such as `LD_PRELOAD` is itself a finding) with every value
+/// replaced by [`REDACTED_ENV_VALUE`]. `headers` and `auth` are credentials and are
+/// never rendered. `command`, `args` and `url` are rendered as configured, before
+/// `${VAR}` expansion, so no expanded secret reaches the screen through them.
+pub fn render_mcp_json(name: &str, server: &McpServerConfig) -> String {
+    let mut entry = serde_json::Map::new();
+    if let Some(command) = &server.command {
+        entry.insert("command".to_string(), serde_json::json!(command));
+    }
+    if !server.args.is_empty() {
+        entry.insert("args".to_string(), serde_json::json!(server.args));
+    }
+    if let Some(url) = &server.url {
+        entry.insert("url".to_string(), serde_json::json!(url));
+    }
+    if !server.env.is_empty() {
+        let env: serde_json::Map<String, serde_json::Value> = server
+            .env
+            .keys()
+            .map(|k| (k.clone(), serde_json::json!(REDACTED_ENV_VALUE)))
+            .collect();
+        entry.insert("env".to_string(), serde_json::Value::Object(env));
+    }
+    let mut servers = serde_json::Map::new();
+    servers.insert(name.to_string(), serde_json::Value::Object(entry));
+    let mut root = serde_json::Map::new();
+    root.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
+    serde_json::Value::Object(root).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // render_mcp_json (Phase 57 plan 08, D-04c): the screened text of a server
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn render_mcp_json_shape() {
+        let mut env = HashMap::new();
+        env.insert(
+            "GITHUB_TOKEN".to_string(),
+            "ghp_supersecretvalue".to_string(),
+        );
+        env.insert("LOG_LEVEL".to_string(), "debug".to_string());
+        let server = McpServerConfig {
+            command: Some("npx".to_string()),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ],
+            env,
+            url: Some("https://mcp.example.com/mcp".to_string()),
+            headers: HashMap::from([("Authorization".to_string(), "Bearer hdrsecret".to_string())]),
+            auth: Some("authsecret".to_string()),
+            ..Default::default()
+        };
+        let rendered = render_mcp_json("github", &server);
+        let v: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+        let entry = &v["mcpServers"]["github"];
+        assert_eq!(entry["command"], "npx");
+        assert_eq!(
+            entry["args"],
+            serde_json::json!(["-y", "@modelcontextprotocol/server-github"])
+        );
+        assert_eq!(entry["url"], "https://mcp.example.com/mcp");
+        assert_eq!(entry["env"]["GITHUB_TOKEN"], "REDACTED");
+        assert_eq!(entry["env"]["LOG_LEVEL"], "REDACTED");
+        for secret in ["ghp_supersecretvalue", "debug", "hdrsecret", "authsecret"] {
+            assert!(
+                !rendered.contains(secret),
+                "rendered config must not carry {secret}: {rendered}"
+            );
+        }
+        assert!(
+            entry.get("headers").is_none() && entry.get("auth").is_none(),
+            "headers and auth are credentials and are never rendered: {rendered}"
+        );
+
+        // A bare stdio server renders only the keys it has.
+        let bare = McpServerConfig {
+            command: Some("uvx".to_string()),
+            ..Default::default()
+        };
+        let v: serde_json::Value = serde_json::from_str(&render_mcp_json("py", &bare)).unwrap();
+        let entry = v["mcpServers"]["py"].as_object().unwrap();
+        assert_eq!(entry.len(), 1, "only command is present: {entry:?}");
+    }
 
     // -------------------------------------------------------------------------
     // McpServerConfig deserialization tests
@@ -488,5 +658,89 @@ oauth_provider: "${IH_MCP_TEST_NS}"
         interpolate_config(&mut cfg);
         assert_eq!(cfg.oauth_provider.as_deref(), Some("cf_docs"));
         unsafe { std::env::remove_var("IH_MCP_TEST_NS") };
+    }
+
+    // -------------------------------------------------------------------------
+    // Fail-closed placeholder checks (54.8-02, D-18, T-54.8-06)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn unresolved_header_placeholder_reported_by_name() {
+        // SAFETY: test-only env mutation on a unique name.
+        unsafe { std::env::remove_var("IH_TEST_548_UNSET") };
+        let mut cfg = McpServerConfig::default();
+        cfg.headers.insert(
+            "Authorization".to_string(),
+            "Bearer ${IH_TEST_548_UNSET}".to_string(),
+        );
+        let found = unresolved_placeholders(&cfg);
+        assert_eq!(
+            found,
+            vec![UnresolvedPlaceholder {
+                field: "header 'Authorization'".to_string(),
+                var: "IH_TEST_548_UNSET".to_string(),
+            }]
+        );
+        let err = ensure_placeholders_resolved(&cfg).unwrap_err().to_string();
+        assert!(err.contains("IH_TEST_548_UNSET"), "got: {err}");
+        assert!(err.contains("Authorization"), "got: {err}");
+    }
+
+    #[test]
+    fn unresolved_auth_and_url_reported() {
+        // SAFETY: test-only env mutation on unique names.
+        unsafe {
+            std::env::remove_var("IH_TEST_548_A");
+            std::env::remove_var("IH_TEST_548_H");
+        }
+        let cfg = McpServerConfig {
+            url: Some("https://${IH_TEST_548_H}/mcp".to_string()),
+            auth: Some("${IH_TEST_548_A}".to_string()),
+            ..McpServerConfig::default()
+        };
+        let found = unresolved_placeholders(&cfg);
+        assert_eq!(found.len(), 2, "got: {found:?}");
+        assert!(
+            found
+                .iter()
+                .any(|p| p.field == "auth" && p.var == "IH_TEST_548_A")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|p| p.field == "url" && p.var == "IH_TEST_548_H")
+        );
+    }
+
+    #[test]
+    fn resolved_config_has_no_unresolved_placeholders() {
+        let mut cfg = McpServerConfig {
+            url: Some("https://example.test/mcp".to_string()),
+            auth: Some("literal-token".to_string()),
+            ..McpServerConfig::default()
+        };
+        cfg.headers
+            .insert("X-Thing".to_string(), "plain".to_string());
+        assert!(unresolved_placeholders(&cfg).is_empty());
+        assert!(ensure_placeholders_resolved(&cfg).is_ok());
+    }
+
+    #[test]
+    fn unresolved_error_never_contains_a_set_variables_value() {
+        // SAFETY: test-only env mutation on unique names.
+        unsafe {
+            std::env::set_var("IH_TEST_548_SET", "test-value-548");
+            std::env::remove_var("IH_TEST_548_MISSING");
+        }
+        let mut cfg = McpServerConfig::default();
+        cfg.headers.insert(
+            "Authorization".to_string(),
+            "Bearer ${IH_TEST_548_SET} ${IH_TEST_548_MISSING}".to_string(),
+        );
+        interpolate_config(&mut cfg);
+        let err = ensure_placeholders_resolved(&cfg).unwrap_err().to_string();
+        assert!(err.contains("IH_TEST_548_MISSING"), "got: {err}");
+        assert!(!err.contains("test-value-548"), "value leaked: {err}");
+        unsafe { std::env::remove_var("IH_TEST_548_SET") };
     }
 }

@@ -227,15 +227,13 @@ impl SshEnvironment {
     ) -> anyhow::Result<Self> {
         let ssh_cfg = cfg.ssh.clone().ok_or_else(|| {
             BackendUnavailableError(
-                "terminal.ssh is not configured (host/user required for backend: ssh)"
-                    .to_string(),
+                "terminal.ssh is not configured (host/user required for backend: ssh)".to_string(),
             )
         })?;
 
         if ssh_cfg.host.trim().is_empty() || ssh_cfg.user.trim().is_empty() {
             return Err(BackendUnavailableError(
-                "terminal.ssh.host and terminal.ssh.user must both be set (non-empty)"
-                    .to_string(),
+                "terminal.ssh.host and terminal.ssh.user must both be set (non-empty)".to_string(),
             )
             .into());
         }
@@ -568,7 +566,10 @@ mod tests {
     fn control_socket_path_is_deterministic_for_same_tuple() {
         let a = control_socket_path("alice", "example.com", 22);
         let b = control_socket_path("alice", "example.com", 22);
-        assert_eq!(a, b, "the same (user,host,port) tuple must yield the same socket path");
+        assert_eq!(
+            a, b,
+            "the same (user,host,port) tuple must yield the same socket path"
+        );
     }
 
     #[test]

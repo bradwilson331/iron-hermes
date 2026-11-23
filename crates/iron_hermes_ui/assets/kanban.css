@@ -1471,3 +1471,112 @@
     font-style: italic;
     color: var(--fg-dim);
 }
+
+/* ----- Phase 54.4 Plan 08 (D-09): BOARD | TABS view toggle -------------- */
+
+.kn-view-toggle {
+    display: inline-flex;
+}
+
+.kn-view-seg {
+    width: 96px;
+    height: 40px;
+    border: 1px solid var(--border);
+    background: var(--bg-card-hover);
+    color: var(--text-dim);
+    font: 700 10px/1.4 var(--font);
+    letter-spacing: 0.18em;
+    cursor: pointer;
+}
+
+.kn-view-seg[aria-checked="true"] {
+    border-color: var(--teal);
+    color: var(--teal);
+}
+
+.kn-view-seg:focus-visible {
+    outline: 2px solid var(--teal);
+    outline-offset: 1px;
+}
+
+/* TABS view: the strip (Task 2) above one status column that fills the
+   remaining height and scrolls vertically. */
+.kn-tabs-view {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.kn-tabs-view > .kn-column {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    overflow-y: auto;
+}
+
+/* ----- Phase 54.4 Plan 08 (D-09): TABS status strip -------------------- */
+
+/* Deliberate exception to `.tabs { flex-wrap: wrap }` (screens.css): the
+   seven-status strip scrolls horizontally instead of wrapping. */
+.kn-status-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    flex-shrink: 0;
+}
+
+.kn-status-tabs .tab {
+    flex-shrink: 0;
+}
+
+.kn-status-tabs .tab:focus-visible {
+    outline: 2px solid var(--teal);
+    outline-offset: -2px;
+}
+
+.kn-status-empty {
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 16px;
+}
+
+/* ----- Phase 54.4 Plan 08: header beside the docked wheel (user-requested)
+ *
+ * The Kanban header row sits in the overhang band to the RIGHT of the docked
+ * wheel (x = --ih-row-inset), 16px below the banner; the content rows start
+ * at or below the wheel's bottom edge (--ih-overhang-h below the banner), so
+ * nothing sits under the wheel. Overrides `#screen-kanban { padding: ... }`
+ * in screens.css (which pads the whole screen by the overhang) from here, so
+ * screens.css is untouched.
+ *
+ * Cascade: `section#screen-kanban.screen` is (1,1,1), strictly above
+ * screens.css `#screen-kanban` (1,0,0), `.screen` and
+ * `body.density-dense .screen`, so it wins regardless of stylesheet load
+ * order (KANBAN_CSS is linked both from app.rs and inside ScreenKanban).
+ * ------------------------------------------------------------------------ */
+
+section#screen-kanban.screen {
+    --kn-screen-pad: 16px;
+    padding-top: var(--kn-screen-pad);
+    padding-left: var(--kn-screen-pad);
+    padding-right: var(--kn-screen-pad);
+    gap: var(--kn-screen-pad);
+}
+
+/* Left edge at --ih-row-inset (the screen's own left padding is already
+   --kn-screen-pad, so subtract it). min-height makes top pad + header + gap
+   reach exactly --ih-overhang-h, so the next row starts at the wheel's
+   bottom edge. */
+section#screen-kanban.screen > .screen-header {
+    box-sizing: border-box;
+    margin-left: calc(var(--ih-row-inset) - var(--kn-screen-pad));
+    min-height: calc(var(--ih-overhang-h) - 2 * var(--kn-screen-pad));
+}
+
+section#screen-kanban.screen > .screen-header .screen-actions {
+    flex-wrap: wrap;
+    flex-shrink: 1;
+    min-width: 0;
+    justify-content: flex-end;
+}

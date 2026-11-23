@@ -1,5 +1,12 @@
 //! Phase 26.2.1 Plan 07 — Settings screen (LIVE-wired, read-only Runtime).
 //!
+//! Phase 54.4 Plan 16 (G-54.4-25): the screen opens on a General | Orb tab
+//! strip. General holds every block below, unchanged. Orb holds the
+//! standalone orb appearance panel (`voice_settings::OrbSettingsPanel`), so
+//! the orb colour controls no longer depend on the Voice form's "Applies to"
+//! target. Since G-54.4-34 the General tab's Voice panel no longer shows the
+//! orb Appearance section; in System the Orb tab is its only home.
+//!
 //! Replaces the Plan 03 placeholder with several logical blocks:
 //!
 //! 1. **Runtime block (read-only)** — renders `ConfigSummary { model,
@@ -24,14 +31,14 @@
 //!    in-scope config surfaces for this phase.
 //!
 //! 2. **UI Preferences block (writable)** — theme picker (5 themes),
-//!    accent picker (5 `AccentColor` variants), wheel-size slider
-//!    (240..=640 mirroring Plan 04 `MIN_SIZE` / `MAX_SIZE`), four boolean
-//!    toggles (breadcrumb / footer / rail), and a comfy/dense
-//!    density two-state. All writes target `Signal<UiPrefs>` plus the
-//!    theme `Signal<String>` (consumed via the B-03 `ThemeContext`
-//!    newtype) plus `Signal<WheelState>` for the wheel-size mirror.
-//!    Plan 05's `theme_effects.rs` performs the actual DOM mutation
-//!    when the theme name changes.
+//!    accent picker (5 `AccentColor` variants), a footer boolean toggle,
+//!    and a comfy/dense density two-state. All writes target
+//!    `Signal<UiPrefs>` plus the theme `Signal<String>` (consumed via the
+//!    B-03 `ThemeContext` newtype). Plan 05's `theme_effects.rs` performs
+//!    the actual DOM mutation when the theme name changes. Phase 54.4
+//!    Plan 02 (D-05/D-07/D-26) retired the wheel-size slider and the
+//!    breadcrumb / rail toggles: the docked header wheel is pinned by
+//!    `--ih-wheel-size` and the status strip is permanent.
 //!
 //! Plus a small "Other Screens" reachability nav for Soul / Schedules /
 //! Office (CONTEXT D-10 Claude's Discretion — those three screens exist in
@@ -51,12 +58,19 @@ use dioxus::prelude::*;
 /// and UI Preferences (writable UiPrefs + theme + wheel-size mirror).
 #[component]
 pub fn ScreenSettings(is_active: bool) -> Element {
-    // Context — UiPrefs, theme (newtype-disambiguated per B-03), and the
-    // wheel-state mirror (for the dual-write that Plan 05's TweaksPanel
-    // also performs on size changes).
+    // Context — UiPrefs and theme (newtype-disambiguated per B-03).
     let mut prefs = use_context::<Signal<UiPrefs>>();
     let mut theme = use_context::<crate::state::ThemeContext>().0;
-    let mut wheel_state = use_context::<Signal<crate::state::WheelState>>();
+
+    // Selected tab (G-54.4-25). Declared BEFORE the summary server future below:
+    // that future early-returns with `?` while it loads, and any hook declared
+    // after the early return is skipped on those renders, so a later hook would
+    // change order once the summary arrives. The tab is not persisted: the
+    // screen opens on General every visit.
+    let tab = use_signal(|| SettingsTab::General);
+    // Bumped by the "set via config.yaml" hint links; the config-file panel
+    // subscribes. Same ordering rule as `tab`: above the `?` early return below.
+    let mut focus_tick = use_signal(|| 0u32);
 
     // Read-only runtime block — fetch ConfigSummary on mount.
     //
@@ -65,27 +79,38 @@ pub fn ScreenSettings(is_active: bool) -> Element {
     // spec references). D-02 makes api.rs the source of truth, so this
     // file matches the real field names.
     let summary_resource = use_server_future(crate::server::api::get_config_summary)?;
-    let (model_name, provider_name, context_length, memory_enabled) = match summary_resource() {
-        Some(Ok(c)) => (c.model, c.provider, c.context_length, c.memory_enabled),
-        _ => ("loading…".to_string(), "…".to_string(), 0_u32, false),
-    };
+    let (model_name, provider_name, context_length, context_length_source, memory_enabled) =
+        match summary_resource() {
+            Some(Ok(c)) => (
+                c.model,
+                c.provider,
+                Some(c.context_length),
+                c.context_length_source,
+                c.memory_enabled,
+            ),
+            _ => (
+                "loading…".to_string(),
+                "…".to_string(),
+                None,
+                crate::server::api::ContextWindowSource::default(),
+                false,
+            ),
+        };
+    // D-13: effective window plus the word naming which tier produced it.
+    let context_length_display = crate::components::hermes_app::screens::models::window_placeholder(
+        context_length,
+        context_length_source,
+    );
 
     // Drop all signal borrows into Copy/Clone locals before constructing
     // event closures (clippy.toml signal-borrow safety — never hold a
     // read borrow across a `.set()` or `.with_mut()` in the same closure).
-    let (cur_theme, cur_accent, cur_wheel_size, cur_breadcrumb, cur_footer, cur_rail, cur_density) = {
+    let (cur_theme, cur_accent, cur_footer, cur_density) = {
         let p = prefs.read();
         let t = theme.read();
-        (
-            t.clone(),
-            p.accent,
-            p.wheel_size,
-            p.breadcrumb,
-            p.footer,
-            p.rail,
-            p.density,
-        )
+        (t.clone(), p.accent, p.footer, p.density)
     };
+    let cur_tab = *tab.read();
 
     rsx! {
         section {
@@ -102,259 +127,365 @@ pub fn ScreenSettings(is_active: bool) -> Element {
                 }
             }
 
-            // ── Block 1: Runtime (model/provider — managed in config.yaml) ───────
-            div { class: "panel",
-                div { class: "panel-title",
-                    "Runtime "
-                    span { style: "color: var(--gray); font-weight: 400; letter-spacing: 0.04em; font-size: 10px;",
-                        "// managed in config.yaml"
-                    }
-                }
+            // ── Tab strip (Phase 54.4 Plan 16, G-54.4-25) ────────────
+            SettingsTabs { active: tab }
 
-                div { class: "field-row is-disabled", style: "opacity: 0.6;",
-                    div { class: "field-label",
-                        "Model"
-                        span { class: "help", "set via config.yaml" }
-                    }
-                    input {
-                        class: "field-input",
-                        readonly: "true",
-                        disabled: "true",
-                        value: "{model_name}",
-                    }
-                }
-                div { class: "field-row is-disabled", style: "opacity: 0.6;",
-                    div { class: "field-label",
-                        "Provider"
-                        span { class: "help", "set via config.yaml" }
-                    }
-                    input {
-                        class: "field-input",
-                        readonly: "true",
-                        disabled: "true",
-                        value: "{provider_name}",
-                    }
-                }
-                div { class: "field-row is-disabled", style: "opacity: 0.6;",
-                    div { class: "field-label",
-                        "Context length"
-                        span { class: "help", "resolved per model" }
-                    }
-                    input {
-                        class: "field-input",
-                        readonly: "true",
-                        disabled: "true",
-                        value: "{context_length}",
-                    }
-                }
-                div { class: "field-row is-disabled", style: "opacity: 0.6;",
-                    div { class: "field-label",
-                        "Memory"
-                        span { class: "help", "set via config.yaml" }
-                    }
-                    input {
-                        class: "field-input",
-                        readonly: "true",
-                        disabled: "true",
-                        value: if memory_enabled { "ENABLED" } else { "DISABLED" },
-                    }
-                }
-            }
+            if cur_tab == SettingsTab::General {
+                // General: every existing block, unchanged. `gap: inherit` keeps
+                // `.screen`'s 24px (16px dense) spacing between the panels.
+                div {
+                    id: SettingsTab::General.panel_id(),
+                    role: "tabpanel",
+                    "aria-labelledby": SettingsTab::General.tab_id(),
+                    style: "display:flex; flex-direction:column; gap:inherit;",
 
-            // ── Block 1.4: Agent (writable → config.agent) ────────────────────────
-            // Phase 46.9 Plan 05 (D-01): editable subset of config.agent, wrapped as
-            // a titled panel block (matching Runtime / Voice / UI Preferences).
-            div { class: "panel",
-                div { class: "panel-title", "Agent" }
-                AgentConfigPanel {}
-            }
+                    // ── Block 1: Runtime (model/provider — managed in config.yaml) ───────
+                    div { class: "panel",
+                        div { class: "panel-title",
+                            "Runtime "
+                            span { style: "color: var(--gray); font-weight: 400; letter-spacing: 0.04em; font-size: 10px;",
+                                "// managed in config.yaml"
+                            }
+                        }
 
-            // ── Block 1.45: Login theme (write-gated → web_ui.auth.login_theme) ──
-            // Phase 47.3 Plan 06 (D-01/D-03): the pre-auth login page's visual
-            // treatment picker. Honors the SAME security.web_config_write_enabled
-            // gate as the Agent panel above — D-03's hard requirement is that the
-            // disabled state is genuinely inert (true `disabled` attribute on every
-            // input), never a control that looks interactive and silently no-ops.
-            div { class: "panel",
-                div { class: "panel-title", "Login Theme" }
-                LoginThemePanel {}
-            }
-
-            // ── Block 1.5: Voice / STT / TTS / VAD (writable → config.yaml) ──────
-            // Phase 36.17.10: two-way config write-back form, wrapped as a titled
-            // panel block (matching Runtime / UI Preferences) and positioned between
-            // them. on_close is a no-op (this is a screen, not a dismissable overlay).
-            // VoiceStatusState context is provided by HermesApp (mod.rs:535).
-            div { class: "panel voice-settings-embed",
-                div { class: "panel-title", "Voice" }
-                crate::components::hermes_app::voice_settings::VoiceSettings { on_close: move |_| {} }
-            }
-
-            // ── Block 1.6: Kanban (writable → config.kanban, brand-new surface) ──
-            // Phase 46.9 Plan 05 (D-02): embedded panel — NOT a new top-level
-            // screen/wheel entry — positioned directly below the voice-settings-embed
-            // panel per the same embed pattern.
-            div { class: "panel",
-                div { class: "panel-title", "Kanban" }
-                crate::components::hermes_app::kanban_config::KanbanConfigPanel {}
-            }
-
-            // ── Block 2: UI Preferences (writable) ───────────────────
-            div { class: "panel",
-                div { class: "panel-title", "UI Preferences" }
-
-                // ── Theme picker (5 options) ─────────────────────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Theme"
-                        span { class: "help", "swaps the [data-theme] attribute on <html>" }
+                        div { class: "field-row is-disabled", style: "opacity: 0.6;",
+                            div { class: "field-label",
+                                "Model"
+                                button {
+                                    r#type: "button",
+                                    class: "help cfg-hintlink",
+                                    onclick: move |_| focus_tick += 1,
+                                    "set via config.yaml"
+                                }
+                            }
+                            input {
+                                class: "field-input",
+                                readonly: "true",
+                                disabled: "true",
+                                value: "{model_name}",
+                            }
+                        }
+                        div { class: "field-row is-disabled", style: "opacity: 0.6;",
+                            div { class: "field-label",
+                                "Provider"
+                                button {
+                                    r#type: "button",
+                                    class: "help cfg-hintlink",
+                                    onclick: move |_| focus_tick += 1,
+                                    "set via config.yaml"
+                                }
+                            }
+                            input {
+                                class: "field-input",
+                                readonly: "true",
+                                disabled: "true",
+                                value: "{provider_name}",
+                            }
+                        }
+                        div { class: "field-row is-disabled", style: "opacity: 0.6;",
+                            div { class: "field-label",
+                                "Context length"
+                                span { class: "help", "resolved per model" }
+                            }
+                            input {
+                                class: "field-input",
+                                readonly: "true",
+                                disabled: "true",
+                                value: "{context_length_display}",
+                            }
+                        }
+                        div { class: "field-row is-disabled", style: "opacity: 0.6;",
+                            div { class: "field-label",
+                                "Memory"
+                                button {
+                                    r#type: "button",
+                                    class: "help cfg-hintlink",
+                                    onclick: move |_| focus_tick += 1,
+                                    "set via config.yaml"
+                                }
+                            }
+                            input {
+                                class: "field-input",
+                                readonly: "true",
+                                disabled: "true",
+                                value: if memory_enabled { "ENABLED" } else { "DISABLED" },
+                            }
+                        }
                     }
-                    div { style: "display: flex; flex-wrap: wrap; gap: 6px;",
-                        for name in [
-                            "slate-dark",
-                            "slate-light",
-                            "iron-dark",
-                            "terminal-dark",
-                            "parchment-light",
-                        ] {
+
+                    // ── Block 1.4: Agent (writable → config.agent) ────────────────────────
+                    // Phase 46.9 Plan 05 (D-01): editable subset of config.agent, wrapped as
+                    // a titled panel block (matching Runtime / Voice / UI Preferences).
+                    div { class: "panel",
+                        div { class: "panel-title", "Agent" }
+                        AgentConfigPanel {}
+                    }
+
+                    // ── Block 1.45: Login theme (write-gated → web_ui.auth.login_theme) ──
+                    // Phase 47.3 Plan 06 (D-01/D-03): the pre-auth login page's visual
+                    // treatment picker. Honors the SAME security.web_config_write_enabled
+                    // gate as the Agent panel above — D-03's hard requirement is that the
+                    // disabled state is genuinely inert (true `disabled` attribute on every
+                    // input), never a control that looks interactive and silently no-ops.
+                    div { class: "panel",
+                        div { class: "panel-title", "Login Theme" }
+                        LoginThemePanel {}
+                    }
+
+                    // ── Block 1.5: Voice / STT / TTS / VAD (writable → config.yaml) ──────
+                    // Phase 36.17.10: two-way config write-back form, wrapped as a titled
+                    // panel block (matching Runtime / UI Preferences) and positioned between
+                    // them. on_close is a no-op (this is a screen, not a dismissable overlay).
+                    // VoiceStatusState context is provided by HermesApp (mod.rs:535).
+                    // The orb appearance controls live only on the Orb tab (G-54.4-34),
+                    // so this embed opts out of them; the voice-mode overlay keeps them.
+                    div { class: "panel voice-settings-embed",
+                        div { class: "panel-title", "Voice" }
+                        crate::components::hermes_app::voice_settings::VoiceSettings { on_close: move |_| {}, show_orb_appearance: false }
+                    }
+
+                    // ── Block 1.6: Kanban (writable → config.kanban, brand-new surface) ──
+                    // Phase 46.9 Plan 05 (D-02): embedded panel — NOT a new top-level
+                    // screen/wheel entry — positioned directly below the voice-settings-embed
+                    // panel per the same embed pattern.
+                    div { class: "panel",
+                        div { class: "panel-title", "Kanban" }
+                        crate::components::hermes_app::kanban_config::KanbanConfigPanel {}
+                    }
+
+                    // ── Block 1.7: Config file (YAML) — Phase 54.13 (D-10) ──
+                    // The panel renders its own `.panel` wrapper (id `settings-config-file`).
+                    crate::components::hermes_app::screens::config_yaml_panel::ConfigYamlPanel { focus_tick }
+
+                    // ── Block 2: UI Preferences (writable) ───────────────────
+                    div { class: "panel",
+                        div { class: "panel-title", "UI Preferences" }
+
+                        // ── Theme picker (5 options) ─────────────────────────
+                        div { class: "field-row",
+                            div { class: "field-label",
+                                "Theme"
+                                span { class: "help", "swaps the [data-theme] attribute on <html>" }
+                            }
+                            div { style: "display: flex; flex-wrap: wrap; gap: 6px;",
+                                for name in [
+                                    "slate-dark",
+                                    "slate-light",
+                                    "iron-dark",
+                                    "terminal-dark",
+                                    "parchment-light",
+                                ] {
+                                    button {
+                                        key: "{name}",
+                                        class: "btn btn--sm",
+                                        class: if cur_theme == name { "is-active" },
+                                        onclick: move |_| theme.set(name.to_string()),
+                                        "{name}"
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Accent picker (5 AccentColor variants) ───────────
+                        div { class: "field-row",
+                            div { class: "field-label",
+                                "Accent"
+                                span { class: "help", "primary highlight color" }
+                            }
+                            div { style: "display: flex; flex-wrap: wrap; gap: 6px;",
+                                for (variant, label) in [
+                                    (AccentColor::Teal, "TEAL"),
+                                    (AccentColor::Orange, "ORANGE"),
+                                    (AccentColor::Green, "GREEN"),
+                                    (AccentColor::Violet, "VIOLET"),
+                                    (AccentColor::Amber, "AMBER"),
+                                ] {
+                                    button {
+                                        key: "{label}",
+                                        class: "btn btn--sm",
+                                        class: if cur_accent == variant { "is-active" },
+                                        onclick: move |_| prefs.with_mut(|p| p.accent = variant),
+                                        "{label}"
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Boolean toggle: Footer ───────────────────────────
+                        div { class: "field-row",
+                            div { class: "field-label",
+                                "Footer"
+                                span { class: "help", "app-footer strip" }
+                            }
                             button {
-                                key: "{name}",
                                 class: "btn btn--sm",
-                                class: if cur_theme == name { "is-active" },
-                                onclick: move |_| theme.set(name.to_string()),
-                                "{name}"
+                                class: if cur_footer { "is-active" },
+                                onclick: move |_| prefs.with_mut(|p| p.footer = !p.footer),
+                                if cur_footer { "ON" } else { "OFF" }
+                            }
+                        }
+
+                        // ── Density two-state ────────────────────────────────
+                        div { class: "field-row",
+                            div { class: "field-label",
+                                "Density"
+                                span { class: "help", "per-row vertical density" }
+                            }
+                            div { style: "display: flex; gap: 6px;",
+                                button {
+                                    class: "btn btn--sm",
+                                    class: if cur_density == Density::Comfy { "is-active" },
+                                    onclick: move |_| prefs.with_mut(|p| p.density = Density::Comfy),
+                                    "COMFY"
+                                }
+                                button {
+                                    class: "btn btn--sm",
+                                    class: if cur_density == Density::Dense { "is-active" },
+                                    onclick: move |_| prefs.with_mut(|p| p.density = Density::Dense),
+                                    "DENSE"
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Block 3: Other Screens (Soul/Schedules/Office) ───────
+                    // CONTEXT D-10 Claude's Discretion: these three screens exist
+                    // in app.html but are NOT on the wheel; Settings is their
+                    // reachability path.
+                    div { class: "panel",
+                        div { class: "panel-title", "Other Screens" }
+                        div { class: "field-row",
+                            div { class: "field-label",
+                                "Reach"
+                                span { class: "help", "screens not on the wheel" }
+                            }
+                            div { style: "display: flex; gap: 6px;",
+                                SettingsScreenLink { target: crate::state::Screen::Soul, label: "SOUL" }
+                                SettingsScreenLink { target: crate::state::Screen::Schedules, label: "SCHEDULES" }
+                                SettingsScreenLink { target: crate::state::Screen::Office, label: "OFFICE" }
                             }
                         }
                     }
                 }
-
-                // ── Accent picker (5 AccentColor variants) ───────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Accent"
-                        span { class: "help", "primary highlight color" }
-                    }
-                    div { style: "display: flex; flex-wrap: wrap; gap: 6px;",
-                        for (variant, label) in [
-                            (AccentColor::Teal, "TEAL"),
-                            (AccentColor::Orange, "ORANGE"),
-                            (AccentColor::Green, "GREEN"),
-                            (AccentColor::Violet, "VIOLET"),
-                            (AccentColor::Amber, "AMBER"),
-                        ] {
-                            button {
-                                key: "{label}",
-                                class: "btn btn--sm",
-                                class: if cur_accent == variant { "is-active" },
-                                onclick: move |_| prefs.with_mut(|p| p.accent = variant),
-                                "{label}"
-                            }
-                        }
+            } else if cur_tab == SettingsTab::Orb {
+                // Orb: the standalone orb appearance panel (G-54.4-25).
+                div {
+                    id: SettingsTab::Orb.panel_id(),
+                    role: "tabpanel",
+                    "aria-labelledby": SettingsTab::Orb.tab_id(),
+                    style: "display:flex; flex-direction:column; gap:inherit;",
+                    div { class: "panel voice-settings-embed",
+                        div { class: "panel-title", "Orb appearance" }
+                        crate::components::hermes_app::voice_settings::OrbSettingsPanel {}
                     }
                 }
-
-                // ── Wheel size slider (240..=640) ────────────────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Wheel size"
-                        span { class: "help", "mirrors UiPrefs.wheel_size onto WheelState.size" }
-                    }
-                    input {
-                        r#type: "range",
-                        min: "240",
-                        max: "640",
-                        step: "20",
-                        value: "{cur_wheel_size}",
-                        oninput: move |evt| {
-                            let val: f64 = evt.value().parse().unwrap_or(240.0);
-                            prefs.with_mut(|p| p.wheel_size = val);
-                            wheel_state.with_mut(|ws| ws.size = val);
-                        },
-                    }
-                    span { class: "row-sub", "{cur_wheel_size as u32}px" }
-                }
-
-                // ── Boolean toggle: Breadcrumb ───────────────────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Breadcrumb"
-                        span { class: "help", "NODE HERMES-7 › BRIDGE › … chip" }
-                    }
-                    button {
-                        class: "btn btn--sm",
-                        class: if cur_breadcrumb { "is-active" },
-                        onclick: move |_| prefs.with_mut(|p| p.breadcrumb = !p.breadcrumb),
-                        if cur_breadcrumb { "ON" } else { "OFF" }
-                    }
-                }
-
-                // ── Boolean toggle: Footer ───────────────────────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Footer"
-                        span { class: "help", "app-footer strip" }
-                    }
-                    button {
-                        class: "btn btn--sm",
-                        class: if cur_footer { "is-active" },
-                        onclick: move |_| prefs.with_mut(|p| p.footer = !p.footer),
-                        if cur_footer { "ON" } else { "OFF" }
-                    }
-                }
-
-                // ── Boolean toggle: Rail ─────────────────────────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Rail"
-                        span { class: "help", "vertical rail on the chat screen" }
-                    }
-                    button {
-                        class: "btn btn--sm",
-                        class: if cur_rail { "is-active" },
-                        onclick: move |_| prefs.with_mut(|p| p.rail = !p.rail),
-                        if cur_rail { "ON" } else { "OFF" }
-                    }
-                }
-
-                // ── Density two-state ────────────────────────────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Density"
-                        span { class: "help", "per-row vertical density" }
-                    }
-                    div { style: "display: flex; gap: 6px;",
-                        button {
-                            class: "btn btn--sm",
-                            class: if cur_density == Density::Comfy { "is-active" },
-                            onclick: move |_| prefs.with_mut(|p| p.density = Density::Comfy),
-                            "COMFY"
-                        }
-                        button {
-                            class: "btn btn--sm",
-                            class: if cur_density == Density::Dense { "is-active" },
-                            onclick: move |_| prefs.with_mut(|p| p.density = Density::Dense),
-                            "DENSE"
-                        }
-                    }
+            } else {
+                // Phase 54.9 Plan 04 (D-01): the menu layout editor.
+                div {
+                    id: SettingsTab::Menu.panel_id(),
+                    role: "tabpanel",
+                    "aria-labelledby": SettingsTab::Menu.tab_id(),
+                    "aria-label": "Menu layout",
+                    style: "display:flex; flex-direction:column; gap:inherit;",
+                    super::settings_menu::MenuSettingsPanel {}
                 }
             }
+        }
+    }
+}
 
-            // ── Block 3: Other Screens (Soul/Schedules/Office) ───────
-            // CONTEXT D-10 Claude's Discretion: these three screens exist
-            // in app.html but are NOT on the wheel; Settings is their
-            // reachability path.
-            div { class: "panel",
-                div { class: "panel-title", "Other Screens" }
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Reach"
-                        span { class: "help", "screens not on the wheel" }
-                    }
-                    div { style: "display: flex; gap: 6px;",
-                        SettingsScreenLink { target: crate::state::Screen::Soul, label: "SOUL" }
-                        SettingsScreenLink { target: crate::state::Screen::Schedules, label: "SCHEDULES" }
-                        SettingsScreenLink { target: crate::state::Screen::Office, label: "OFFICE" }
-                    }
+/// Phase 54.4 Plan 16 (G-54.4-25) + Phase 54.9 (D-01): the three tabs of the System screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsTab {
+    General,
+    Orb,
+    Menu,
+}
+
+impl SettingsTab {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Orb => "Orb",
+            SettingsTab::Menu => "Menu",
+        }
+    }
+
+    pub(crate) fn tab_id(self) -> &'static str {
+        match self {
+            SettingsTab::General => "ih-settings-tab-general",
+            SettingsTab::Orb => "ih-settings-tab-orb",
+            SettingsTab::Menu => "ih-settings-tab-menu",
+        }
+    }
+
+    pub(crate) fn panel_id(self) -> &'static str {
+        match self {
+            SettingsTab::General => "ih-settings-panel-general",
+            SettingsTab::Orb => "ih-settings-panel-orb",
+            SettingsTab::Menu => "ih-settings-panel-menu",
+        }
+    }
+
+    /// The tab to the right, wrapping from the last to the first.
+    pub(crate) fn next(self) -> SettingsTab {
+        match self {
+            SettingsTab::General => SettingsTab::Orb,
+            SettingsTab::Orb => SettingsTab::Menu,
+            SettingsTab::Menu => SettingsTab::General,
+        }
+    }
+
+    /// The tab to the left, wrapping from the first to the last.
+    pub(crate) fn prev(self) -> SettingsTab {
+        match self {
+            SettingsTab::General => SettingsTab::Menu,
+            SettingsTab::Orb => SettingsTab::General,
+            SettingsTab::Menu => SettingsTab::Orb,
+        }
+    }
+}
+
+/// Tab order, left to right.
+const SETTINGS_TABS: [SettingsTab; 3] = [SettingsTab::General, SettingsTab::Orb, SettingsTab::Menu];
+
+/// The General | Orb | Menu tab strip, following the Logs screen's `.tabs` /
+/// `role="tablist"` precedent and Kanban's Left/Right keyboard precedent.
+/// Every tab stays in the tab order (no roving tabindex), so arrow selection
+/// never strands focus.
+#[component]
+fn SettingsTabs(active: Signal<SettingsTab>) -> Element {
+    let mut active = active;
+    let cur = *active.read();
+
+    rsx! {
+        div {
+            class: "tabs",
+            role: "tablist",
+            "aria-label": "Settings sections",
+            for tab in SETTINGS_TABS {
+                button {
+                    key: "{tab.tab_id()}",
+                    id: tab.tab_id(),
+                    class: "tab",
+                    class: if cur == tab { "is-active" },
+                    r#type: "button",
+                    role: "tab",
+                    "aria-selected": if cur == tab { "true" } else { "false" },
+                    onclick: move |_| active.set(tab),
+                    onkeydown: move |evt: KeyboardEvent| {
+                        let target = match evt.key() {
+                            Key::ArrowRight => Some(tab.next()),
+                            Key::ArrowLeft => Some(tab.prev()),
+                            _ => None,
+                        };
+                        if let Some(next) = target {
+                            evt.prevent_default();
+                            active.set(next);
+                            crate::components::hermes_app::header::focus_element_by_id(next.tab_id());
+                        }
+                    },
+                    "{tab.label()}"
                 }
             }
         }
@@ -849,5 +980,218 @@ fn LoginThemePanel() -> Element {
                 p { style: "color:var(--red);font-size:11px;margin:0;", "{err}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Phase 54.4 Plan 02 (D-05/D-07/D-26): the Settings appearance section no
+    //! longer offers wheel-size, Chat rail or Breadcrumb controls. Needles are
+    //! assembled from fragments so the test cannot match its own source.
+
+    const SETTINGS_RS: &str = include_str!("settings.rs");
+
+    #[test]
+    fn settings_screen_has_no_retired_chrome_controls() {
+        for field in ["rail", "breadcrumb", "wheel_size"] {
+            let needle = ["p.", field].concat();
+            assert!(
+                !SETTINGS_RS.contains(&needle),
+                "settings.rs still references retired control accessor `{needle}`"
+            );
+        }
+        let kept = ["p.", "footer"].concat();
+        assert!(
+            SETTINGS_RS.contains(&kept),
+            "settings.rs must keep the footer control (`{kept}`)"
+        );
+    }
+
+    /// The text of `ScreenSettings` only: from its signature to the next
+    /// `#[component]`. Needles are assembled from fragments so this region scan
+    /// can never match the test source itself.
+    fn screen_settings_region() -> &'static str {
+        let start_needle = ["pub fn Screen", "Settings("].concat();
+        let end_needle = ["#[comp", "onent]"].concat();
+        let start = SETTINGS_RS
+            .find(&start_needle)
+            .expect("ScreenSettings signature present");
+        let rest = &SETTINGS_RS[start + start_needle.len()..];
+        let end = rest
+            .find(&end_needle)
+            .expect("a component follows ScreenSettings");
+        &SETTINGS_RS[start..start + start_needle.len() + end]
+    }
+
+    #[test]
+    fn config_yaml_wiring_hint_links_are_buttons() {
+        let region = screen_settings_region();
+        let old_span = ["span { class: \"help\", \"set via ", "config.yaml\" }"].concat();
+        assert_eq!(region.matches(&old_span).count(), 0, "hint spans remain");
+        let link = ["cfg-", "hintlink"].concat();
+        assert_eq!(region.matches(&link).count(), 3);
+    }
+
+    #[test]
+    fn config_yaml_wiring_panel_between_kanban_and_ui_preferences() {
+        let kanban = SETTINGS_RS
+            .find(&["panel-title\", \"Kan", "ban\""].concat())
+            .expect("Kanban panel title");
+        let mount = SETTINGS_RS
+            .find(&["ConfigYaml", "Panel {"].concat())
+            .expect("ConfigYamlPanel mount");
+        let prefs = SETTINGS_RS
+            .find(&["panel-title\", \"UI Pref", "erences\""].concat())
+            .expect("UI Preferences panel title");
+        assert!(kanban < mount && mount < prefs);
+    }
+
+    #[test]
+    fn config_yaml_wiring_focus_tick_declared_before_summary_future() {
+        let tick = SETTINGS_RS
+            .find(&["let mut focus_tick = use_", "signal("].concat())
+            .expect("focus_tick signal");
+        let future = SETTINGS_RS
+            .find(&["use_server_", "future(crate::server::api::get_config_", "summary)"].concat())
+            .expect("summary server future");
+        assert!(tick < future, "focus_tick must stay above the early return");
+    }
+
+    thread_local! {
+        static TEST_TAB: std::cell::Cell<super::SettingsTab> =
+            const { std::cell::Cell::new(super::SettingsTab::General) };
+    }
+
+    fn render_tabs(tab: super::SettingsTab) -> String {
+        use dioxus::prelude::*;
+        TEST_TAB.with(|t| t.set(tab));
+
+        fn test_app() -> Element {
+            let initial = TEST_TAB.with(|t| t.get());
+            let active = use_signal(|| initial);
+            rsx! { super::SettingsTabs { active } }
+        }
+
+        let mut dom = VirtualDom::new(test_app);
+        dom.rebuild_in_place();
+        dioxus::ssr::render(&dom)
+    }
+
+    /// The opening `<button ...>` tag that carries `id="{id}"`.
+    fn button_tag<'a>(html: &'a str, id: &str) -> &'a str {
+        let needle = format!("id=\"{id}\"");
+        let at = html
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{needle}` not in html: {html}"));
+        let start = html[..at]
+            .rfind("<button")
+            .expect("a <button before the id");
+        let end = at + html[at..].find('>').expect("tag closes");
+        &html[start..=end]
+    }
+
+    #[test]
+    fn settings_tabs_render_a_three_tab_tablist() {
+        for active in super::SETTINGS_TABS {
+            let html = render_tabs(active);
+            assert_eq!(html.matches("role=\"tablist\"").count(), 1, "{html}");
+            assert_eq!(html.matches("role=\"tab\"").count(), 3, "{html}");
+            for tab in super::SETTINGS_TABS {
+                assert!(html.contains(&format!("id=\"{}\"", tab.tab_id())), "{html}");
+                assert!(html.contains(tab.label()), "{html}");
+            }
+            assert_eq!(html.matches("aria-selected=\"true\"").count(), 1, "{html}");
+            assert_eq!(html.matches("aria-selected=\"false\"").count(), 2, "{html}");
+            let selected = button_tag(&html, active.tab_id());
+            assert!(selected.contains("aria-selected=\"true\""), "{selected}");
+            for tab in super::SETTINGS_TABS.into_iter().filter(|t| *t != active) {
+                let other = button_tag(&html, tab.tab_id());
+                assert!(other.contains("aria-selected=\"false\""), "{other}");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_tab_next_prev_wrap() {
+        use super::SettingsTab::*;
+        assert_eq!(
+            (General.next(), Orb.next(), Menu.next()),
+            (Orb, Menu, General)
+        );
+        assert_eq!(
+            (General.prev(), Orb.prev(), Menu.prev()),
+            (Menu, General, Orb)
+        );
+    }
+
+    #[test]
+    fn settings_tab_signal_precedes_the_server_future() {
+        let region = screen_settings_region();
+        let signal_at = region
+            .find(&["use_sig", "nal("].concat())
+            .expect("ScreenSettings declares a tab signal");
+        let future_at = region
+            .find(&["use_server_", "future("].concat())
+            .expect("ScreenSettings loads its summary through a server future");
+        assert!(
+            signal_at < future_at,
+            "the tab signal must be declared before the server future early return"
+        );
+        let line_start = region[..signal_at].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = signal_at + region[signal_at..].find('\n').unwrap_or(0);
+        assert!(
+            region[line_start..line_end].contains("SettingsTab::General"),
+            "the first signal must be the tab signal, defaulting to General"
+        );
+    }
+
+    #[test]
+    fn settings_screen_mounts_voice_and_orb_panels_once() {
+        let region = screen_settings_region();
+        let voice = ["Voice", "Settings {"].concat();
+        let orb = ["OrbSettings", "Panel {"].concat();
+        let panel = ["role: \"tab", "panel\""].concat();
+        assert_eq!(
+            region.matches(&voice).count(),
+            1,
+            "Voice panel mounted once"
+        );
+        assert_eq!(region.matches(&orb).count(), 1, "Orb panel mounted once");
+        assert_eq!(region.matches(&panel).count(), 3, "one tabpanel per tab");
+    }
+
+    const VOICE_MODE_RS: &str = include_str!("voice_mode.rs");
+
+    /// G-54.4-34: the General tab's Voice embed opts out of the orb Appearance
+    /// section; the voice-mode overlay mount keeps the default and never names
+    /// the prop.
+    #[test]
+    fn general_voice_mount_opts_out_and_overlay_mount_does_not() {
+        let mount = ["Voice", "Settings {"].concat();
+        let prop = ["show_orb_", "appearance"].concat();
+        let opt_out = [prop.as_str(), ": false"].concat();
+
+        let region = screen_settings_region();
+        assert_eq!(
+            region.matches(&mount).count(),
+            1,
+            "General mounts the Voice form once"
+        );
+        assert_eq!(
+            region.matches(&opt_out).count(),
+            1,
+            "the General mount opts out of the orb appearance exactly once"
+        );
+
+        assert_eq!(
+            VOICE_MODE_RS.matches(&mount).count(),
+            1,
+            "positive control: the overlay mounts the Voice form once"
+        );
+        assert_eq!(
+            VOICE_MODE_RS.matches(&prop).count(),
+            0,
+            "the overlay mount must not name the prop (default true)"
+        );
     }
 }

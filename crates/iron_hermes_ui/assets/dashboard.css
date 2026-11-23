@@ -1,0 +1,890 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Phase 54.4 Plan 01 — persistent header (banner + docked wheel).
+
+   Header-only rules. Every colour is an existing theme variable
+   (var(--bg), var(--bg-card), var(--teal), ...) so all five themes work
+   unchanged (D-02); no hex literal is introduced here. Glyphs are Unicode
+   (D-03). The sizing variables (--ih-header-h, --ih-wheel-size,
+   --ih-overhang-h, ...) are declared in site.css :root.
+
+   Loaded unconditionally and AFTER screens.css (app.rs): the header is
+   mounted outside every screen, so a per-screen sheet could never style it.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Banner. overflow: visible is required: the wheel box is taller than the
+   banner and hangs below it by --ih-overhang-h. The single explicit grid row
+   is exactly the banner height, so the wheel cannot enlarge an implicit row. */
+.ih-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--ih-header-h);
+  z-index: 70;
+  overflow: visible;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-faint);
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: var(--ih-wheel-size) minmax(0, 1fr);
+  grid-template-rows: var(--ih-header-h);
+  column-gap: 16px;
+  padding: 0 24px 0 0;
+}
+
+/* Column 1: the docked wheel, flush to the viewport's top-left corner. */
+.ih-header-wheel {
+  align-self: start;
+  height: var(--ih-wheel-size);
+}
+
+/* Column 2: status strip (row 1) over controls (row 2).
+   16 + 32 + 8 + 40 + 16 = 112. */
+.ih-header-rows {
+  align-self: start;
+  display: grid;
+  grid-template-rows: 32px 40px;
+  row-gap: 8px;
+  padding: 16px 0;
+  min-width: 0;
+}
+
+/* Row 1 — status strip. */
+.ih-status-strip {
+  height: 32px;
+  background: var(--bg);
+  border: 1px solid var(--border-faint);
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  overflow: hidden;
+}
+.ih-status-strip .model-id {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Row 2 — controls. */
+.ih-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Screen shortcuts (>= 1100px). Never truncate, never wrap. */
+.ih-nav {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ih-nav-btn,
+.ih-menu-btn {
+  height: 40px;
+  min-width: 64px;
+  padding: 0 16px;
+  font: 700 10px/1.4 var(--font);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  border: 1px solid var(--border);
+  background: var(--bg-card-hover);
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ih-nav-btn[aria-current="page"] {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+.ih-nav-btn:focus-visible,
+.ih-menu-btn:focus-visible,
+.ih-menu-item:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+/* MENU overflow (< 1100px): hidden by default, shown by the media query. */
+.ih-menu-wrap {
+  position: relative;
+  display: none;
+}
+.ih-menu-btn {
+  min-width: 80px;
+}
+.ih-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 129;
+  background: transparent;
+}
+.ih-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 130;
+  min-width: 200px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-2);
+}
+/* MORE overflow (shortcuts 6+): lives inside .ih-nav, so the < 1100px rule
+   that hides .ih-nav hides it too. The popup anchors to the right edge. */
+.ih-more-wrap {
+  position: relative;
+  display: inline-block;
+}
+.ih-more-wrap .ih-menu {
+  left: auto;
+  right: 0;
+}
+.ih-menu-item {
+  display: block;
+  width: 100%;
+  height: 40px;
+  padding: 0 16px;
+  text-align: left;
+  font: 700 10px/1.4 var(--font);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.ih-menu-item:hover {
+  background: var(--bg-card-hover);
+}
+.ih-menu-item[aria-current="page"] {
+  color: var(--teal);
+}
+
+/* Responsive contract: whole segments collapse by priority so TOK is never
+   pushed out of view (UPTIME first, then IH BUILD, then PROVIDER and MODEL). */
+@media (max-width: 1199px) {
+  .ih-status-strip .ih-seg-uptime { display: none; }
+}
+@media (max-width: 1099px) {
+  .ih-status-strip .ih-seg-build { display: none; }
+  .ih-status-strip .model-id { max-width: 120px; }
+  .ih-nav { display: none; }
+  .ih-menu-wrap { display: block; }
+}
+@media (max-width: 899px) {
+  .ih-status-strip .ih-seg-provider,
+  .ih-status-strip .ih-seg-model { display: none; }
+  .ih-header-rows { padding: 8px 0; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Phase 54.4 Plan 05 — Agent dropdown, env chip, activation notice.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Agent dropdown (D-12). The trigger is the first control in row 2; it gives
+   way (name ellipsis) before the nav shortcuts do. The wrap is the positioned
+   ancestor of the menu and deliberately has no overflow. */
+.ih-agent-wrap {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.ih-agent-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  min-width: 160px;
+  max-width: 220px;
+  flex-shrink: 1;
+  padding: 0 16px;
+  font: 700 10px/1.4 var(--font);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  border: 1px solid var(--border);
+  background: var(--bg-card-hover);
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ih-agent-trigger:focus-visible,
+.ih-agent-opt:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+.ih-agent-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  color: var(--teal);
+}
+.ih-agent-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 130;
+  width: 280px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-2);
+}
+.ih-agent-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  font: 700 12px/1.4 var(--font);
+  color: var(--text);
+  cursor: pointer;
+}
+.ih-agent-opt:hover,
+.ih-agent-opt:focus {
+  background: var(--bg-card-hover);
+}
+.ih-agent-opt[aria-selected="true"] {
+  box-shadow: inset 2px 0 0 var(--teal);
+}
+.ih-agent-opt-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ih-agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ih-agent-dot--ok { background: var(--green); }
+.ih-agent-dot--gap { background: var(--amber); }
+.ih-agent-marker {
+  flex-shrink: 0;
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+.ih-agent-note {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 16px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Environment chip (D-01). Read-only by construction: no caret, no hover
+   rule, default cursor, fixed width, never wraps. */
+.ih-env-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  width: 160px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 12px;
+  border: 1px solid var(--border-faint);
+  background: var(--bg);
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ih-env-chip .ih-seg-label {
+  flex-shrink: 0;
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+.ih-env-chip .v {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 700 12px/1.4 var(--font);
+  color: var(--text);
+}
+
+/* Non-blocking activation notice (D-23). Fixed, above the footer. */
+.ih-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 44px;
+  z-index: 9999;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  max-width: 480px;
+  padding: 8px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--amber);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: var(--shadow-2);
+}
+.ih-toast-dismiss {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ih-toast-dismiss:hover,
+.ih-toast-dismiss:focus-visible {
+  color: var(--text);
+}
+
+/* The env chip folds into MENU ▾ below 900px as a non-interactive row. */
+.ih-menu-env {
+  display: none;
+  align-items: center;
+  height: 40px;
+  padding: 0 16px;
+  border-top: 1px solid var(--border-faint);
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  cursor: default;
+}
+
+@media (max-width: 1199px) {
+  .ih-agent-trigger { max-width: 180px; }
+  .ih-env-chip { width: 140px; }
+}
+@media (max-width: 1099px) {
+  .ih-env-chip { width: 120px; }
+}
+@media (max-width: 899px) {
+  .ih-header-controls .ih-env-chip { display: none; }
+  .ih-menu-env { display: flex; }
+}
+
+/* No header transition exists today, so there is nothing to disable under
+   prefers-reduced-motion; add header motion inside such a guard if it is ever
+   introduced. */
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Phase 54.4 — Chat dashboard chrome (D-10/D-11/D-13/D-14/D-21/D-26).
+
+   Chat's .screen-header sits in the wheel band (right of the docked wheel);
+   the agent tab strip is the first row BELOW the wheel, full width, above the
+   chat body. Every size comes from the :root variables in site.css
+   (--ih-row-inset, --ih-overhang-h, --ih-tabstrip-h, --ih-widget-col-w); no
+   wheel dimension is hard-coded here. Scoped to #screen-chat here (not in
+   screens.css) because Chat is excluded from the generic band rule and owns
+   its own gap/padding, like Kanban and Logs.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Top padding 16px + header min-height = --ih-overhang-h (gap is 0), so the
+   tab-strip row starts exactly at the wheel's bottom edge. */
+#screen-chat { padding: 16px 16px 60px; gap: 0; }
+#screen-chat > .screen-header:first-child {
+  box-sizing: border-box;
+  margin-left: calc(var(--ih-row-inset) - 16px);
+  min-height: calc(var(--ih-overhang-h) - 16px);
+}
+#screen-chat > .screen-header .screen-actions {
+  flex-wrap: wrap;
+  flex-shrink: 1;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+/* Tab-strip row: full width, no --ih-row-inset, no spacer. */
+.ih-tabstrip-row {
+  height: var(--ih-tabstrip-h);
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* Agent tab strip: one scrolling row (a deliberate exception to the wrapping
+   .tabs). position: relative makes it the offsetParent the focused-tab scroll
+   helper measures against. 16px edge fade on both scrolling sides. */
+.ih-tabstrip {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border-faint);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 16px), transparent 100%);
+}
+.ih-tabstrip::-webkit-scrollbar { display: none; }
+.ih-tabstrip-empty {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.ih-tab {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  min-width: 120px;
+  max-width: 240px;
+  padding: 0 8px;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+}
+.ih-tab:hover { color: var(--text); background: var(--bg-card-hover); }
+.ih-tab.is-focused { min-width: 200px; color: var(--teal); border-bottom: 2px solid var(--teal); }
+
+.ih-tab-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ih-tab-live { color: var(--green); margin-right: 8px; font-size: 10px; }
+
+/* Controls (gear/park/close). Shown in flow on the focused tab; on the others
+   they appear as an overlay only on hover / focus-within (keyboard reachable)
+   so a tab never changes width or pushes its neighbours. */
+.ih-tab-controls { display: none; align-items: center; gap: 4px; flex: 0 0 auto; }
+.ih-tab.is-focused .ih-tab-controls { display: flex; }
+.ih-tab:not(.is-focused):hover .ih-tab-controls,
+.ih-tab:not(.is-focused):focus-within .ih-tab-controls {
+  display: flex;
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  padding: 0 8px 0 24px;
+  background: linear-gradient(to right, transparent, var(--bg-card-hover) 24px);
+}
+.ih-tab-ctl {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: 700 14px/1 var(--font);
+  cursor: pointer;
+}
+.ih-tab-ctl:hover { color: var(--text); }
+.ih-tab-name:focus-visible,
+.ih-tab-ctl:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+
+/* The chat body: widget column (only when something is parked) beside the
+   single root chat column. */
+.ih-chat-body { display: flex; gap: 16px; flex: 1 1 auto; min-height: 0; }
+.ih-chat-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* No narrow-width override: the header band is derived from the :root
+   variables (which already shrink below 900px), so the tab-strip row always
+   starts at the docked wheel's bottom edge. */
+
+/* Widget column (D-13/D-14): parked agent cards. Rendered only while a tab is
+   parked, so the chat otherwise spans the full width. */
+.ih-widget-col {
+  flex: 0 0 var(--ih-widget-col-w);
+  width: var(--ih-widget-col-w);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+.ih-parked-cards {
+  max-height: 50%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ih-parked-card {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 72px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.ih-parked-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-height: 72px;
+  padding: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+.ih-parked-body:hover { background: var(--bg-card-hover); }
+.ih-parked-name {
+  /* Leave room for the corner close button. */
+  padding-right: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+}
+.ih-parked-label {
+  font: 700 10px/1.4 var(--font);
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+.ih-parked-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: 700 12px/1 var(--font);
+  cursor: pointer;
+}
+.ih-parked-close:hover { color: var(--text); }
+.ih-parked-body:focus-visible,
+.ih-parked-close:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+
+/* Below 900px the cards become an 80px strip above the chat. */
+@media (max-width: 899px) {
+  .ih-chat-body { flex-direction: column; }
+  .ih-widget-col {
+    flex: 0 0 80px;
+    width: auto;
+    height: 80px;
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .ih-parked-cards { flex-direction: row; max-height: none; overflow-y: hidden; }
+  .ih-parked-card { flex: 0 0 200px; min-height: 0; }
+  .ih-parked-body { min-height: 0; height: 100%; padding: 8px 16px; }
+}
+
+/* Non-live tab banner (D-21): a fixed 40px single line above the chat body.
+   The text ellipsizes before the button, which is never clipped. */
+.ih-nonlive-banner {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--bg-card);
+  border-left: 2px solid var(--amber);
+  color: var(--text);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.ih-nonlive-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ih-nonlive-banner .ih-btn-secondary { flex-shrink: 0; }
+.ih-btn-secondary {
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  background: var(--bg-card-hover);
+  color: var(--text);
+  font: 700 12px/1 var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ih-btn-secondary:hover { border-color: var(--teal); color: var(--teal); }
+.ih-btn-secondary:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+
+/* ─── Phase 54.4 Plan 09 (D-16/D-19): per-agent settings slide-over ─────────
+   Non-modal (no scrim): fixed at the right, below the banner. The width cap
+   keeps it from ever extending under the docked wheel. z 60 is above the
+   footer (50) and below the header's stacking context (70). */
+.ih-slideover {
+  position: fixed;
+  right: 0;
+  top: var(--ih-header-h);
+  bottom: 0;
+  width: min(var(--ih-slideover-w), calc(100vw - var(--ih-wheel-size)));
+  z-index: 60;
+  background: var(--bg-card);
+  border-left: 1px solid var(--teal);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(0);
+  transition: transform var(--d-slow) var(--ease-out);
+  animation: ih-slideover-in var(--d-slow) var(--ease-out);
+}
+@keyframes ih-slideover-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.ih-slideover-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  flex: 0 0 48px;
+  padding: 0 8px 0 16px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.ih-slideover-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 700 16px/1.2 var(--font);
+  color: var(--text);
+}
+.ih-slideover-title:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.ih-unsaved-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  background: var(--amber);
+  border-radius: 50%;
+}
+.ih-slideover-hide {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: 700 14px/1 var(--font);
+  cursor: pointer;
+}
+.ih-slideover-hide:hover { color: var(--text); }
+.ih-slideover-hide:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+.ih-slideover-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.ih-slideover-section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ih-slideover-label { font: 700 12px/1 var(--font); color: var(--text-dim); letter-spacing: 0.04em; }
+.ih-slideover-note { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+.ih-slideover-ok { font-size: 12px; color: var(--teal); overflow-wrap: anywhere; }
+.ih-slideover-error { font-size: 12px; color: var(--red); overflow-wrap: anywhere; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.ih-slideover .voice-settings-select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.ih-slideover-footer {
+  flex: 0 0 auto;
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-top: 1px solid var(--border-faint);
+  background: var(--bg-card);
+}
+.ih-slideover-footer-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.ih-slideover-footer-row:last-child { justify-content: flex-start; }
+.ih-slideover-helper { min-width: 0; font-size: 12px; color: var(--text-dim); }
+.ih-btn-primary {
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--teal);
+  background: var(--teal);
+  color: var(--fg-on-accent);
+  font: 700 12px/1 var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ih-btn-primary:disabled,
+.ih-btn-secondary:disabled,
+.ih-btn-danger:disabled { opacity: 0.45; cursor: not-allowed; }
+.ih-btn-primary:focus-visible,
+.ih-btn-danger:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.ih-btn-danger {
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--red);
+  background: transparent;
+  color: var(--red);
+  font: 700 12px/1 var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ih-slideover { transition: none; animation: none; }
+}
+/* Pinned between the title bar and the scrolling body: never shrinks, never
+   scrolls with the body (G-54.4-5). */
+.ih-confirm-bar {
+  flex: 0 0 auto;
+  margin: 16px 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--amber);
+  border-left-width: 2px;
+  background: var(--bg-card-hover);
+  font-size: 12px;
+  color: var(--text);
+}
+.ih-confirm-text { overflow-wrap: anywhere; }
+.ih-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Root default agent (D-22): four read-only rows and links out. */
+.ih-root-rows { margin: 0; display: flex; flex-direction: column; gap: 16px; }
+.ih-root-row { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ih-root-row dt, .ih-root-row dd { margin: 0; }
+.ih-root-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--text);
+}
+.ih-root-links { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ─── Phase 54.4 Plan 10 (D-17/D-18/D-20): opt-out chips, selection lists and
+   search inside the settings slide-over. A chip means ENABLED. ───────────── */
+.ih-chip-box {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.ih-chip-group { display: flex; flex-direction: column; gap: 8px; max-width: 100%; min-width: 0; }
+.ih-chip {
+  height: 32px;
+  padding: 0 8px;
+  font-size: 12px;
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  color: var(--text);
+}
+.ih-chip:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.ih-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ih-chip-remove,
+.ih-chip-expand {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: 700 12px/1 var(--font);
+  cursor: pointer;
+}
+.ih-chip-remove:hover,
+.ih-chip-expand:hover { color: var(--text); }
+.ih-chip-remove:focus-visible,
+.ih-chip-expand:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+.ih-chip-remove:disabled { opacity: 0.45; cursor: not-allowed; }
+.ih-chip-members {
+  margin-left: 16px;
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.ih-select-list { max-height: 192px; overflow-y: auto; min-width: 0; }
+.ih-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 40px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-faint);
+}
+.ih-select-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.ih-select-name,
+.ih-select-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ih-select-name { font-size: 12px; color: var(--text); }
+.ih-select-desc { font-size: 12px; color: var(--text-dim); }
+.ih-select-add { flex: 0 0 auto; height: 32px; padding: 0 8px; }
+.ih-select-add:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.ih-search {
+  height: 40px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-card-hover);
+  color: var(--text);
+  font: 400 12px/1 var(--font);
+}
+.ih-search:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+.ih-search:disabled { opacity: 0.45; cursor: not-allowed; }
+.ih-slideover-empty { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ih-load-default { margin-right: auto; }

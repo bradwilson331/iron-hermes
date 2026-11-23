@@ -1090,9 +1090,9 @@ fn render_model_picker_list(
             let current_model = app.resolver.resolve_for_main().default_model.clone();
             let models = model_picker_models_filtered(app, provider);
             if models.is_empty() {
-                lines.push(Line::from(format!(
-                    "No models match \"{}\".",
-                    app.model_picker_filter
+                lines.push(Line::from(empty_model_list_copy(
+                    provider,
+                    &app.model_picker_filter,
                 )));
             } else {
                 push_picker_rows(
@@ -1106,6 +1106,18 @@ fn render_model_picker_list(
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Step-2 empty-list copy: a filter that matches nothing, or (no filter) a
+/// provider whose model list is empty and how to fill it (G-58.3.1-10).
+fn empty_model_list_copy(provider: &str, filter: &str) -> String {
+    if filter.is_empty() {
+        format!(
+            "No models known for {provider}. Run /models refresh, or set providers.{provider}.default_model."
+        )
+    } else {
+        format!("No models match \"{filter}\".")
+    }
 }
 
 /// Right pane: fixed field order per step — provider/model name (BOLD),
@@ -1147,10 +1159,16 @@ fn render_model_picker_detail(
                 } else {
                     lines.push(Line::from(format!("Base URL: {}", row.base_url)));
                 }
-                lines.push(Line::from(format!("Default model: {}", row.default_model)));
+                let no_default = row.default_model.trim().is_empty();
+                lines.push(Line::from(if no_default {
+                    "Default model: (none)".to_string()
+                } else {
+                    format!("Default model: {}", row.default_model)
+                }));
                 lines.push(Line::from(""));
                 let hint = match step {
                     PickerStep::Provider => "[Enter] next: choose model   [Esc] close",
+                    _ if no_default => "[Enter] next: choose model   [Esc] close",
                     _ => "[Enter] switch provider   [Esc] close",
                 };
                 lines.push(Line::from(Span::styled(
@@ -1163,9 +1181,9 @@ fn render_model_picker_detail(
             let provider = selected_provider.as_deref().unwrap_or("");
             let models = model_picker_models_filtered(app, provider);
             if models.is_empty() {
-                lines.push(Line::from(format!(
-                    "No models match \"{}\".",
-                    app.model_picker_filter
+                lines.push(Line::from(empty_model_list_copy(
+                    provider,
+                    &app.model_picker_filter,
                 )));
             } else if let Some(model) = models.get(app.model_picker_selected) {
                 lines.push(Line::from(Span::styled(
@@ -1175,7 +1193,7 @@ fn render_model_picker_detail(
                 lines.push(Line::from(format!("Provider: {provider}")));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "These are your configured models, not a full catalog.",
+                    "Your configured models plus the ids this provider listed at the last /models refresh.",
                     Style::default().add_modifier(Modifier::DIM),
                 )));
                 lines.push(Line::from(""));

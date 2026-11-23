@@ -3,10 +3,7 @@
 //! configuration path exists this phase — the CONFIGURE button is OMITTED
 //! entirely (not rendered disabled), since there is nothing to configure.
 //!
-//! `scope` is accepted (not read) to keep this child's prop signature
-//! consistent with its `ChatPlatformCards`/`WebhookRouteCards`/
-//! `ApiServerCard` siblings (`mod.rs`'s established contract, Plan 01) even
-//! though this purely static card needs no scope-scoped data.
+//! Rendered one per slot by `card_list::GatewayCardList` (Phase 54.10, D-18).
 //!
 //! # Reuses `.plat-card` unmodified — no new CSS (D-10)
 //!
@@ -16,24 +13,14 @@
 //! therefore already renders gray — exactly D-01's "NOT AVAILABLE, gray"
 //! requirement — with no new class needed at all.
 
-use crate::server::tools_config_api::ConfigScope;
 use dioxus::prelude::*;
-
-#[component]
-pub fn TeaserCards(scope: ReadSignal<ConfigScope>) -> Element {
-    let _ = scope;
-    rsx! {
-        TeaserCard { name: "Email" }
-        TeaserCard { name: "Voice" }
-    }
-}
 
 /// One disabled teaser card. Deliberately renders NO button of any kind —
 /// D-01's "the button is omitted, not disabled" clause — so a structural
 /// check for an absent `button` node in this component's output is a real
 /// assertion, not an accident of styling.
 #[component]
-fn TeaserCard(name: &'static str) -> Element {
+pub(super) fn TeaserCard(name: &'static str) -> Element {
     rsx! {
         div { class: "plat-card",
             div { class: "plat-head",

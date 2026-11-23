@@ -153,12 +153,20 @@ pub async fn run_doctor_check(browser: bool) -> Result<()> {
     // immediately after the PID liveness check above.
     print_gateway_log_status(&home);
 
+    // Phase 54.8 Plan 10 (D-21): what the Telegram site-deploy flow is missing.
+    // Doctor-only surface; reuses the config loaded above.
+    print_site_preflight(&doctor_config, &home).await;
+
     // WR-03 (phase 47.4): flag profiles that may have been exfiltrated during the
     // CR-03 window, before plan 20 closed the `${...}` substitution path. A
     // pre-patch exploit persisted root's plaintext credential into the victim
     // profile's `.env`, and nothing else surfaces that. Detection only — a
     // disclosed credential is remediated by ROTATION, never by editing the file.
     print_profile_exposure_audit(&home);
+
+    // Phase 57 Plan 15 (D-12): is the detection sidecar installed, pinned and
+    // healthy, and what does its absence mean at the effective DEFCON level.
+    print_security_sidecar_section(&doctor_config).await;
 
     // Phase 53 Plan 03 (D-06): opt-in only. The whole block is behind the
     // flag — plain `ironhermes doctor` never resolves a browser binary for
@@ -292,12 +300,221 @@ fn print_check(name: &str, ok: bool) {
 }
 
 // -----------------------------------------------------------------------
+// Phase 57 Plan 15 (D-12): security sidecar report.
+//
+// With the default level 3 (D-21) a missing sidecar blocks Warn-class tools
+// (D-12), so "is it installed, pinned and answering" is the first thing an
+// operator needs to see, together with what its absence means at their level.
+// -----------------------------------------------------------------------
+
+/// The tirith-core version the sidecar is pinned to (`ironhermes-tirith`'s
+/// `tirith-core = "=0.4.2"`).
+const PINNED_TIRITH_CORE: &str = "0.4.2";
+
+/// Pure formatting half of [`security_sidecar_report`] (no I/O), so every case
+/// is unit-testable. `version` is the result of a `version` round trip and
+/// `ping_ms` the result of a `ping` round trip; the sidecar is only ever
+/// reported healthy when both succeeded (T-57-61).
+fn format_sidecar_report(
+    found: Option<PathBuf>,
+    version: Result<ironhermes_security::SidecarVersion, String>,
+    ping_ms: Option<u128>,
+    level: ironhermes_core::config::DefconLevel,
+    main_version: &str,
+) -> Vec<(String, bool)> {
+    let mut report: Vec<(String, bool)> = Vec::new();
+    let level_line = format!(
+        "DEFCON {} (yolo bypass {})",
+        level.level(),
+        if level.yolo_bypass_active() {
+            "active"
+        } else {
+            "inactive"
+        }
+    );
+
+    // (a) absent: nothing was found to ask, so there is no version or health line.
+    let Some(path) = found else {
+        report.push((
+            format!(
+                "sidecar absent: {} not found",
+                ironhermes_security::SIDECAR_BIN_NAME
+            ),
+            false,
+        ));
+        report.push((level_line, true));
+        report.push((sidecar_consequence_line(level, "installed"), false));
+        return report;
+    };
+
+    report.push((format!("sidecar present: {}", path.display()), true));
+
+    // (b) present but silent: version failed, so there is no health to report.
+    let version = match version {
+        Ok(version) => version,
+        Err(reason) => {
+            report.push((format!("version: unavailable ({reason})"), false));
+            report.push((format!("health: unavailable ({reason})"), false));
+            report.push((level_line, true));
+            report.push((sidecar_consequence_line(level, "healthy"), false));
+            return report;
+        }
+    };
+
+    // (c) answered: build match, pin, protocol, threat DB, health.
+    let build_matches = version.sidecar == main_version;
+    report.push((
+        if build_matches {
+            format!(
+                "sidecar build: ironhermes-tirith {} matches ironhermes {main_version}",
+                version.sidecar
+            )
+        } else {
+            format!(
+                "sidecar build: ironhermes-tirith {} does not match ironhermes {main_version} \
+                 (reinstall both from the same build)",
+                version.sidecar
+            )
+        },
+        build_matches,
+    ));
+    let pinned = version.tirith_core == PINNED_TIRITH_CORE;
+    report.push((
+        if pinned {
+            format!("tirith-core {PINNED_TIRITH_CORE} (pinned)")
+        } else {
+            format!(
+                "tirith-core {} is not the pinned {PINNED_TIRITH_CORE}",
+                version.tirith_core
+            )
+        },
+        pinned,
+    ));
+    report.push((format!("protocol {}", version.protocol), true));
+    report.push((format!("threat DB: {}", version.threat_db), true));
+    let healthy = ping_ms.is_some();
+    report.push((
+        match ping_ms {
+            Some(ms) => format!("health: ok ({ms} ms)"),
+            None => "health: ping failed (no answer to a ping round trip)".to_string(),
+        },
+        healthy,
+    ));
+    report.push((level_line, true));
+    if !healthy {
+        report.push((sidecar_consequence_line(level, "healthy"), false));
+    }
+    report
+}
+
+/// What an absent or unhealthy sidecar means at `level` (D-12): levels 1-3
+/// block Warn-class tools until it is back, levels 4-5 raise them to Warn with
+/// a critical notice (and yolo bypass proceeds on that Warn).
+fn sidecar_consequence_line(level: ironhermes_core::config::DefconLevel, until: &str) -> String {
+    let n = level.level();
+    if level.at_least_as_strict_as(3) {
+        format!(
+            "DEFCON {n}: terminal/execute_code will be blocked until the sidecar is {until} \
+             (every Warn-class tool is blocked at levels 1-3 while it is unavailable)"
+        )
+    } else {
+        format!(
+            "DEFCON {n}: terminal/execute_code are raised to Warn with a critical notice while \
+             the sidecar is unavailable (yolo bypass proceeds on the Warn; the notice is still \
+             logged)"
+        )
+    }
+}
+
+/// Where the sidecar lookup tried, in lookup order, for the absent report.
+fn describe_sidecar_lookup(
+    current_exe: Option<&Path>,
+    env_override: Option<&std::ffi::OsStr>,
+) -> String {
+    let name = ironhermes_security::SIDECAR_BIN_NAME;
+    let mut sibling = current_exe
+        .and_then(Path::parent)
+        .map(|dir| dir.join(name).display().to_string())
+        .unwrap_or_else(|| "(running executable unknown)".to_string());
+    // The lookup also tries next to the executable's real file (symlinks resolved).
+    if let Some(exe) = current_exe
+        && let Ok(real) = std::fs::canonicalize(exe)
+        && real != exe
+        && let Some(dir) = real.parent()
+    {
+        sibling = format!("{sibling}, then {}", dir.join(name).display());
+    }
+    let over = match env_override.filter(|v| !v.is_empty()) {
+        Some(v) => format!(
+            "{}={}",
+            ironhermes_security::SIDECAR_ENV_OVERRIDE,
+            v.to_string_lossy()
+        ),
+        None => format!("{} unset", ironhermes_security::SIDECAR_ENV_OVERRIDE),
+    };
+    format!("next to ironhermes: {sibling}; {over}; PATH")
+}
+
+/// Locate the sidecar, spawn a short-lived client, ask it for its version and a
+/// ping, and format the answer. Never `boot()`s: doctor must not install a
+/// process-global service, and dropping the client kills and reaps the child.
+async fn security_sidecar_report(config: &Config) -> Vec<(String, bool)> {
+    let level = config.effective_defcon_level();
+    let main_version = env!("CARGO_PKG_VERSION");
+
+    let Some(path) = ironhermes_security::locate_sidecar_binary() else {
+        let mut report = format_sidecar_report(
+            None,
+            Err("not found".to_string()),
+            None,
+            level,
+            main_version,
+        );
+        let looked = describe_sidecar_lookup(
+            std::env::current_exe().ok().as_deref(),
+            std::env::var_os(ironhermes_security::SIDECAR_ENV_OVERRIDE).as_deref(),
+        );
+        if let Some(first) = report.first_mut() {
+            first.0.push_str(&format!(" (looked at: {looked})"));
+        }
+        return report;
+    };
+
+    let mut opts =
+        ironhermes_security::SidecarOptions::for_home(&ironhermes_core::get_hermes_home());
+    opts.binary = Some(path.clone());
+    let client = ironhermes_security::SidecarClient::spawn(opts);
+    let version = client.version().await.map_err(|e| e.to_string());
+    let ping_ms = if version.is_ok() {
+        client.ping().await.ok().map(|d| d.as_millis())
+    } else {
+        None
+    };
+    drop(client);
+    format_sidecar_report(Some(path), version, ping_ms, level, main_version)
+}
+
+async fn print_security_sidecar_section(config: &Config) {
+    println!();
+    println!("{}", "Security sidecar".bold());
+    for (label, ok) in security_sidecar_report(config).await {
+        print_check(&label, ok);
+    }
+}
+
+// -----------------------------------------------------------------------
 // 48.3-05 D-06: gateway log status. Three supervision mechanisms
-// (systemd, launchd, the cron watchdog) now converge on ONE canonical
-// gateway log file — see `scripts/deploy/ironhermes-gateway.service`,
+// (systemd, launchd, the cron watchdog) converge on ONE canonical gateway
+// log file — see `scripts/deploy/ironhermes-gateway.service`,
 // `scripts/deploy/com.ironhermes.gateway.plist`, and
-// `scripts/deploy/gateway-watchdog.sh`. This section names that path out
-// loud so an operator never again has to guess which file to grep.
+// `scripts/deploy/gateway-watchdog.sh`.
+//
+// 54.8-04 D-08: a gateway started WITHOUT a supervisor now writes its own
+// daily file `logs/gateway.log.YYYY-MM-DD` (owner-only). The process writes
+// the dated file when unsupervised; the supervisors write the canonical file;
+// doctor reports whichever is current (`current_gateway_log`). This section
+// names that path out loud so an operator never has to guess which file to
+// grep.
 // -----------------------------------------------------------------------
 
 /// How long since the log's mtime before doctor reports it as stale. A
@@ -305,14 +522,45 @@ fn print_check(name: &str, ok: bool) {
 /// that cost the 2026-08-27 investigation (48.3 D-06).
 const GATEWAY_LOG_FRESH_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The single canonical resolver for the gateway's log path.
+/// The single resolver for the CURRENT gateway log.
 ///
-/// Must agree with the three writers: `scripts/deploy/ironhermes-gateway.service`
-/// (`StandardOutput=`/`StandardError=`), `scripts/deploy/com.ironhermes.gateway.plist`
-/// (`StandardOutPath`/`StandardErrorPath`), and `scripts/deploy/gateway-watchdog.sh`
-/// (`LOG_FILE`). If those move, this moves.
-fn gateway_log_path(home: &Path) -> PathBuf {
-    home.join("logs").join("gateway.log")
+/// Phase 54.8 Plan 04 (D-08): there are now two writers. The supervisors
+/// (`scripts/deploy/ironhermes-gateway.service`, `scripts/deploy/com.ironhermes.gateway.plist`,
+/// `scripts/deploy/gateway-watchdog.sh`, `docker/web-entrypoint.sh`) redirect
+/// stdout to the canonical `logs/gateway.log`; an unsupervised
+/// `ironhermes gateway` writes `logs/gateway.log.YYYY-MM-DD` itself. Doctor
+/// reports whichever is most recently modified, so it finds the live log on
+/// supervised and unsupervised installs alike. Only suffixes that parse as a
+/// date count (`gateway.log.pre-48.3` is ignored). Falls back to the canonical
+/// path when nothing exists, which is the path a first supervised start creates.
+fn current_gateway_log(home: &Path) -> PathBuf {
+    let canonical = ironhermes_cli::gateway_log::canonical_gateway_log(home);
+    let mut best: Option<(SystemTime, PathBuf)> = std::fs::metadata(&canonical)
+        .ok()
+        .filter(|m| m.is_file())
+        .and_then(|m| m.modified().ok())
+        .map(|t| (t, canonical.clone()));
+    if let Ok(entries) = std::fs::read_dir(home.join("logs")) {
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if ironhermes_cli::gateway_log::parse_dated_log_name(&name).is_none() {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(entry.path()) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                best = Some((modified, entry.path()));
+            }
+        }
+    }
+    best.map(|(_, p)| p).unwrap_or(canonical)
 }
 
 /// Render the gateway log status as lines, without printing.
@@ -320,7 +568,7 @@ fn gateway_log_path(home: &Path) -> PathBuf {
 /// `now` is a parameter rather than read from the clock so the stale/fresh
 /// boundary is testable without sleeping.
 fn gateway_log_lines(home: &Path, now: SystemTime) -> Vec<String> {
-    let path = gateway_log_path(home);
+    let path = current_gateway_log(home);
     let path_str = path.display().to_string();
     let mut lines = vec![format!("Gateway log: {path_str}")];
 
@@ -367,7 +615,7 @@ fn gateway_log_lines(home: &Path, now: SystemTime) -> Vec<String> {
 /// `print_check`'s `false` branch — its `MISSING` rendering reads as "this
 /// check could not run" rather than "this is what I found."
 fn print_gateway_log_status(home: &Path) {
-    let path = gateway_log_path(home);
+    let path = current_gateway_log(home);
     let lines = gateway_log_lines(home, SystemTime::now());
     let label = format!("Gateway log ({})", path.display());
 
@@ -834,6 +1082,629 @@ fn print_provider_key_coverage(config: &Config, resolver: &ProviderResolver) {
     }
 }
 
+// -----------------------------------------------------------------------
+// Phase 54.8 Plan 10 (D-21, D-13, D-10): Telegram site-deploy preflight.
+//
+// `ironhermes doctor` names, by name only, everything the site flow is
+// missing: tools on PATH, token variables (set / not set, never a value),
+// the terminal env allowlist, skills, OAuth MCP auth, and per-site repo,
+// clone and base-branch state. Rendering is a pure async function over an
+// injectable probe so every rule is unit-testable; `RealProbe` runs each
+// child under the SAME environment the bot's terminal tool builds, so the
+// verdicts describe the credential the bot will actually use (RESEARCH F4).
+// -----------------------------------------------------------------------
+
+/// Deadline for every probe child (`node --version`, `gh api ...`).
+const SITE_PROBE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Token variables the site flow needs. Only presence is ever reported.
+const SITE_TOKEN_VARS: [&str; 3] = [
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "GITHUB_TOKEN",
+];
+
+/// A terminal-tool timeout cap below this makes a deploy impossible.
+const MIN_TERMINAL_TIMEOUT_SECS: i64 = 300;
+
+/// Verdict about the EFFECTIVE prohibition on pushing straight to the base
+/// branch with the bot's own credential (D-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchProtection {
+    /// A pull-request rule this credential cannot bypass.
+    Effective,
+    /// A pull-request rule exists but this credential can bypass it.
+    Bypassable,
+    /// No pull-request requirement applies.
+    NotProtected,
+    /// Not decidable with this credential. Never reported as protected.
+    Unknown,
+}
+
+#[async_trait::async_trait]
+pub(crate) trait SitePreflightProbe: Send + Sync {
+    /// Is `cmd` an executable on the bot's terminal PATH?
+    fn on_path(&self, cmd: &str) -> bool;
+    /// Major version of `node`, when it can be read.
+    async fn node_major(&self) -> Option<u32>;
+    /// Is the named variable set (non-empty) in doctor's own environment?
+    fn env_is_set(&self, name: &str) -> bool;
+    /// `Some(visible)` when skill visibility could be determined.
+    fn skill_visible(&self, name: &str) -> Option<bool>;
+    /// `Some(present)` when the OAuth token store could be consulted.
+    async fn mcp_token_present(&self, namespace: &str) -> Option<bool>;
+    /// `Some(reachable)`; `None` when the probe itself could not run.
+    async fn repo_reachable(&self, repo: &str) -> Option<bool>;
+    /// Effective base-branch protection for the bot's credential.
+    async fn branch_protection(&self, repo: &str, branch: &str) -> BranchProtection;
+}
+
+/// Render the preflight as lines (first line is the section header).
+///
+/// With no `sites:` configured this is the header plus one line and makes no
+/// probe call at all. Never formats an environment value.
+pub(crate) async fn site_preflight_lines(
+    config: &Config,
+    home: &Path,
+    probe: &dyn SitePreflightProbe,
+) -> Vec<String> {
+    let mut lines = vec!["Site deploy preflight".to_string()];
+    if config.sites.is_empty() {
+        lines.push(
+            "  no sites configured (sites: in config.yaml — see docs/SITE-DEPLOY-FROM-CHAT.md)"
+                .to_string(),
+        );
+        return lines;
+    }
+
+    // Tools.
+    for cmd in ["git", "gh", "npm"] {
+        if probe.on_path(cmd) {
+            lines.push(format!("  {cmd}: ok"));
+        } else {
+            lines.push(format!("  {cmd}: missing"));
+        }
+    }
+    if probe.on_path("node") {
+        match probe.node_major().await {
+            Some(major) if major >= 22 => lines.push(format!("  node: v{major} ok")),
+            Some(major) => lines.push(format!(
+                "  node: v{major} — needs >= 22 for current wrangler"
+            )),
+            None => lines.push("  node: present (version unreadable)".to_string()),
+        }
+    } else {
+        lines.push("  node: missing — needs >= 22 for current wrangler".to_string());
+    }
+    if probe.on_path("wrangler") {
+        lines.push("  wrangler: ok".to_string());
+    } else {
+        lines.push(
+            "  wrangler: missing — install the pinned version globally; the site-deploy skill runs the installed binary only"
+                .to_string(),
+        );
+    }
+
+    // Tokens: presence only, and whether the terminal will pass them on.
+    let allowlist = &config.terminal.terminal_env_allowlist;
+    for name in SITE_TOKEN_VARS {
+        let state = if probe.env_is_set(name) {
+            "set"
+        } else {
+            "not set"
+        };
+        lines.push(format!("  {name}: {state}"));
+        if !allowlist.iter().any(|a| a == name) {
+            lines.push(format!(
+                "  {name}: not in terminal.terminal_env_allowlist — wrangler/gh will not see it"
+            ));
+        }
+    }
+
+    if let Some(secs) = config.tools.timeout_overrides.get("terminal")
+        && *secs < MIN_TERMINAL_TIMEOUT_SECS
+    {
+        lines.push(format!(
+            "  terminal timeout: tools.timeout_overrides.terminal = {secs} s caps every terminal call; a deploy needs up to {MIN_TERMINAL_TIMEOUT_SECS} s — raise it"
+        ));
+    }
+
+    // Skills.
+    for name in ["wrangler", "site-deploy"] {
+        match probe.skill_visible(name) {
+            Some(true) => lines.push(format!("  skill {name}: visible")),
+            Some(false) => lines.push(format!(
+                "  skill {name}: not visible — install it and make sure it has no unmet requires_mcp_servers"
+            )),
+            None => lines.push(format!("  skill {name}: unknown")),
+        }
+    }
+
+    // OAuth MCP servers.
+    let mut servers: Vec<&String> = config.mcp_servers.keys().collect();
+    servers.sort();
+    for server in servers {
+        let Ok(cfg) = serde_yaml::from_value::<ironhermes_mcp::McpServerConfig>(
+            config.mcp_servers[server].clone(),
+        ) else {
+            continue;
+        };
+        let Some(ns) = cfg.oauth_provider.as_deref() else {
+            continue;
+        };
+        match probe.mcp_token_present(ns).await {
+            Some(true) => lines.push(format!("  MCP {server}: authorized")),
+            Some(false) => lines.push(format!(
+                "  MCP {server}: not authorized — ironhermes mcp connect {server} --no-browser"
+            )),
+            None => lines.push(format!("  MCP {server}: unknown")),
+        }
+    }
+
+    // Sites.
+    let gh_available = probe.on_path("gh");
+    for (name, parsed) in config.validated_sites() {
+        let site = match parsed {
+            Ok(site) => site,
+            Err(e) => {
+                lines.push(format!(
+                    "  site {name}: INVALID — {}: {}",
+                    e.field, e.reason
+                ));
+                continue;
+            }
+        };
+        let clone_dir = match site.resolve_clone_dir(home) {
+            Ok(dir) => dir,
+            Err(e) => {
+                lines.push(format!(
+                    "  site {name}: INVALID — {}: {}",
+                    e.field, e.reason
+                ));
+                continue;
+            }
+        };
+        lines.push(format!("  site {name} ({})", site.repo));
+        if clone_dir.exists() {
+            lines.push("    clone: present".to_string());
+        } else {
+            lines.push("    clone: absent (cloned on first use)".to_string());
+        }
+        let branch = &site.base_branch;
+        if !gh_available {
+            lines.push("    repo: unknown (gh missing)".to_string());
+            lines.push(format!(
+                "    base branch {branch}: unknown — gh is not available to read protection"
+            ));
+            continue;
+        }
+        match probe.repo_reachable(&site.repo).await {
+            Some(true) => lines.push("    repo: reachable".to_string()),
+            Some(false) => lines.push("    repo: unreachable or no access".to_string()),
+            None => lines.push("    repo: unknown".to_string()),
+        }
+        let verdict = probe.branch_protection(&site.repo, branch).await;
+        lines.push(format!(
+            "    base branch {branch}: {}",
+            branch_protection_text(verdict)
+        ));
+    }
+    lines
+}
+
+/// The `: <verdict>` text of a base-branch line. Plan 14 greps for
+/// `: unknown` and `NOT protected`, so those literals are load-bearing.
+fn branch_protection_text(verdict: BranchProtection) -> &'static str {
+    match verdict {
+        BranchProtection::Effective => {
+            "protected (pull request required; this token cannot bypass it)"
+        }
+        BranchProtection::Bypassable => {
+            "NOT protected — a pull-request rule exists but this token can bypass it (remove the bypass or use a token without it)"
+        }
+        BranchProtection::NotProtected => "NOT protected — enable a PR-required rule (D-10)",
+        BranchProtection::Unknown => {
+            "unknown — protection not readable with this token (use a branch ruleset, which it can read, or confirm in GitHub)"
+        }
+    }
+}
+
+/// Output of one probe child.
+struct ChildOut {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+}
+
+/// Probe that runs real children under the bot's terminal environment.
+struct RealProbe {
+    deadline: Duration,
+    /// Exactly what the terminal tool passes after `env_clear()`.
+    env: std::collections::HashMap<String, String>,
+    home: PathBuf,
+    skills_config: ironhermes_core::config::SkillsConfig,
+    skills: std::sync::OnceLock<ironhermes_core::SkillRegistry>,
+}
+
+impl RealProbe {
+    fn from_config(config: &Config, home: &Path) -> Self {
+        Self::with_env(
+            SITE_PROBE_DEADLINE,
+            ironhermes_core::build_terminal_safe_env(&config.terminal.terminal_env_allowlist, &[]),
+            home,
+            config.skills.clone(),
+        )
+    }
+
+    fn with_env(
+        deadline: Duration,
+        env: std::collections::HashMap<String, String>,
+        home: &Path,
+        skills_config: ironhermes_core::config::SkillsConfig,
+    ) -> Self {
+        Self {
+            deadline,
+            env,
+            home: home.to_path_buf(),
+            skills_config,
+            skills: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Resolve `cmd` against the bot's terminal PATH (not doctor's own).
+    fn resolve(&self, cmd: &str) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.env.get("PATH")?;
+        std::env::split_paths(path)
+            .map(|dir| dir.join(cmd))
+            .find(|candidate| {
+                std::fs::metadata(candidate)
+                    .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+            })
+    }
+
+    /// Run one child asynchronously: env cleared then set to the terminal
+    /// env, stdin closed, both pipes drained by `output()`, bounded by the
+    /// deadline, and killed if the future is dropped. `None` means the child
+    /// could not run or did not finish in time.
+    async fn run(&self, cmd: &str, args: &[&str]) -> Option<ChildOut> {
+        let program = self.resolve(cmd)?;
+        let mut child = tokio::process::Command::new(program);
+        child
+            .args(args)
+            .env_clear()
+            .envs(&self.env)
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let out = tokio::time::timeout(self.deadline, child.output())
+            .await
+            .ok()?
+            .ok()?;
+        Some(ChildOut {
+            ok: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl SitePreflightProbe for RealProbe {
+    fn on_path(&self, cmd: &str) -> bool {
+        self.resolve(cmd).is_some()
+    }
+
+    async fn node_major(&self) -> Option<u32> {
+        let out = self.run("node", &["--version"]).await?;
+        if !out.ok {
+            return None;
+        }
+        out.stdout
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    fn env_is_set(&self, name: &str) -> bool {
+        std::env::var_os(name).is_some_and(|v| !v.is_empty())
+    }
+
+    fn skill_visible(&self, name: &str) -> Option<bool> {
+        let registry = self.skills.get_or_init(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            ironhermes_core::SkillRegistry::load_with_config(&cwd, &self.skills_config)
+        });
+        let Some(record) = registry.find(name) else {
+            return Some(false);
+        };
+        if name == "wrangler" {
+            let needs_mcp = record
+                .hermes_metadata
+                .as_ref()
+                .is_some_and(|m| !m.requires_mcp_servers.is_empty());
+            return Some(!needs_mcp);
+        }
+        Some(true)
+    }
+
+    async fn mcp_token_present(&self, namespace: &str) -> Option<bool> {
+        let path = self.home.join("auth.json");
+        if !path.exists() {
+            return Some(false);
+        }
+        let store = ironhermes_core::AuthStore::open(path).await.ok()?;
+        Some(store.get_token(namespace).await.is_some())
+    }
+
+    async fn repo_reachable(&self, repo: &str) -> Option<bool> {
+        let out = self
+            .run("gh", &["api", &format!("repos/{repo}"), "--jq", ".name"])
+            .await?;
+        Some(out.ok)
+    }
+
+    async fn branch_protection(&self, repo: &str, branch: &str) -> BranchProtection {
+        // (1) Active ruleset rules for the branch, paginated. A failed call is
+        // `None`: it cannot rule a ruleset out.
+        let rules = match self
+            .run(
+                "gh",
+                &[
+                    "api",
+                    "--paginate",
+                    &format!("repos/{repo}/rules/branches/{branch}"),
+                    "--jq",
+                    ".[] | [.type, ((.ruleset_id // 0) | tostring)] | @tsv",
+                ],
+            )
+            .await
+        {
+            Some(out) if out.ok => parse_rules_tsv(&out.stdout),
+            _ => None,
+        };
+
+        // (2) The bot credential's own bypass state, per pull-request ruleset.
+        let mut ruleset_bypass = std::collections::HashMap::new();
+        if let Some(rules) = rules.as_ref() {
+            for id in rules
+                .iter()
+                .filter(|(kind, _)| kind == "pull_request")
+                .filter_map(|(_, id)| *id)
+            {
+                if ruleset_bypass.contains_key(&id) {
+                    continue;
+                }
+                let bypass = match self
+                    .run(
+                        "gh",
+                        &[
+                            "api",
+                            &format!("repos/{repo}/rulesets/{id}"),
+                            "--jq",
+                            ".current_user_can_bypass // empty",
+                        ],
+                    )
+                    .await
+                {
+                    Some(out) if out.ok && !out.stdout.trim().is_empty() => {
+                        Some(out.stdout.trim().to_string())
+                    }
+                    _ => None,
+                };
+                ruleset_bypass.insert(id, bypass);
+            }
+        }
+
+        // (3) Classic protection. Needs Administration read, so the D-13
+        // token usually gets a 403 here, which stays `Unreadable`.
+        let classic = match self
+            .run(
+                "gh",
+                &[
+                    "api",
+                    &format!("repos/{repo}/branches/{branch}/protection"),
+                    "--jq",
+                    "[(.required_pull_request_reviews != null), (.enforce_admins.enabled // false)] | @tsv",
+                ],
+            )
+            .await
+        {
+            Some(out) if out.ok => parse_classic_tsv(&out.stdout),
+            Some(out)
+                if format!("{}\n{}", out.stdout, out.stderr).contains("Branch not protected") =>
+            {
+                ClassicProtection::NotProtected
+            }
+            _ => ClassicProtection::Unreadable,
+        };
+
+        // (4) Is this token an admin of the repo? Only matters when a classic
+        // PR rule does not enforce admins.
+        let token_is_admin = if matches!(
+            classic,
+            ClassicProtection::Protected {
+                pr_required: true,
+                enforce_admins: false
+            }
+        ) {
+            match self
+                .run(
+                    "gh",
+                    &[
+                        "api",
+                        &format!("repos/{repo}"),
+                        "--jq",
+                        ".permissions.admin",
+                    ],
+                )
+                .await
+            {
+                Some(out) if out.ok => match out.stdout.trim() {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        branch_protection_verdict(&ProtectionInputs {
+            rules,
+            ruleset_bypass,
+            classic,
+            token_is_admin,
+        })
+    }
+}
+
+/// What the classic branch-protection endpoint told us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClassicProtection {
+    /// Readable. `pr_required` is the presence of `required_pull_request_reviews`.
+    Protected {
+        pr_required: bool,
+        enforce_admins: bool,
+    },
+    /// The API said `Branch not protected`.
+    NotProtected,
+    /// Forbidden, failed or unparseable (the 403 the D-13 token gets).
+    Unreadable,
+}
+
+/// Everything the verdict is computed from.
+#[derive(Debug, Clone)]
+pub(crate) struct ProtectionInputs {
+    /// Active ruleset rules as `(type, ruleset_id)`; `None` when the read failed.
+    pub(crate) rules: Option<Vec<(String, Option<u64>)>>,
+    /// `current_user_can_bypass` per PR-rule ruleset id; `None` when unreadable.
+    pub(crate) ruleset_bypass: std::collections::HashMap<u64, Option<String>>,
+    pub(crate) classic: ClassicProtection,
+    /// `permissions.admin` of the requesting credential.
+    pub(crate) token_is_admin: Option<bool>,
+}
+
+/// Parse `gh api --paginate ... --jq '.[] | [.type, ruleset_id] | @tsv'`
+/// output. Ruleset id `0` means absent. A malformed line makes the whole parse
+/// `None` rather than silently dropping a rule.
+pub(crate) fn parse_rules_tsv(output: &str) -> Option<Vec<(String, Option<u64>)>> {
+    let mut rules = Vec::new();
+    for line in output.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (kind, id) = line.split_once('\t')?;
+        let id: u64 = id.trim().parse().ok()?;
+        if kind.is_empty() {
+            return None;
+        }
+        rules.push((kind.to_string(), if id == 0 { None } else { Some(id) }));
+    }
+    Some(rules)
+}
+
+/// Parse the `[pr_required, enforce_admins] | @tsv` line of the classic read.
+fn parse_classic_tsv(output: &str) -> ClassicProtection {
+    let Some((pr, admins)) = output.trim().split_once('\t') else {
+        return ClassicProtection::Unreadable;
+    };
+    let flag = |v: &str| match v.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    };
+    match (flag(pr), flag(admins)) {
+        (Some(pr_required), Some(enforce_admins)) => ClassicProtection::Protected {
+            pr_required,
+            enforce_admins,
+        },
+        _ => ClassicProtection::Unreadable,
+    }
+}
+
+/// Decide whether the base branch is protected FOR THIS CREDENTIAL (D-10).
+///
+/// `Effective` requires a pull-request rule this token cannot bypass. A rule it
+/// can bypass is `Bypassable`; no PR requirement is `NotProtected`; anything
+/// undecidable is `Unknown`. A failed or unreadable read can never produce
+/// `Effective`, and a classic HTTP 200 without a PR requirement is not
+/// protection.
+pub(crate) fn branch_protection_verdict(inputs: &ProtectionInputs) -> BranchProtection {
+    let pr_rulesets: Vec<Option<u64>> = inputs
+        .rules
+        .iter()
+        .flatten()
+        .filter(|(kind, _)| kind == "pull_request")
+        .map(|(_, id)| *id)
+        .collect();
+    let bypass_of = |id: Option<u64>| -> Option<&str> {
+        id.and_then(|i| inputs.ruleset_bypass.get(&i))
+            .and_then(|b| b.as_deref())
+    };
+
+    // Effective: a PR rule this credential cannot bypass.
+    if pr_rulesets
+        .iter()
+        .any(|id| matches!(bypass_of(*id), Some("never" | "pull_requests_only")))
+    {
+        return BranchProtection::Effective;
+    }
+    if let ClassicProtection::Protected {
+        pr_required: true,
+        enforce_admins,
+    } = inputs.classic
+        && (enforce_admins || inputs.token_is_admin == Some(false))
+    {
+        return BranchProtection::Effective;
+    }
+
+    // Otherwise only a fully readable picture can say NotProtected/Bypassable:
+    // every PR ruleset's bypass state must be a known bypassing value.
+    let rules_known = inputs.rules.is_some()
+        && pr_rulesets
+            .iter()
+            .all(|id| matches!(bypass_of(*id), Some("always" | "exempt")));
+    // `Some(true)` = a classic PR rule this token can bypass; `None` = unknown.
+    let classic_pr_bypassable = match inputs.classic {
+        ClassicProtection::NotProtected
+        | ClassicProtection::Protected {
+            pr_required: false, ..
+        } => Some(false),
+        ClassicProtection::Protected {
+            pr_required: true, ..
+        } => inputs.token_is_admin.map(|_| true),
+        ClassicProtection::Unreadable => None,
+    };
+    match (rules_known, classic_pr_bypassable) {
+        (true, Some(classic_bypassable)) => {
+            if classic_bypassable || !pr_rulesets.is_empty() {
+                BranchProtection::Bypassable
+            } else {
+                BranchProtection::NotProtected
+            }
+        }
+        _ => BranchProtection::Unknown,
+    }
+}
+
+/// Print the site deploy preflight section.
+async fn print_site_preflight(config: &Config, home: &Path) {
+    let probe = RealProbe::from_config(config, home);
+    let lines = site_preflight_lines(config, home, &probe).await;
+    println!();
+    let mut iter = lines.into_iter();
+    if let Some(header) = iter.next() {
+        println!("{}", header.bold());
+    }
+    for line in iter {
+        println!("{line}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,7 +1712,145 @@ mod tests {
     use std::sync::{Arc, OnceLock};
 
     use ironhermes_core::config::Config;
+    use ironhermes_core::config::DefconLevel;
+    use ironhermes_security::SidecarVersion;
     use secrecy::SecretString;
+
+    // -------------------------------------------------------------------
+    // Phase 57 Plan 15 (D-12): the pure half of the security sidecar report.
+    // -------------------------------------------------------------------
+
+    fn sidecar_version(core: &str, build: &str) -> SidecarVersion {
+        SidecarVersion {
+            sidecar: build.to_string(),
+            tirith_core: core.to_string(),
+            protocol: 1,
+            threat_db: "absent".to_string(),
+        }
+    }
+
+    fn level(n: u8) -> DefconLevel {
+        DefconLevel::try_from(n).expect("valid level")
+    }
+
+    fn labels(report: &[(String, bool)]) -> Vec<&str> {
+        report.iter().map(|(l, _)| l.as_str()).collect()
+    }
+
+    #[test]
+    fn security_sidecar_report_pure() {
+        // Present, pinned, same build, answering: every line is OK.
+        let report = format_sidecar_report(
+            Some(PathBuf::from("/opt/bin/ironhermes-tirith")),
+            Ok(sidecar_version("0.4.2", "0.5.0")),
+            Some(4),
+            level(3),
+            "0.5.0",
+        );
+        assert_eq!(
+            report,
+            vec![
+                (
+                    "sidecar present: /opt/bin/ironhermes-tirith".to_string(),
+                    true
+                ),
+                (
+                    "sidecar build: ironhermes-tirith 0.5.0 matches ironhermes 0.5.0".to_string(),
+                    true
+                ),
+                ("tirith-core 0.4.2 (pinned)".to_string(), true),
+                ("protocol 1".to_string(), true),
+                ("threat DB: absent".to_string(), true),
+                ("health: ok (4 ms)".to_string(), true),
+                ("DEFCON 3 (yolo bypass inactive)".to_string(), true),
+            ]
+        );
+
+        // Absent at level 3: the consequence is spelled out and is a failure.
+        let report = format_sidecar_report(
+            None,
+            Err("ironhermes-tirith not found".to_string()),
+            None,
+            level(3),
+            "0.5.0",
+        );
+        let ls = labels(&report);
+        assert!(ls[0].starts_with("sidecar absent"), "{ls:?}");
+        assert!(!report[0].1, "absent is a failed check: {report:?}");
+        assert!(
+            ls.iter().any(|l| l
+                .contains("terminal/execute_code will be blocked until the sidecar is installed")),
+            "{ls:?}"
+        );
+        assert!(
+            !ls.iter().any(|l| l.contains("health: ok")),
+            "an absent sidecar is never reported healthy: {ls:?}"
+        );
+
+        // A different tirith-core and build: both pin checks fail and name 0.4.2.
+        let report = format_sidecar_report(
+            Some(PathBuf::from("/x/ironhermes-tirith-fake")),
+            Ok(sidecar_version("fake", "fake")),
+            Some(1),
+            level(3),
+            "0.5.0",
+        );
+        let pin = report
+            .iter()
+            .find(|(l, _)| l.starts_with("tirith-core"))
+            .expect("pin line");
+        assert!(!pin.1, "{pin:?}");
+        assert!(pin.0.contains("fake") && pin.0.contains("0.4.2"), "{pin:?}");
+        let build = report
+            .iter()
+            .find(|(l, _)| l.starts_with("sidecar build"))
+            .expect("build line");
+        assert!(!build.1, "{build:?}");
+        assert!(build.0.contains("0.5.0"), "{build:?}");
+
+        // Present but not answering: unhealthy, with the level-4 consequence.
+        let report = format_sidecar_report(
+            Some(PathBuf::from("/opt/bin/ironhermes-tirith")),
+            Err("sidecar unavailable (timeout): no answer within 3s".to_string()),
+            None,
+            level(4),
+            "0.5.0",
+        );
+        let ls = labels(&report);
+        assert!(
+            report.iter().any(|(l, ok)| l.starts_with("health") && !ok),
+            "{ls:?}"
+        );
+        assert!(
+            ls.iter().any(|l| l.contains("DEFCON 4")
+                && l.contains("Warn")
+                && l.contains("critical notice")),
+            "{ls:?}"
+        );
+        assert!(
+            ls.iter().any(|l| l.contains("yolo bypass active")),
+            "levels 4-5 state that bypass is active: {ls:?}"
+        );
+    }
+
+    #[test]
+    fn sidecar_lookup_description_names_every_place_tried() {
+        let text = describe_sidecar_lookup(
+            Some(Path::new("/opt/ironhermes/bin/ironhermes")),
+            Some(std::ffi::OsStr::new("/custom/tirith")),
+        );
+        assert!(
+            text.contains("/opt/ironhermes/bin/ironhermes-tirith"),
+            "{text}"
+        );
+        assert!(
+            text.contains("IRONHERMES_TIRITH_BIN=/custom/tirith"),
+            "{text}"
+        );
+        assert!(text.contains("PATH"), "{text}");
+        let unset = describe_sidecar_lookup(None, None);
+        assert!(unset.contains("IRONHERMES_TIRITH_BIN unset"), "{unset}");
+    }
 
     // -------------------------------------------------------------------
     // Per-provider key coverage (venice-401 debug follow-up).
@@ -1278,7 +2287,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         let now = std::time::SystemTime::now();
-        let expected_path = gateway_log_path(home);
+        let expected_path = current_gateway_log(home);
         let expected_path_str = expected_path.to_string_lossy().to_string();
 
         // Missing state.
@@ -1330,7 +2339,7 @@ mod tests {
     fn gateway_log_lines_reports_stale_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
-        let log_path = gateway_log_path(home);
+        let log_path = current_gateway_log(home);
         std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
         std::fs::write(&log_path, b"old\n").unwrap();
 
@@ -1353,7 +2362,7 @@ mod tests {
     fn gateway_log_lines_reports_fresh_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
-        let log_path = gateway_log_path(home);
+        let log_path = current_gateway_log(home);
         std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
         std::fs::write(&log_path, b"fresh\n").unwrap();
 
@@ -1368,6 +2377,82 @@ mod tests {
         assert!(
             !joined.contains("stale"),
             "fresh-file lines must not say stale: {lines:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 54.8-04 D-08: doctor names the CURRENT log — the newest of the
+    // canonical `gateway.log` and the dated `gateway.log.YYYY-MM-DD`.
+    // -----------------------------------------------------------------
+
+    /// Write `name` under `<home>/logs/` and set its mtime `age` in the past.
+    fn write_log_aged(home: &Path, name: &str, age: Duration) -> PathBuf {
+        let logs = home.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let path = logs.join(name);
+        std::fs::write(&path, b"line\n").unwrap();
+        let when = SystemTime::now().checked_sub(age).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn gateway_log_lines_reports_newest_rolled_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        write_log_aged(home, "gateway.log", Duration::from_secs(3 * 24 * 3600));
+        let dated = write_log_aged(home, "gateway.log.2026-10-17", Duration::ZERO);
+
+        let lines = gateway_log_lines(home, SystemTime::now());
+        assert_eq!(lines[0], format!("Gateway log: {}", dated.display()));
+        let joined = lines.join("\n").to_lowercase();
+        assert!(
+            joined.contains("current"),
+            "dated file is current: {lines:?}"
+        );
+        assert!(
+            !joined.contains("stale"),
+            "dated file is not stale: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn gateway_log_lines_prefers_canonical_when_newest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let canonical = write_log_aged(home, "gateway.log", Duration::ZERO);
+        write_log_aged(
+            home,
+            "gateway.log.2026-10-15",
+            Duration::from_secs(2 * 24 * 3600),
+        );
+        write_log_aged(
+            home,
+            "gateway.log.2026-10-16",
+            Duration::from_secs(24 * 3600),
+        );
+
+        let lines = gateway_log_lines(home, SystemTime::now());
+        assert_eq!(lines[0], format!("Gateway log: {}", canonical.display()));
+    }
+
+    #[test]
+    fn gateway_log_lines_ignores_non_date_suffixes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let canonical = write_log_aged(home, "gateway.log", Duration::from_secs(3600));
+        write_log_aged(home, "gateway.log.pre-48.3", Duration::ZERO);
+
+        let lines = gateway_log_lines(home, SystemTime::now());
+        assert_eq!(
+            lines[0],
+            format!("Gateway log: {}", canonical.display()),
+            "a non-date suffix must never be chosen even when newest"
         );
     }
 
@@ -1457,6 +2542,463 @@ mod tests {
             call_idx - guard_idx < 200,
             "the browser block must tightly gate the call, not merely appear somewhere \
              earlier in the function"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 54.8 Plan 10 (D-21, D-10): site deploy preflight.
+    // -------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const DEMO_SITE_YAML: &str = "repo: example-org/demo-site\nclone_path: workspace/demo-site\ndeploy_mode: wrangler\nstaging:\n  deploy_args: [\"--env\", \"staging\"]\n  url: \"https://demo-site-staging.example.workers.dev\"\nproduction:\n  url: \"https://demo-site.example.workers.dev\"\n";
+
+    fn config_with_demo_site() -> Config {
+        let mut config = Config::default();
+        config.sites.insert(
+            "demo-site".to_string(),
+            serde_yaml::from_str(DEMO_SITE_YAML).unwrap(),
+        );
+        config
+    }
+
+    struct FakeProbe {
+        missing: Vec<&'static str>,
+        node: Option<u32>,
+        env_set: Vec<&'static str>,
+        skills: HashMap<&'static str, Option<bool>>,
+        mcp: HashMap<&'static str, Option<bool>>,
+        repo: Option<bool>,
+        protection: BranchProtection,
+        forbid_network: bool,
+        network_calls: AtomicUsize,
+    }
+
+    impl FakeProbe {
+        fn healthy() -> Self {
+            Self {
+                missing: Vec::new(),
+                node: Some(22),
+                env_set: SITE_TOKEN_VARS.to_vec(),
+                skills: HashMap::new(),
+                mcp: HashMap::new(),
+                repo: Some(true),
+                protection: BranchProtection::Effective,
+                forbid_network: false,
+                network_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SitePreflightProbe for FakeProbe {
+        fn on_path(&self, cmd: &str) -> bool {
+            !self.missing.contains(&cmd)
+        }
+        async fn node_major(&self) -> Option<u32> {
+            self.node
+        }
+        fn env_is_set(&self, name: &str) -> bool {
+            self.env_set.contains(&name)
+        }
+        fn skill_visible(&self, name: &str) -> Option<bool> {
+            self.skills.get(name).copied().unwrap_or(Some(true))
+        }
+        async fn mcp_token_present(&self, namespace: &str) -> Option<bool> {
+            self.mcp.get(namespace).copied().unwrap_or(Some(true))
+        }
+        async fn repo_reachable(&self, _repo: &str) -> Option<bool> {
+            self.network_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.forbid_network, "network probe must not run");
+            self.repo
+        }
+        async fn branch_protection(&self, _repo: &str, _branch: &str) -> BranchProtection {
+            self.network_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.forbid_network, "network probe must not run");
+            self.protection
+        }
+    }
+
+    async fn preflight(config: &Config, probe: &FakeProbe) -> String {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("workspace")).unwrap();
+        site_preflight_lines(config, home.path(), probe)
+            .await
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn preflight_no_sites_is_one_line_and_offline() {
+        let mut probe = FakeProbe::healthy();
+        probe.forbid_network = true;
+        let home = tempfile::tempdir().unwrap();
+        let lines = site_preflight_lines(&Config::default(), home.path(), &probe).await;
+        assert_eq!(lines.len(), 2, "header plus one line: {lines:?}");
+        assert_eq!(lines[0], "Site deploy preflight");
+        assert!(lines[1].contains("no sites configured"));
+        assert_eq!(probe.network_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_missing_tools() {
+        let mut probe = FakeProbe::healthy();
+        probe.missing = vec!["gh", "wrangler"];
+        let text = preflight(&config_with_demo_site(), &probe).await;
+        assert!(text.contains("gh: missing"), "{text}");
+        assert!(
+            text.contains("wrangler: missing — install the pinned version globally"),
+            "{text}"
+        );
+        assert!(!text.contains("npx"), "must not suggest npx: {text}");
+    }
+
+    #[tokio::test]
+    async fn preflight_warns_old_node() {
+        let mut probe = FakeProbe::healthy();
+        probe.node = Some(20);
+        let text = preflight(&config_with_demo_site(), &probe).await;
+        assert!(text.contains("needs >= 22"), "{text}");
+        probe.node = Some(22);
+        let text = preflight(&config_with_demo_site(), &probe).await;
+        assert!(!text.contains("needs >= 22"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn preflight_flags_token_not_allowlisted() {
+        let mut config = config_with_demo_site();
+        let mut probe = FakeProbe::healthy();
+        probe.env_set = vec!["CLOUDFLARE_API_TOKEN"];
+        let text = preflight(&config, &probe).await;
+        assert!(text.contains("CLOUDFLARE_API_TOKEN: set"), "{text}");
+        assert!(
+            text.contains("CLOUDFLARE_API_TOKEN: not in terminal.terminal_env_allowlist"),
+            "{text}"
+        );
+        config.terminal.terminal_env_allowlist = vec!["CLOUDFLARE_API_TOKEN".to_string()];
+        let text = preflight(&config, &probe).await;
+        assert!(
+            !text.contains("CLOUDFLARE_API_TOKEN: not in terminal.terminal_env_allowlist"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_timeout_override_warning() {
+        let probe = FakeProbe::healthy();
+        let mut config = config_with_demo_site();
+        let text = preflight(&config, &probe).await;
+        assert!(!text.contains("terminal timeout"), "{text}");
+        config
+            .tools
+            .timeout_overrides
+            .insert("terminal".to_string(), 60);
+        let text = preflight(&config, &probe).await;
+        assert!(text.contains("terminal timeout"), "{text}");
+        config
+            .tools
+            .timeout_overrides
+            .insert("terminal".to_string(), 300);
+        let text = preflight(&config, &probe).await;
+        assert!(!text.contains("terminal timeout"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_skill_visibility() {
+        let mut probe = FakeProbe::healthy();
+        probe.skills.insert("wrangler", Some(false));
+        probe.skills.insert("site-deploy", Some(true));
+        let text = preflight(&config_with_demo_site(), &probe).await;
+        assert!(text.contains("skill wrangler: not visible"), "{text}");
+        assert!(text.contains("skill site-deploy: visible"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_mcp_auth() {
+        let mut config = config_with_demo_site();
+        config.mcp_servers.insert(
+            "cloudflare_bindings".to_string(),
+            serde_yaml::from_str(
+                "url: \"https://bindings.example.com/mcp\"\noauth_provider: cloudflare_bindings\n",
+            )
+            .unwrap(),
+        );
+        config.mcp_servers.insert(
+            "plain".to_string(),
+            serde_yaml::from_str("url: \"https://plain.example.com/mcp\"\n").unwrap(),
+        );
+        let mut probe = FakeProbe::healthy();
+        probe.mcp.insert("cloudflare_bindings", Some(false));
+        let text = preflight(&config, &probe).await;
+        assert!(
+            text.contains("ironhermes mcp connect cloudflare_bindings --no-browser"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("MCP plain"),
+            "a server without oauth_provider is not reported: {text}"
+        );
+        probe.mcp.insert("cloudflare_bindings", Some(true));
+        let text = preflight(&config, &probe).await;
+        assert!(
+            text.contains("MCP cloudflare_bindings: authorized"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_branch_protection_states() {
+        let cases = [
+            (BranchProtection::Effective, "base branch main: protected ("),
+            (
+                BranchProtection::Bypassable,
+                "NOT protected — a pull-request rule exists but this token can bypass it",
+            ),
+            (BranchProtection::NotProtected, "NOT protected — enable"),
+            (BranchProtection::Unknown, "base branch main: unknown"),
+        ];
+        for (verdict, expected) in cases {
+            let mut probe = FakeProbe::healthy();
+            probe.protection = verdict;
+            let text = preflight(&config_with_demo_site(), &probe).await;
+            assert!(text.contains(expected), "{verdict:?}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_invalid_site_by_field() {
+        let mut config = Config::default();
+        config.sites.insert(
+            "broken".to_string(),
+            serde_yaml::from_str("repo: x\ndeploy_mode: bogus\n").unwrap(),
+        );
+        let mut probe = FakeProbe::healthy();
+        probe.forbid_network = true;
+        let text = preflight(&config, &probe).await;
+        assert!(text.contains("site broken: INVALID"), "{text}");
+        assert!(text.contains("entry"), "{text}");
+        assert_eq!(probe.network_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // -- effective-protection verdict (D-10, review 10 HIGH) ---------------
+
+    fn rule(kind: &str, id: u64) -> (String, Option<u64>) {
+        (kind.to_string(), Some(id))
+    }
+
+    fn inputs(
+        rules: Option<Vec<(String, Option<u64>)>>,
+        bypass: &[(u64, Option<&str>)],
+        classic: ClassicProtection,
+        admin: Option<bool>,
+    ) -> ProtectionInputs {
+        ProtectionInputs {
+            rules,
+            ruleset_bypass: bypass
+                .iter()
+                .map(|(id, v)| (*id, v.map(str::to_string)))
+                .collect(),
+            classic,
+            token_is_admin: admin,
+        }
+    }
+
+    #[test]
+    fn branch_protection_verdict_table() {
+        use BranchProtection::*;
+        use ClassicProtection::{NotProtected as ClassicNone, Protected, Unreadable};
+        let pr1 = || Some(vec![rule("pull_request", 1)]);
+        let cases: Vec<(&str, ProtectionInputs, BranchProtection)> = vec![
+            (
+                "PR ruleset, bypass never",
+                inputs(pr1(), &[(1, Some("never"))], Unreadable, None),
+                Effective,
+            ),
+            (
+                "PR ruleset, bypass pull_requests_only",
+                inputs(pr1(), &[(1, Some("pull_requests_only"))], Unreadable, None),
+                Effective,
+            ),
+            (
+                "PR ruleset, bypass always",
+                inputs(pr1(), &[(1, Some("always"))], ClassicNone, None),
+                Bypassable,
+            ),
+            (
+                "PR ruleset, bypass exempt",
+                inputs(pr1(), &[(1, Some("exempt"))], ClassicNone, None),
+                Bypassable,
+            ),
+            (
+                "PR ruleset, bypass unreadable",
+                inputs(pr1(), &[(1, None)], ClassicNone, None),
+                Unknown,
+            ),
+            (
+                "no rules, classic none",
+                inputs(Some(vec![]), &[], ClassicNone, None),
+                NotProtected,
+            ),
+            (
+                "no rules, classic unreadable",
+                inputs(Some(vec![]), &[], Unreadable, None),
+                Unknown,
+            ),
+            (
+                "ruleset without a PR rule",
+                inputs(Some(vec![rule("deletion", 2)]), &[], ClassicNone, None),
+                NotProtected,
+            ),
+            (
+                "rules call failed",
+                inputs(None, &[], ClassicNone, None),
+                Unknown,
+            ),
+            (
+                "classic PR required, admins enforced",
+                inputs(
+                    None,
+                    &[],
+                    Protected {
+                        pr_required: true,
+                        enforce_admins: true,
+                    },
+                    None,
+                ),
+                Effective,
+            ),
+            (
+                "classic HTTP 200 with the PR requirement disabled",
+                inputs(
+                    Some(vec![]),
+                    &[],
+                    Protected {
+                        pr_required: false,
+                        enforce_admins: true,
+                    },
+                    None,
+                ),
+                NotProtected,
+            ),
+            (
+                "classic PR required, admins not enforced, admin token",
+                inputs(
+                    Some(vec![]),
+                    &[],
+                    Protected {
+                        pr_required: true,
+                        enforce_admins: false,
+                    },
+                    Some(true),
+                ),
+                Bypassable,
+            ),
+            (
+                "classic PR required, admins not enforced, non-admin token",
+                inputs(
+                    Some(vec![]),
+                    &[],
+                    Protected {
+                        pr_required: true,
+                        enforce_admins: false,
+                    },
+                    Some(false),
+                ),
+                Effective,
+            ),
+            (
+                "classic PR required, admins not enforced, admin bit unknown",
+                inputs(
+                    Some(vec![]),
+                    &[],
+                    Protected {
+                        pr_required: true,
+                        enforce_admins: false,
+                    },
+                    None,
+                ),
+                Unknown,
+            ),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(branch_protection_verdict(&input), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn parse_paginated_rules_lines() {
+        assert_eq!(
+            parse_rules_tsv("pull_request\t11\ndeletion\t12\npull_request\t13"),
+            Some(vec![
+                rule("pull_request", 11),
+                rule("deletion", 12),
+                rule("pull_request", 13)
+            ])
+        );
+        assert_eq!(parse_rules_tsv(""), Some(vec![]));
+        assert_eq!(parse_rules_tsv("\n"), Some(vec![]));
+        assert_eq!(parse_rules_tsv("pull_request\t11\nnot-a-rule-line"), None);
+        assert_eq!(parse_rules_tsv("pull_request\tabc"), None);
+        // ruleset_id 0 (absent) maps to None.
+        assert_eq!(
+            parse_rules_tsv("pull_request\t0"),
+            Some(vec![("pull_request".to_string(), None)])
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_probe_kills_a_hung_child_within_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let pid_file = bin.path().join("gh.pid");
+        let script = format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            pid_file.display()
+        );
+        let gh = bin.path().join("gh");
+        std::fs::write(&gh, script).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut env = HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            format!("{}:/usr/bin:/bin", bin.path().display()),
+        );
+        let home = tempfile::tempdir().unwrap();
+        let probe = RealProbe::with_env(
+            Duration::from_millis(1500),
+            env,
+            home.path(),
+            ironhermes_core::config::SkillsConfig::default(),
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(probe.repo_reachable("example-org/demo-site").await, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the deadline must bound the probe, took {:?}",
+            started.elapsed()
+        );
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("the fake gh must have started")
+            .trim()
+            .to_string();
+        // kill_on_drop reaps asynchronously; poll briefly for the child to go.
+        let mut alive = true;
+        for _ in 0..40 {
+            let status = tokio::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .unwrap();
+            alive = status.success();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !alive,
+            "the hung gh child (pid {pid}) must not survive the deadline"
         );
     }
 }

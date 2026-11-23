@@ -19,6 +19,8 @@
 
 pub mod agents;
 pub mod agents_diff;
+// Phase 54.10 Plan 01 (D-01): live boards.
+pub mod dashboard;
 // Phase 50.4 Plan 01 (D-08/D-11/D-14): shared "APPLY CONFIG NOW" banner —
 // supersedes the old per-screen "Restart required" banner. Providers is the
 // first mount point; Models and the profile drawer get their own mounts in
@@ -38,17 +40,26 @@ pub mod artifact_viewer;
 pub mod artifacts;
 pub mod chat;
 pub mod gateway;
+// Phase 54.4 Plan 07 (D-08/D-24): server / audit / agent-activity logs,
+// reached from the header's Logs shortcut.
+pub mod logs;
 pub mod memory;
+// Phase 58.2 Plan 10 (D-13/D-23): the Memory screen's `Tier 2` tab.
+pub mod memory_tier2;
 // Phase 50.4 Plan 03 (D-06/D-07): the capped, open-on-click model popup —
 // `ModelPickerField` — mounted by `models.rs` here and by Plan 05's
 // Providers/profile-drawer mounts.
 pub mod model_picker;
 pub mod models;
 pub mod office;
+// Phase 54.9 Plan 09 (D-13/D-15): generated views in a sandboxed frame.
+pub mod openui;
 pub mod providers;
 pub mod schedules;
 pub mod sessions;
+pub mod config_yaml_panel; // Phase 54.13: raw config.yaml editor panel (Settings > General)
 pub mod settings;
+pub mod settings_menu;
 pub mod skills;
 // Phase 49.4 Plan 07 (D-05..D-09): the IMPORT / NEW SKILL / SKILL.md-editor
 // wizard components mounted from `ScreenSkills` (`skills.rs`).

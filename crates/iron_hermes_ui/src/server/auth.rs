@@ -744,7 +744,12 @@ fn is_iframe_originated_api_request(path: &str, headers: &HeaderMap) -> bool {
 }
 
 fn session_token_from_headers(req: &Request<Body>) -> Option<String> {
-    let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    session_token(req.headers())
+}
+
+/// The `ih_session` cookie value, unvalidated (server fns run after `require_auth` validated it).
+pub(crate) fn session_token(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     cookies.split(';').find_map(|kv| {
         let (k, v) = kv.trim().split_once('=')?;
         (k == SESSION_COOKIE).then(|| v.to_string())

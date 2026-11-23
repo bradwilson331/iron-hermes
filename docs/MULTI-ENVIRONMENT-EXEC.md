@@ -69,6 +69,14 @@ terminal:
   `docker` vs `podman` selects the literal binary name invoked (`{runtime}
   ps`, `{runtime} exec`, ...) — it is never auto-detected by probing `PATH`.
 
+The docker backend is not supported inside the hardened IronHermes container.
+The image ships no `docker` or `podman` binary, and the hardened compose profile
+deliberately mounts no container-runtime socket (a mounted socket is root on the
+host, and the container lint rejects it). Selecting `backend: docker` there
+fails with the D-05 hard error below. Run IronHermes on the host if you need the
+docker backend, or use `backend: ssh` (or the default `local`) from the
+container instead. See [CONTAINER.md](CONTAINER.md), "The hardened profile".
+
 ## 2. The D-05 hard-error contract (no silent fallback)
 
 **If the selected backend is unavailable at runtime, the tool call fails

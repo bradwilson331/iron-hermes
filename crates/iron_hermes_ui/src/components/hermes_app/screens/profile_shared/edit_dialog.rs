@@ -13,11 +13,13 @@
 //! 3 mounts this drawer on the roster. `screens/kanban/profile_drawer.rs`
 //! is now a thin re-export shim at the old path.
 //!
-//! Five sections in fixed order (UI-SPEC Component Inventory §3): Identity
+//! Sections in fixed order (UI-SPEC Component Inventory §3): Identity
 //! (dir path + health dot + honest D-11 status line), Provider/Model
-//! (editable, D-04), Keys (editable table, D-04/D-07/D-13 — a `NOT IN
-//! ROOT .ENV` row grows a `ProfileKeyRowEditor`), Verify (on-demand D-09
-//! probe, reusing the wizard's shared doctor-block renderer), Save.
+//! (READ-ONLY since Phase 54.4 D-16 — a pointer to the agent's settings
+//! slide-over, the one place to edit provider, model, tools and skills),
+//! Keys (editable table, D-04/D-07/D-13 — a `NOT IN ROOT .ENV` row grows a
+//! `ProfileKeyRowEditor`), Verify (on-demand D-09 probe, reusing the
+//! wizard's shared doctor-block renderer).
 //!
 //! Load-state discipline (E5/loading backstop): a profile-id change resets
 //! `DetailLoadState` to `Loading` BEFORE the new fetch is issued, so the
@@ -38,24 +40,23 @@
 //! consumers at runtime; shared state belongs only at the `HermesApp`
 //! root.
 
+use super::ProfileDialogContext;
 use super::advanced::AdvancedProfilePane;
 use super::create_dialog::render_verify_doctor_block;
 use super::secrets_source_picker::{SecretsSourcePicker, VAULT_REASON_BUILD_LACKS_FEATURE};
-use super::ProfileDialogContext;
 use crate::components::hermes_app::screens::apply_config_banner::ApplyConfigBanner;
 use crate::components::hermes_app::screens::bot_roster::delete_confirm::DeleteBotConfirm;
 use crate::components::hermes_app::screens::bot_roster::npub_row::BotNpubRow;
 use crate::components::hermes_app::screens::bot_roster::routines::BotRoutinesSection;
-use crate::components::hermes_app::screens::model_picker::ModelPickerField;
+use crate::components::hermes_app::screens::profile_shared::agent_settings::OpenAgentSettingsButton;
 use crate::components::hermes_app::widgets::avatar_picker::AvatarPicker;
 use crate::protocol::{
-    BotAvatarDescriptor, DuplicateProfileRequest, KeyMode, KeyRow, KeyStatus,
-    ProfileConfigWritePayload, ProfileDetail, ProfileGap, ProfileHealth, SecretSource,
-    SyncProfileSecretsRequest, VerifyReport,
+    BotAvatarDescriptor, DuplicateProfileRequest, KeyMode, KeyRow, KeyStatus, ProfileDetail,
+    ProfileHealth, SecretSource, SyncProfileSecretsRequest, VerifyReport,
 };
 use crate::server::profile_api::{
     fetch_profile_detail, list_profiles, save_profile_key, secrets_source_availability,
-    sync_profile_secrets, update_profile_config,
+    sync_profile_secrets,
 };
 use crate::server::profile_verify_api::verify_profile;
 use dioxus::prelude::*;
@@ -154,7 +155,8 @@ pub(crate) fn build_group_meta_patch(
 /// resolves the backstop by construction. `Loading` is set BEFORE every
 /// new fetch is issued (including on a profile-id change), so the drawer
 /// can never render stale values under a new title.
-#[allow(dead_code)] // used in ProfileDetailDrawer rsx!; dead_code fires under --all-features (legacy-shell swaps the reachable root component, mirrors Plan 01's identical precedent)
+#[allow(dead_code)]
+// used in ProfileDetailDrawer rsx!; dead_code fires under --all-features (legacy-shell swaps the reachable root component, mirrors Plan 01's identical precedent)
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum DetailLoadState {
     Loading,
@@ -175,28 +177,6 @@ fn key_row_status_label_and_class(status: &KeyStatus) -> (&'static str, &'static
     }
 }
 
-/// Phase 47.4 Plan 13 (GAP-5, Task 2 edge case): pure derivation of the
-/// PROVIDER select's option list. Mirrors `screens/models.rs`'s
-/// `compute_model_options` prepend-when-absent rule so a stale stored
-/// provider (one no longer present in the operator's configured provider
-/// list) never vanishes from its own dropdown. An empty or whitespace-only
-/// `assigned` prepends nothing, matching `compute_model_options`' own
-/// `trim()` rule.
-///
-/// `cfg_attr(not(wasm), allow(dead_code))`: web-live (called from
-/// `ProfileDetailDrawer`'s rsx!); native `--all-features` bin build does not
-/// reach the component tree. Mirrors `compute_model_options`'s own
-/// attribute.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn provider_select_options(configured: &[String], assigned: &str) -> Vec<String> {
-    let mut options: Vec<String> = configured.to_vec();
-    let assigned = assigned.trim();
-    if !assigned.is_empty() && !options.iter().any(|o| o == assigned) {
-        options.insert(0, assigned.to_string());
-    }
-    options
-}
-
 /// Phase 47.4 Plan 15 (GAP-9, T-47.4-15-01): client-side mirror of the
 /// server's `validate_key_name` (`server/profile_api.rs:1126`) — non-empty,
 /// first character ASCII uppercase, every remaining character ASCII
@@ -206,8 +186,7 @@ fn provider_select_options(configured: &[String], assigned: &str) -> Vec<String>
 ///
 /// `cfg_attr(not(wasm), allow(dead_code))`: web-live (called from
 /// `ProfileKeyAddForm`'s rsx!); native `--all-features` bin build does not
-/// reach the component tree. Mirrors `provider_select_options`'s own
-/// attribute.
+/// reach the component tree.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn is_valid_key_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -243,16 +222,6 @@ pub fn ProfileDetailDrawer(
     // enforced exactly once per change, not on every render.
     let mut loaded_for: Signal<Option<String>> = use_signal(|| None);
 
-    // Provider/Model working copy (D-04), seeded from the loaded detail.
-    let mut provider_wc: Signal<String> = use_signal(String::new);
-    let mut model_wc: Signal<String> = use_signal(String::new);
-    // Phase 50.5 (D-17/D-19): the value `model_wc` was seeded with when the
-    // detail record loaded — set ONLY alongside `model_wc` in the
-    // fetch-on-change effect below, never on every keystroke, so
-    // `ModelPickerField`'s `seeded` prop stays the seed rather than always
-    // equalling the live typed value.
-    let mut model_seed: Signal<String> = use_signal(String::new);
-
     // Phase 50.1 Plan 04 (D-12): avatar working copy, seeded from the
     // bot-meta store on profile-id change (fetch-on-change effect below).
     // The bot already exists here (unlike the create wizard), so
@@ -271,19 +240,15 @@ pub fn ProfileDetailDrawer(
     let mut group_draft: Signal<String> = use_signal(String::new);
     let mut group_error: Signal<Option<String>> = use_signal(|| None);
 
-    // Save row (Section 5) state.
-    let mut saving: Signal<bool> = use_signal(|| false);
-    let mut save_error: Signal<Option<String>> = use_signal(|| None);
-    let mut save_hint: Signal<Option<String>> = use_signal(|| None);
-
     // Phase 50.4 Plan 05 (D-11 remaining scope, team-lead follow-up note):
     // the SAME root-provided `ApplyConfigPendingCtx` Providers and Models
     // consume — reading it via `use_context` (never a drawer-local signal,
     // never a child-level `use_context_provider`, which panics the sibling
     // Providers/Models consumers under this crate's context-panic rule).
-    // Raised after a successful Section-5 SAVE below, same trigger shape as
-    // the other two surfaces.
-    let mut apply_config_pending = use_context::<crate::state::ApplyConfigPendingCtx>().0;
+    // Phase 54.4 D-16: this drawer no longer raises it (provider/model are
+    // edited in the settings slide-over); the banner below still shows when
+    // Providers or Models raised it.
+    let apply_config_pending = use_context::<crate::state::ApplyConfigPendingCtx>().0;
 
     // Phase 49.4.1 (D-01/D-05): Secrets Source working copy + SYNC action
     // state — registered unconditionally alongside the drawer's other
@@ -335,14 +300,6 @@ pub fn ProfileDetailDrawer(
     let mut duplicate_error: Signal<Option<String>> = use_signal(|| None);
     let mut delete_confirm_open: Signal<bool> = use_signal(|| false);
 
-    // Phase 47.4 Plan 13 (GAP-5): PROVIDER/MODEL dependent cascade, mirroring
-    // `screens/models.rs`'s `ProviderModelCascade`. Registered unconditionally
-    // alongside the drawer's other hooks (Pattern E). `provider_wc` is read
-    // with CALL syntax in the model resource's SYNC prefix so a provider
-    // change re-runs the model fetch — `.peek()` here would not subscribe.
-    let provider_options_resource = use_resource(move || async move {
-        crate::server::provider_config_api::get_provider_config().await
-    });
     // Phase 49.4.1 Plan 02 (D-10): server-computed vault availability, the
     // SAME payload the wizard's step-2 mount reads — replaces this Plan's
     // Task 2 predecessor inline `cfg!` computation. A plain `use_resource`,
@@ -350,36 +307,6 @@ pub fn ProfileDetailDrawer(
     // top-of-file discipline note).
     let availability_resource =
         use_resource(move || async move { secrets_source_availability().await });
-    let model_options_resource = use_resource(move || {
-        // Phase 49.4 hotfix: skip the model fetch while the drawer is closed.
-        // This drawer is mounted UNCONDITIONALLY on the Agents (BotRoster) and
-        // Kanban screens — it renders nothing until `profile_id` is `Some`, but
-        // the resource hook still fires on every mount. With an empty provider,
-        // `list_provider_models("")` returns the entire ~300-model fallback
-        // catalog, so a closed drawer was eagerly fetching (and holding) the
-        // full catalog on every visit to those screens. Reading `profile_id`
-        // here subscribes, so the real fetch runs the moment the drawer opens.
-        let is_open = profile_id.read().is_some();
-        let provider = provider_wc();
-        async move {
-            if !is_open {
-                return Ok(crate::server::api::ProviderModelsSnapshot {
-                    models: Vec::new(),
-                    fell_back: false,
-                });
-            }
-            crate::server::api::list_provider_models(provider).await
-        }
-    });
-
-    // Phase 50.4 Plan 05 (D-06): the stable unique `<datalist>` id this
-    // drawer generated (`model_list_id`) is REMOVED — `ModelPickerField`
-    // (Plan 03) replaces the native `<input list>` + `<datalist>` render
-    // target below with its own popup, so no per-instance datalist id is
-    // needed anymore. Removed unconditionally at the top level of the
-    // component body (not from inside a branch), so the hook count stays
-    // identical across every render of this component instance.
-
     // Fetch-on-change: resolves the E5/loading backstop. Resets to
     // Loading synchronously on a profile-id change, THEN issues the new
     // fetch as a plain async call.
@@ -389,8 +316,6 @@ pub fn ProfileDetailDrawer(
             loaded_for.set(id_opt.clone());
             if let Some(id) = id_opt {
                 load_state.set(DetailLoadState::Loading);
-                save_hint.set(None);
-                save_error.set(None);
                 verify_started.set(false);
                 verify_report.set(None);
                 expanded_key.set(None);
@@ -407,9 +332,6 @@ pub fn ProfileDetailDrawer(
                     let id_for_meta = id.clone();
                     match fetch_profile_detail(id).await {
                         Ok(detail) => {
-                            provider_wc.set(detail.provider.clone().unwrap_or_default());
-                            model_wc.set(detail.model_default.clone().unwrap_or_default());
-                            model_seed.set(detail.model_default.clone().unwrap_or_default());
                             // Phase 49.4.1 (D-01/D-05): seed the picker from
                             // the profile's remembered source; an absent or
                             // unrecognised value pre-selects Root .env, the
@@ -447,9 +369,7 @@ pub fn ProfileDetailDrawer(
                     if let Ok(response) = crate::server::bot_meta_api::list_bot_meta().await {
                         let meta = response.meta.get(&id_for_meta);
                         avatar_descriptor.set(meta.and_then(|m| m.avatar.clone()));
-                        group_draft.set(
-                            meta.and_then(|m| m.group.clone()).unwrap_or_default(),
-                        );
+                        group_draft.set(meta.and_then(|m| m.group.clone()).unwrap_or_default());
                     }
                 });
             }
@@ -512,49 +432,6 @@ pub fn ProfileDetailDrawer(
         spawn(async move {
             if let Ok(detail) = fetch_profile_detail(profile_name).await {
                 load_state_sig.set(DetailLoadState::Loaded(detail));
-            }
-        });
-    };
-
-    // Section 5 SAVE handler.
-    let name_for_save = name_str.clone();
-    let on_save_click = move |_| {
-        let provider_val = provider_wc.read().clone();
-        let model_val = model_wc.read().clone();
-        let profile_name = name_for_save.clone();
-        saving.set(true);
-        save_error.set(None);
-        let mut saving_sig = saving;
-        let mut save_error_sig = save_error;
-        let mut save_hint_sig = save_hint;
-        let mut load_state_sig = load_state;
-        spawn(async move {
-            let payload = ProfileConfigWritePayload {
-                name: profile_name.clone(),
-                provider: Some(provider_val),
-                model_default: Some(model_val),
-                skills_disabled: None,
-            };
-            match update_profile_config(payload).await {
-                Ok(()) => {
-                    saving_sig.set(false);
-                    save_hint_sig.set(Some("Saved.".to_string()));
-                    on_profile_updated.call(());
-                    // Phase 50.4 Plan 05 (D-11): same process-level
-                    // apply_config_now trigger Providers and Models raise
-                    // after their own save — the drawer edits a profile's
-                    // provider/model assignment while APPLY NOW reloads the
-                    // running server's config; this is the locked D-11
-                    // behaviour, not an oversight.
-                    apply_config_pending.set(true);
-                    if let Ok(detail) = fetch_profile_detail(profile_name).await {
-                        load_state_sig.set(DetailLoadState::Loaded(detail));
-                    }
-                }
-                Err(e) => {
-                    saving_sig.set(false);
-                    save_error_sig.set(Some(format!("{e}")));
-                }
             }
         });
     };
@@ -622,7 +499,9 @@ pub fn ProfileDetailDrawer(
         let mut verifying_sig = verifying;
         let mut verify_report_sig = verify_report;
         spawn(async move {
-            let result = verify_profile(profile_name).await.map_err(|e| format!("{e}"));
+            let result = verify_profile(profile_name)
+                .await
+                .map_err(|e| format!("{e}"));
             verify_report_sig.set(Some(result));
             verifying_sig.set(false);
         });
@@ -743,69 +622,20 @@ pub fn ProfileDetailDrawer(
                     let is_configured = detail.health == ProfileHealth::Configured;
                     let gaps = detail.gaps.clone();
 
-                    // ---- Section 2: Provider/Model ----
-                    // E5/error backstop: provider AND model_default both
-                    // absent alongside a MissingConfigYaml gap is the
-                    // signature of a config.yaml Plan 05's read degraded
-                    // rather than failed on (a live, documented failure —
-                    // the entire subject of Phase 48) — as distinct from a
-                    // fresh profile that legitimately has none yet.
-                    let config_parse_hint = detail.provider.is_none()
-                        && detail.model_default.is_none()
-                        && detail.gaps.contains(&ProfileGap::MissingConfigYaml);
-                    let provider_val = provider_wc.read().clone();
-                    let model_val = model_wc.read().clone();
+                    // ---- Section 2: Provider/Model (read-only, D-16) ----
+                    // Shown from the already-loaded detail; an unset value
+                    // reads as an em dash. Editing moved to the settings
+                    // slide-over.
+                    let provider_line = format!(
+                        "{} \u{00B7} {}",
+                        detail.provider.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "\u{2014}".to_string()),
+                        detail
+                            .model_default
+                            .clone()
+                            .filter(|m| !m.trim().is_empty())
+                            .unwrap_or_else(|| "\u{2014}".to_string()),
+                    );
                     let write_enabled = detail.web_config_write_enabled;
-
-                    // GAP-5: provider option list (read-only, ungated — mirrors
-                    // the Models page's own provider dropdown source).
-                    let provider_names: Vec<String> = match provider_options_resource() {
-                        Some(Ok(snap)) => snap.providers.iter().map(|p| p.name.clone()).collect(),
-                        _ => Vec::new(),
-                    };
-                    // GAP-5: dependent model list, provider-sourced. `fell_back`
-                    // means the provider has no `/models` endpoint and the full
-                    // catalog is shown instead (mirrors the Models page's note).
-                    let model_snapshot = match model_options_resource() {
-                        Some(Ok(snap)) => Some(snap),
-                        _ => None,
-                    };
-                    let models_loading = model_options_resource().is_none();
-                    let fell_back = model_snapshot
-                        .as_ref()
-                        .map(|s| s.fell_back)
-                        .unwrap_or(false);
-                    let assigned_model_ref = if model_val.trim().is_empty() {
-                        None
-                    } else {
-                        Some(model_val.as_str())
-                    };
-                    // Phase 50.5 (D-17/D-19): the text filter and cap moved
-                    // into `ModelPickerField` itself — `model_options` is now
-                    // passed through FULL, unfiltered, uncapped.
-                    let model_options = crate::components::hermes_app::screens::models::compute_model_options(
-                        model_snapshot.as_ref(),
-                        assigned_model_ref,
-                    );
-                    let model_seed_val = model_seed.read().clone();
-
-                    // Phase 50.5 (D-11): drift note — same pure fn Models and
-                    // Providers use. `is_missing: false` (the drawer has no
-                    // MISSING pill to defer to). The window field itself is
-                    // explicitly out of scope here (UI-SPEC §2's drawer
-                    // ruling, D-15's host list) — note only.
-                    let served_ids: Vec<String> = model_snapshot
-                        .as_ref()
-                        .map(|s| s.models.clone())
-                        .unwrap_or_default();
-                    let drift = crate::components::hermes_app::screens::models::drift_note(
-                        &served_ids,
-                        &model_val,
-                        &provider_val,
-                        fell_back,
-                        models_loading,
-                        false,
-                    );
 
                     // ---- Section 3: Keys ----
                     let keys = detail.keys.clone();
@@ -842,53 +672,17 @@ pub fn ProfileDetailDrawer(
                             }
                         }
 
-                        // Section 2 — Provider / Model (editable, D-04).
+                        // Section 2 — Provider / Model (read-only, D-16): the
+                        // settings slide-over is the one place to edit these.
                         div { class: "kn-drawer-section",
                             div { class: "kn-drawer-section-label", "PROVIDER / MODEL" }
-                            if config_parse_hint {
-                                div { class: "kn-modal-hint--info",
-                                    "config.yaml could not be parsed — saving will rewrite it from these values."
-                                }
+                            div { style: "overflow-wrap: anywhere; font-size: var(--fs-13);", "{provider_line}" }
+                            div { class: "kn-modal-hint--info",
+                                "Provider, model, tools and skills for {name_str} are edited in its settings panel on the Chat page."
                             }
-                            label { class: "kn-modal-label", "PROVIDER" }
-                            select {
-                                class: "voice-settings-select",
-                                disabled: !write_enabled,
-                                onchange: move |evt| {
-                                    provider_wc.set(evt.value());
-                                    save_hint.set(None);
-                                },
-                                if provider_val.trim().is_empty() {
-                                    option { value: "", selected: true, "— select a provider —" }
-                                }
-                                for name in provider_select_options(&provider_names, &provider_val).iter() {
-                                    option {
-                                        key: "{name}",
-                                        value: "{name}",
-                                        selected: name == &provider_val,
-                                        "{name}"
-                                    }
-                                }
-                            }
-                            label { class: "kn-modal-label", "MODEL" }
-                            ModelPickerField {
-                                value: model_wc,
-                                all_options: model_options.clone(),
-                                seeded: model_seed_val.clone(),
-                                disabled: !write_enabled || models_loading,
-                                placeholder: "— select a model —".to_string(),
-                                title: String::new(),
-                            }
-                            if fell_back && !models_loading {
-                                div { class: "kn-modal-hint--info",
-                                    "This provider exposes no model list — showing the full catalog."
-                                }
-                            }
-                            if let Some((ref body, ref title)) = drift {
-                                div { class: "kn-modal-hint--drift", title: "{title}", "{body}" }
-                            }
-                            if !write_enabled {
-                                div { class: "kn-modal-hint--info", "Config writes are disabled." }
+                            OpenAgentSettingsButton {
+                                agent: name_str.clone(),
+                                label: "Open agent settings".to_string(),
                             }
                         }
 
@@ -1018,26 +812,9 @@ pub fn ProfileDetailDrawer(
                             }
                         }
 
-                        // Section 5 — Save row.
-                        div { class: "kn-drawer-section",
-                            button {
-                                class: "kn-modal-btn kn-modal-btn--submit",
-                                disabled: !write_enabled || *saving.read(),
-                                onclick: on_save_click,
-                                if *saving.read() { "SAVING…" } else { "SAVE" }
-                            }
-                            if let Some(hint) = save_hint.read().clone() {
-                                div { class: "kn-modal-hint--info", "{hint}" }
-                            }
-                            if let Some(err) = save_error.read().clone() {
-                                div { class: "kn-modal-error", "{err}" }
-                            }
-                        }
-
                         // Phase 50.4 Plan 05 (D-11): the SAME shared
                         // apply-config banner Providers and Models mount —
-                        // identical copy and APPLY NOW CTA, raised after a
-                        // successful SAVE above.
+                        // identical copy and APPLY NOW CTA.
                         ApplyConfigBanner {
                             visible: apply_config_pending,
                         }
@@ -1111,7 +888,8 @@ pub fn ProfileDetailDrawer(
                             // Section 7 — Advanced (D-15/D-16). Clone-from is
                             // deliberately absent here — it is a one-time
                             // creation operation, not a live field
-                            // (UI-SPEC). Model pin, SOUL.md and Skills only,
+                            // (UI-SPEC). Model override and SOUL.md only
+                            // (skills moved to the settings slide-over, D-16),
                             // the same shared `AdvancedProfilePane` the
                             // create wizard's Verify step mounts.
                             div { class: "kn-drawer-section",
@@ -1294,9 +1072,10 @@ fn ProfileKeyAddForm(
     let name_trimmed = name_val.trim();
     let name_is_valid = is_valid_key_name(name_trimmed);
     let name_has_content = !name_trimmed.is_empty();
-    let is_duplicate = existing_key_names.iter().any(|n| n.as_str() == name_trimmed);
-    let can_save =
-        write_enabled && !saving_val && name_is_valid && !value_val.trim().is_empty();
+    let is_duplicate = existing_key_names
+        .iter()
+        .any(|n| n.as_str() == name_trimmed);
+    let can_save = write_enabled && !saving_val && name_is_valid && !value_val.trim().is_empty();
 
     let on_save = move |_| {
         // D-13/clippy.toml: read signal values BEFORE spawn — a signal
@@ -1381,58 +1160,6 @@ fn ProfileKeyAddForm(
                 div { class: "kn-modal-error", "{err}" }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod provider_select_options_tests {
-    use super::provider_select_options;
-
-    /// `<behavior>` bullet 1: an assigned provider already present in the
-    /// configured list is not duplicated.
-    #[test]
-    fn assigned_provider_already_configured_is_not_duplicated() {
-        let configured = vec!["openrouter".to_string(), "moonshot".to_string()];
-        let result = provider_select_options(&configured, "moonshot");
-        assert_eq!(
-            result,
-            vec!["openrouter".to_string(), "moonshot".to_string()]
-        );
-    }
-
-    /// `<behavior>` bullet 2: a stored provider absent from the configured
-    /// list is prepended so it stays selectable.
-    #[test]
-    fn assigned_provider_absent_from_config_is_prepended() {
-        let configured = vec!["openrouter".to_string()];
-        let result = provider_select_options(&configured, "moonshot");
-        assert_eq!(result, vec!["moonshot".to_string(), "openrouter".to_string()]);
-    }
-
-    /// `<behavior>` bullet 3: an empty assignment prepends nothing.
-    #[test]
-    fn empty_assignment_prepends_nothing() {
-        let configured = vec!["openrouter".to_string()];
-        let result = provider_select_options(&configured, "");
-        assert_eq!(result, vec!["openrouter".to_string()]);
-    }
-
-    /// `<behavior>` bullet 5: whitespace-only is treated as empty, matching
-    /// `compute_model_options`' own `trim()` rule.
-    #[test]
-    fn whitespace_only_assignment_prepends_nothing() {
-        let configured = vec!["openrouter".to_string()];
-        let result = provider_select_options(&configured, "  ");
-        assert_eq!(result, vec!["openrouter".to_string()]);
-    }
-
-    /// `<behavior>` bullet 4: an empty configured list yields just the
-    /// assignment.
-    #[test]
-    fn empty_configured_list_yields_just_the_assignment() {
-        let configured: Vec<String> = Vec::new();
-        let result = provider_select_options(&configured, "moonshot");
-        assert_eq!(result, vec!["moonshot".to_string()]);
     }
 }
 
@@ -1552,5 +1279,49 @@ mod group_label_tests {
         assert_eq!(patch.avatar, None);
         assert_eq!(patch.preview, None);
         assert_eq!(patch.preview_at_ms, None);
+    }
+}
+
+#[cfg(test)]
+mod d16_relocation_tests {
+    const EDIT_DIALOG_RS: &str = include_str!("edit_dialog.rs");
+
+    /// Source before the first `#[cfg(test)]`, so this module's own needles can
+    /// never satisfy (or trip) a check on the component code.
+    fn code_of(src: &str) -> &str {
+        &src[..src.find("#[cfg(test)]").unwrap_or(src.len())]
+    }
+
+    #[test]
+    fn edit_dialog_has_no_provider_model_editor() {
+        let code = code_of(EDIT_DIALOG_RS);
+        // Needles are assembled so this test can never match itself.
+        let forbidden = [
+            ["Model", "PickerField"].concat(),
+            ["provider_select", "_options"].concat(),
+            ["list_provider", "_models"].concat(),
+            ["get_provider", "_config"].concat(),
+            ["update_profile", "_config("].concat(),
+        ];
+        for needle in &forbidden {
+            assert!(
+                !code.contains(needle.as_str()),
+                "D-16: the drawer must not edit provider/model any more (found `{needle}`)"
+            );
+        }
+        assert!(
+            code.contains("Open agent settings"),
+            "the drawer must point at the slide-over"
+        );
+        // Every other section stays.
+        for kept in [
+            "IDENTITY",
+            "KEYS",
+            "VERIFY",
+            "SecretsSourcePicker",
+            "DANGER ZONE",
+        ] {
+            assert!(code.contains(kept), "the drawer lost `{kept}`");
+        }
     }
 }

@@ -4,21 +4,37 @@
 //! directly. The behavioral E-02 UAT row in VALIDATION.md remains
 //! operator-manual (no mock provider exists yet).
 
-use ironhermes_cli::{maybe_print_yolo_banner, resolve_yolo};
+use ironhermes_cli::{maybe_print_yolo_banner, resolve_session_default};
+use ironhermes_core::config::DefconLevel;
 
+fn lvl(n: u8) -> DefconLevel {
+    DefconLevel::try_from(n).expect("1-5")
+}
+
+/// Phase 57 D-08: through the lib re-export, `--yolo` wins over a config level, a
+/// config level stays as configured without the flag, and a worker env level of 1
+/// tightens even a `--yolo` process to 1.
 #[test]
-fn resolve_yolo_precedence_matrix() {
-    assert!(!resolve_yolo(false, false).0, "both unset -> disabled");
-    assert_eq!(resolve_yolo(false, false).1, "disabled");
-    assert!(resolve_yolo(false, true).0, "config only -> enabled");
-    assert_eq!(resolve_yolo(false, true).1, "config");
-    assert!(resolve_yolo(true, false).0, "flag only -> enabled");
-    assert_eq!(resolve_yolo(true, false).1, "flag");
-    assert!(resolve_yolo(true, true).0, "both -> enabled");
+fn resolve_session_default_precedence_matrix() {
     assert_eq!(
-        resolve_yolo(true, true).1,
-        "flag",
-        "CLI flag wins when both set (D-12)"
+        resolve_session_default(lvl(2), true, None).0,
+        lvl(5),
+        "--yolo wins over a config level"
+    );
+    assert_eq!(
+        resolve_session_default(lvl(2), false, None).0,
+        lvl(2),
+        "config level 2 stays 2 without the flag"
+    );
+    assert_eq!(
+        resolve_session_default(lvl(3), false, None).0,
+        lvl(3),
+        "nothing set -> the config default"
+    );
+    assert_eq!(
+        resolve_session_default(lvl(3), true, Some("1")).0,
+        lvl(1),
+        "an env level of 1 tightens a --yolo process to 1"
     );
 }
 

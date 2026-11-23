@@ -114,7 +114,11 @@ fn primary_html_in(root: &Path, since: Option<SystemTime>) -> Option<PathBuf> {
 /// extension case-insensitively matches any entry in `exts`, ties broken by
 /// path for determinism. Generalization of the legacy HTML-only scan —
 /// [`primary_html_in`] is a thin wrapper over this.
-fn primary_by_extension_in(root: &Path, exts: &[&str], since: Option<SystemTime>) -> Option<PathBuf> {
+fn primary_by_extension_in(
+    root: &Path,
+    exts: &[&str],
+    since: Option<SystemTime>,
+) -> Option<PathBuf> {
     let mut candidates: Vec<(u64, PathBuf)> = std::fs::read_dir(root)
         .ok()?
         .filter_map(Result::ok)
@@ -252,10 +256,7 @@ pub fn publish_producer_deliverable(input: ProducerPublish<'_>) -> Option<String
             }
         },
         None => {
-            let fallback = input
-                .fallback_body
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
+            let fallback = input.fallback_body.map(str::trim).filter(|s| !s.is_empty());
             let text = fallback?;
             (text.to_string(), SourceFormat::Markdown)
         }
@@ -349,8 +350,8 @@ mod producer_capture_tests {
         let root2 = tempfile::tempdir().unwrap();
         fs::create_dir_all(root2.path().join(WORKSPACE_MARKER_DIR)).unwrap();
         fs::write(root2.path().join("notes.md"), "# notes").unwrap();
-        let (path2, fmt2) = locate_producer_deliverable(root2.path(), None)
-            .expect("marked root selects notes.md");
+        let (path2, fmt2) =
+            locate_producer_deliverable(root2.path(), None).expect("marked root selects notes.md");
         assert_eq!(path2.file_name().unwrap(), "notes.md");
         assert_eq!(fmt2, SourceFormat::Markdown);
     }
@@ -751,7 +752,9 @@ mod pointer_capture_tests {
         );
 
         let store = ArtifactStore::open_default().unwrap();
-        let artifacts = store.list_for_profile(&ironhermes_core::current_profile()).unwrap();
+        let artifacts = store
+            .list_for_profile(&ironhermes_core::current_profile())
+            .unwrap();
         assert_eq!(
             artifacts.len(),
             1,

@@ -201,6 +201,7 @@ fn s18_status_report_snapshot_yolo_on() {
     let mut snap = StatusReport::fixture();
     snap.yolo = YoloStatus {
         enabled: true,
+        level: 5,
         source: "flag".into(),
     };
     let json = serde_json::to_string_pretty(&snap).expect("serialize");

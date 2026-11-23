@@ -163,7 +163,23 @@ fn handle_list(registry: &SkillRegistry) -> Value {
     let skills: Vec<Value> = registry
         .list()
         .iter()
-        .map(|r| json!({"name": r.name, "description": r.description}))
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "description": r.description,
+                // 54.1-05 Task 3 deviation (Rule 2): D-09/F7 requires a live,
+                // agent-observable trust tier for locally-discovered skills
+                // (e.g. optional-skills/ -> Official). Before this field, no
+                // reachable surface emitted trust_level per entry: the CLI's
+                // `skills list` reads the hub lock file (not the registry,
+                // so it never sees locally-discovered skills at all), and
+                // this same module's `handle_hub_search` only covers remote
+                // GitHub/well-known/skills-sh results, never local entries.
+                // Reuses the existing `trust_level_str` mapping already used
+                // by hub_search, so the string form matches exactly.
+                "trust_level": trust_level_str(r.source),
+            })
+        })
         .collect();
     let count = skills.len();
     json!({"status": "ok", "skills": skills, "count": count})
@@ -177,7 +193,10 @@ fn handle_view(registry: &SkillRegistry, args: &Value) -> Value {
 
     match registry.find(name) {
         Some(record) => match std::fs::read_to_string(&record.path) {
-            Ok(content) => json!({"status": "ok", "name": record.name, "content": content}),
+            Ok(content) => {
+                let content = ironhermes_core::skills::screen_skill_delivery(record, content);
+                json!({"status": "ok", "name": record.name, "content": content})
+            }
             Err(e) => {
                 json!({"status": "error", "message": format!("Failed to read skill file: {}", e)})
             }
@@ -677,6 +696,52 @@ mod tests {
         assert_eq!(v["status"], "ok");
         assert_eq!(v["count"], 0);
         assert!(v["skills"].as_array().unwrap().is_empty());
+    }
+
+    /// 54.1-05 Task 3 (Rule 2 deviation): the `list` action is D-05/D-11
+    /// claim 4's live evidence surface for "optional-skills discovered and
+    /// labeled Official" — this proves the `trust_level` field added above
+    /// actually carries "official" for an entry loaded from an
+    /// `optional-skills/` directory, using the same `resolve_source`
+    /// special-case (`skills.rs`'s `optional-skills` path-component check)
+    /// the real audit run depends on.
+    #[tokio::test]
+    async fn test_list_labels_optional_skills_entry_official() {
+        let dir = tempfile::tempdir().unwrap();
+        let opt_dir = dir.path().join("optional-skills");
+        fs::create_dir_all(opt_dir.join("widget")).unwrap();
+        fs::write(
+            opt_dir.join("widget").join("SKILL.md"),
+            make_skill_md("widget", "An optional widget skill", "Widget body"),
+        )
+        .unwrap();
+        // `load_with_paths` is a bare test helper that never calls
+        // `resolve_source` (production always leaves it at the `Builtin`
+        // default) — only `load_with_config`'s post-load relabel loop does.
+        // Route through `extra_paths` so this test exercises the exact same
+        // `resolve_source` path-component check the real audit run depends on.
+        let config = ironhermes_core::SkillsConfig {
+            extra_paths: vec![opt_dir],
+            ..Default::default()
+        };
+        let registry = SkillRegistry::load_with_config(dir.path(), &config);
+        let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cred_dir = tempfile::tempdir().unwrap().keep();
+        let tool = SkillsTool::new(
+            Arc::new(registry),
+            active_skills,
+            cred_dir,
+            std::collections::HashMap::new(),
+        );
+        let result = tool.execute(json!({"action": "list"})).await.unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "ok");
+        let skills = v["skills"].as_array().unwrap();
+        let widget = skills
+            .iter()
+            .find(|s| s["name"] == "widget")
+            .expect("widget skill present in list output");
+        assert_eq!(widget["trust_level"], "official");
     }
 
     #[tokio::test]

@@ -13,6 +13,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use super::executor::run_bash_with_limits;
+use super::scope;
+use super::session::CWD_MARKER_PREFIX;
 use super::{Environment, ExecResult, RunOpts};
 
 /// Runs commands directly on the host via `bash -c`. Constructed by
@@ -54,7 +56,10 @@ impl LocalEnvironment {
 #[async_trait::async_trait]
 impl Environment for LocalEnvironment {
     /// Spawns `bash -c cmd` (the already-`Session::wrap_command`-wrapped
-    /// script) with `env_clear()` applied FIRST, then ONLY the sanitized
+    /// script) — or, when `opts.detached` and the scope launcher probe
+    /// succeeds, `systemd-run --user --scope … -- bash -c cmd` (58.1 D-11,
+    /// see [`scope`]); both branches share the same env/pipe/limits chain —
+    /// with `env_clear()` applied FIRST, then ONLY the sanitized
     /// `build_terminal_safe_env(allowlist)` set (D-09 — `env_clear()` MUST
     /// precede `envs()`; reversing it is additive-only and leaks inherited
     /// secrets — the exact anti-pattern `terminal.rs`'s pre-existing
@@ -69,23 +74,73 @@ impl Environment for LocalEnvironment {
     /// unrelated to what `Session::wrap_command`'s `ready` toggle already
     /// handles (conditionally sourcing the snapshot).
     async fn run_bash(&self, cmd: &str, opts: RunOpts) -> anyhow::Result<ExecResult> {
-        let mut command = tokio::process::Command::new("bash");
+        let safe_env = ironhermes_core::build_terminal_safe_env(&self.env_allowlist, &[]);
+
+        // 58.1 D-11: a detached command is launched into its own systemd scope
+        // when the launcher probe succeeds; otherwise plain `bash -c` as before.
+        // `--scope` execs the command in place, so kill_on_drop/timeout still
+        // hit the foreground bash while the backgrounded workload stays in the
+        // scope by design.
+        let scoped = if opts.detached {
+            scope::scope_launcher(&safe_env).await.map(|launcher| {
+                let suffix: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+                (launcher, suffix)
+            })
+        } else {
+            None
+        };
+
+        let mut command = match &scoped {
+            Some((launcher, suffix)) => {
+                let mut c = tokio::process::Command::new(launcher);
+                c.args(scope::scope_argv(suffix, cmd));
+                c
+            }
+            None => {
+                let mut c = tokio::process::Command::new("bash");
+                c.arg("-c").arg(cmd);
+                c
+            }
+        };
         command
-            .arg("-c")
-            .arg(cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
         // D-09: env_clear() MUST precede envs() — see doc comment above.
         command.env_clear();
-        command.envs(ironhermes_core::build_terminal_safe_env(
-            &self.env_allowlist,
-            &[],
-        ));
+        command.envs(safe_env);
 
         let child = command.spawn()?;
-        run_bash_with_limits(child, opts.timeout, opts.cancel).await
+        let mut result = run_bash_with_limits(child, opts.timeout, opts.cancel).await?;
+
+        if let Some((_, suffix)) = &scoped {
+            // The wrapped script prints the cwd marker on every normal exit, so a
+            // non-zero exit without it (timeouts aside) means the launcher itself
+            // failed before exec and the command never ran: claim no scope then.
+            let killed = matches!(result.returncode, 124 | 130);
+            let launcher_failed =
+                result.returncode != 0 && !killed && !result.output.contains(CWD_MARKER_PREFIX);
+            if launcher_failed {
+                tracing::warn!(
+                    target: "ironhermes_exec::scope",
+                    returncode = result.returncode,
+                    "scope launcher failed before running the command"
+                );
+            } else {
+                tracing::info!(
+                    target: "ironhermes_exec::scope",
+                    unit = %format!("{}{suffix}.scope", scope::JOB_UNIT_PREFIX),
+                    "detached launch placed in its own systemd scope"
+                );
+                let mut hint = scope::scope_hint(suffix);
+                if killed {
+                    hint.push_str(&scope::scope_killed_note(suffix));
+                }
+                result.output.insert_str(0, &hint);
+            }
+        }
+        Ok(result)
     }
 
     /// No external resources to release — the host process IS the

@@ -361,8 +361,6 @@ impl SubagentRunner for AgentSubagentRunner {
         // returned Arc is the same instance bumped by the four mark_activity
         // sites; the registry reads it via SubagentInfo.activity_last for live
         // staleness derivation (no push updates, no periodic polling).
-        let mut agent = AgentLoop::new(child_client, registry, max_iterations);
-        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1).
         // Phase 50.4 (D-14, wave 2): read into an owned local, then pass a
         // reference to that local — never a reference derived from a guard
         // held across this call.
@@ -370,6 +368,14 @@ impl SubagentRunner for AgentSubagentRunner {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         };
+        // Phase 58.3.1 D-09: the same endpoint (and model) the child client was built from.
+        let window_endpoint = match model_override {
+            Some(model) => resolver_for_fallback.resolve_main_with_model(model),
+            None => resolver_for_fallback.resolve_for_main().clone(),
+        };
+        let mut agent = AgentLoop::new(child_client, registry, max_iterations)
+            .with_window_endpoint(window_endpoint);
+        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1).
         agent = wire_fallback_if_configured(agent, &resolver_for_fallback); // chains .with_fallback() via the shared helper — PROV-07
         // D-21: Forward cancel token to child AgentLoop
         if let Some(ref token) = cancel_token {
@@ -384,6 +390,31 @@ impl SubagentRunner for AgentSubagentRunner {
         // run_child produces a distinct Arc<AtomicUsize> via BudgetHandle::new;
         // the parent's counter is never cloned into a child.
         agent = agent.with_budget(BudgetHandle::new(max_iterations));
+        // Phase 57 Plan 09 (D-15 / T-57-34) + Plan 21 (CR-02 / D-09): two separate session
+        // ids, because the runner's session id is only a transcript LABEL on the shared-runtime
+        // surfaces ("gateway", "web-ui"), which no `/yolo` ever targets.
+        //   * the label (`with_session_id`) keeps scoping the child's transcript, usage rows,
+        //     intercept lookup and approval bucket, exactly as before;
+        //   * the DELEGATING session (`with_security_session_id`) is the chat whose live DEFCON
+        //     level the screen judges the child's tool calls at, and whose id its audit rows
+        //     carry. `AgentLoop::run` scopes it around the delegating turn, so a `/yolo`
+        //     change on the chat reaches the child at its next call, in both directions.
+        // The child registry already carries the parent's screen (`build_child_registry`); the
+        // child gets no approval gate of its own, so a Warn at DEFCON 1-3 fails closed there
+        // and at 4-5 is an audited bypass. With no delegating session in scope the chat's level
+        // is unknown and the process default may be a bypass level, so the child is judged at
+        // DEFCON 1, the strictest (`UNSCOPED_DELEGATE_SESSION_PREFIX`, resolved in
+        // `session_level` without touching the registry).
+        if let Some(parent_session) = self.session_id.as_deref() {
+            agent = agent.with_session_id(parent_session);
+        }
+        let level_session = ironhermes_hooks::screen::delegating_session().unwrap_or_else(|| {
+            format!(
+                "{}{subagent_id}",
+                ironhermes_hooks::screen::UNSCOPED_DELEGATE_SESSION_PREFIX
+            )
+        });
+        agent = agent.with_security_session_id(level_session);
 
         // Phase 32.3 Plan 02 (D-04): live activity clock — clone the Arc from
         // the constructed AgentLoop. SAFE to grab before `agent.run` because

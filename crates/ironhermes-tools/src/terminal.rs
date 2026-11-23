@@ -132,7 +132,18 @@ impl Tool for TerminalTool {
     fn description(&self) -> &str {
         "Execute a shell command and return its output (stdout + stderr combined). \
          Set background=true to spawn a long-running process tracked by the \
-         process registry; returns {process_id, pid} immediately."
+         process registry; returns {process_id, pid} immediately. A background=true \
+         process is NOT scoped: it stays in the gateway's cgroup, counts against its \
+         memory cap, and dies when the gateway restarts. For a server or render that \
+         must outlive the gateway, run it in the foreground with nohup or setsid and \
+         redirect its output (`> log 2>&1 < /dev/null &`). \
+         Commands that detach a process (nohup, setsid, disown, or a trailing `&`) \
+         run in their own systemd scope named ironhermes-job-<id>.scope on Linux hosts \
+         with a user systemd manager, so they survive gateway restarts and their memory \
+         is not charged to the gateway; the output names the scope. List jobs with \
+         `systemctl --user list-units 'ironhermes-job-*'` and stop one with \
+         `systemctl --user stop <unit>`. For a foreground command that sleeps or polls, \
+         set `timeout` above the total sleep time (default 30 s)."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -534,8 +545,7 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"command": "echo should-not-run-locally"}))
             .await;
-        let err =
-            result.expect_err("docker backend unavailable must hard-error, not run locally");
+        let err = result.expect_err("docker backend unavailable must hard-error, not run locally");
         let msg = err.to_string();
         assert!(
             msg.contains("docker backend unavailable"),

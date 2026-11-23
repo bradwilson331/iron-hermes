@@ -72,6 +72,13 @@ pub struct StatusLineState {
     /// live discipline). Reverts to the normal hint the moment visual mode
     /// ends (yank or cancel), since this is level-triggered, not timed.
     pub visual_mode_active: bool,
+
+    /// Phase 57 plan 13 (D-09): the session's live DEFCON level, shown as a
+    /// `DEFCON n` pill (+ `bypass` at 4-5, where warn-class approvals are bypassed
+    /// and audited). `None` = pill hidden (the default for a state nothing populated).
+    /// Populated per frame in `ui.rs` from `app.defcon`, the same live-read discipline
+    /// as `voice_phase`: a `/yolo <N>` typed mid-turn shows on the very next frame.
+    pub defcon: Option<ironhermes_core::config::DefconLevel>,
 }
 
 /// The visual-mode status-line hint (UI-SPEC §2, D-05) — vim modal-editor
@@ -132,7 +139,19 @@ impl Default for StatusLineState {
             // Phase 36.6.4 Plan 02: no keyboard selection in progress at
             // session start.
             visual_mode_active: false,
+            // Phase 57 plan 13: hidden until `ui.rs` populates it from the live handle.
+            defcon: None,
         }
+    }
+}
+
+/// The text of the DEFCON pill: `DEFCON n`, plus ` bypass` when warn-class approvals
+/// are bypassed at this level (4-5, D-21). Pure, so the wording is pinned in one place.
+pub fn defcon_pill_text(level: ironhermes_core::config::DefconLevel) -> String {
+    if level.yolo_bypass_active() {
+        format!("DEFCON {} bypass", level.level())
+    } else {
+        format!("DEFCON {}", level.level())
     }
 }
 
@@ -208,6 +227,18 @@ fn build_pills(state: &StatusLineState) -> (Vec<PillEntry>, Option<String>) {
         PillEntry::palette(state.provider.clone()),
         PillEntry::palette(tokens_cell),
     ];
+
+    // Phase 57 plan 13 (D-09): the live DEFCON pill. A colour override keeps it out of
+    // the Cyan/Magenta/Green/Yellow rotation (like the voice pill), so the other pills
+    // keep their colours; Red when approvals are being bypassed, DarkGray otherwise.
+    if let Some(level) = state.defcon {
+        let color = if level.yolo_bypass_active() {
+            Color::Red
+        } else {
+            Color::DarkGray
+        };
+        pills.push(PillEntry::colored(defcon_pill_text(level), color));
+    }
 
     // Plan 21.7-07 (D-04 / Pitfall 8 / R-8 / E-11): insert the `agents: N/M`
     // pill AFTER the tokens pill. ONLY render when active_subagents > 0 —

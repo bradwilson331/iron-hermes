@@ -188,6 +188,17 @@ pub async fn build_app_runtime_bundle(
         tool_credentials.clone(),
     );
 
+    // Phase 57 Plan 09 (SC-1 / D-15): ONE security screen per bundle, installed on the main
+    // registry before any tool is registered (so the delegate tool below inherits it) and
+    // handed to the RPC sandbox registry, so a tool called from inside `execute_code` is
+    // screened too (Pitfall 6). `scope_to` copies and `delegate_task` child registries
+    // carry it on from here. The screen reads the process-installed sidecar service at call
+    // time, so a `boot()` that runs after this point still takes effect.
+    let tool_screen: Arc<dyn ironhermes_hooks::ToolScreen> = Arc::new(
+        ironhermes_hooks::SecurityToolScreen::from_installed(input.config.audit.clone()),
+    );
+    registry.set_tool_screen(tool_screen.clone());
+
     if let Some(ref manager) = input.memory_manager {
         registry.register_memory_tool(manager.clone());
     }
@@ -263,6 +274,9 @@ pub async fn build_app_runtime_bundle(
     // stay curated (see that function's SAFETY comment); artifact publishing
     // is a visible top-level tool call, not a sandbox-nested capability.
     registry.register_artifact_tool(input.config.clone());
+    // Phase 54.10 D-09: `report_publish` (toolset `artifacts`) sits beside the
+    // artifact tool; same rationale, same exclusion from the RPC registry.
+    registry.register_report_tool(input.config.clone());
 
     // Phase 47 Plan 08 (GEN-05/D-08): the chat surface's gen tools are always
     // constructed `Root` — a `Root` reservation is bounded exclusively by the
@@ -322,17 +336,30 @@ pub async fn build_app_runtime_bundle(
 
     let browser_session: Arc<tokio::sync::Mutex<Option<BrowserSession>>> =
         Arc::new(tokio::sync::Mutex::new(None));
-    let vision_handle = Arc::new(AnyClientVisionHandle::new(resolver_handle.clone()));
+    // 49.8-08 (D-13/D-16): bound as the trait object so the SAME live vision
+    // handle can be cloned into both browser and ros2 tool registration —
+    // register_ros2_tools replaces the vision-less ros2 tools
+    // build_registry_with_process_registry's register_defaults_except
+    // installed, on the same ros2_session.
+    let vision_handle: Arc<dyn ironhermes_tools::browser_vision::VisionClientHandle> =
+        Arc::new(AnyClientVisionHandle::new(resolver_handle.clone()));
     registry.register_browser_tools_with_vision(
         browser_session.clone(),
         input.resolver.clone(),
-        vision_handle,
+        vision_handle.clone(),
         input.config.clone(),
     );
+    registry.register_ros2_tools(
+        ironhermes_tools::ros2::Ros2ConfigSource::Live,
+        Some(vision_handle),
+    );
 
-    let skill_registry = Arc::new(SkillRegistry::load_with_config(
+    // Phase 57 Plan 02 (D-11): CR-01 symlink enforcement follows the resolved
+    // DEFCON level, not the deprecated `skills.defcon_level` alias.
+    let skill_registry = Arc::new(SkillRegistry::load_with_config_at(
         &input.cwd,
         &input.config.skills,
+        input.config.effective_defcon_level(),
     ));
     // The shared, swappable handle stored on the bundle. The plain `Arc` above is
     // what the boot-time tool registrations capture; `reload_skill_registry`
@@ -362,7 +389,11 @@ pub async fn build_app_runtime_bundle(
     let summarization_handle = Arc::new(AnyClientSummarizationHandle::new(resolver_handle.clone()));
     registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
 
-    let rpc_registry = build_rpc_registry(input.memory_manager.clone(), tool_credentials.clone());
+    let rpc_registry = build_rpc_registry(
+        input.memory_manager.clone(),
+        tool_credentials.clone(),
+        Some(tool_screen.clone()),
+    );
     registry.register_execute_code_tool_with_process_registry(
         rpc_registry,
         input.config.exec.clone(),
@@ -464,9 +495,16 @@ fn build_registry_with_process_registry(
 /// When a new default tool is added and you believe it belongs in the RPC sandbox,
 /// add it here explicitly with a rationale comment. Do not switch this to delegating
 /// register_defaults_except() without a security review.
-fn build_rpc_registry(
+///
+/// Phase 57 Plan 09 (Pitfall 6): the sandbox now inherits the SAME security screen as the
+/// main registry through `screen`. Calls from `execute_code` reach these tools through
+/// `dispatch_with_hook` and never pass through agent_loop, so without the screen a
+/// `write_file` or `web_read` made from sandboxed Python was unscreened. The capability set
+/// above is unchanged; the screen only decides whether a call in that set may run.
+pub fn build_rpc_registry(
     memory_manager: Option<SharedMemoryManager>,
     credentials: Arc<ironhermes_tools::credentials::ToolCredentials>,
+    screen: Option<Arc<dyn ironhermes_hooks::ToolScreen>>,
 ) -> Arc<ToolRegistry> {
     use ironhermes_tools::file_tools::{
         PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
@@ -482,6 +520,9 @@ fn build_rpc_registry(
     // see this function's SAFETY comment above); it only gives web_search a
     // credential source instead of defaulting to env-only.
     rpc_registry.with_credentials(credentials.clone());
+    if let Some(screen) = screen {
+        rpc_registry.set_tool_screen(screen);
+    }
     rpc_registry.register(Box::new(ReadFileTool));
     rpc_registry.register(Box::new(WriteFileTool));
     rpc_registry.register(Box::new(PatchFileTool));
@@ -495,7 +536,7 @@ fn build_rpc_registry(
     rpc_registry.register(Box::new(WebAnswerTool::new(credentials)));
     rpc_registry.register(Box::new(WebReadTool));
     if let Some(manager) = memory_manager {
-        rpc_registry.register_memory_tool(manager);
+        rpc_registry.register_memory_tool_sandboxed(manager);
     }
     Arc::new(rpc_registry)
 }
@@ -606,6 +647,7 @@ async fn build_mcp_manager(
     let configs_clone = mcp_configs.clone();
     let expected_server_count = mcp_configs.len();
     tokio::spawn(async move {
+        // Spawned: runs in the background, so this time does not block startup.
         manager_clone.start_all(configs_clone).await;
 
         if emit_mcp_startup_logs {
@@ -740,6 +782,28 @@ mod tests {
         assert!(
             names.iter().any(|name| name == "artifact"),
             "artifact tool should be registered on the app-runtime bundle; got {names:?}"
+        );
+    }
+
+    /// Phase 54.10 D-09: the chat bundle registry must include `report_publish`.
+    #[tokio::test]
+    async fn factory_bundle_registers_report_tool() {
+        let bundle = build_app_runtime_bundle(default_input())
+            .await
+            .expect("factory bundle should build");
+
+        let names = bundle
+            .registry
+            .read()
+            .await
+            .list_tools()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(
+            names.iter().any(|name| name == "report_publish"),
+            "report_publish should be registered on the app-runtime bundle; got {names:?}"
         );
     }
 
@@ -1080,6 +1144,49 @@ mod tests {
             source,
             "set_toolset_config(Some(merged_tools",
             "Arc::new(RwLock::new(registry))",
+        );
+    }
+
+    /// 49.8-08 Task 3 (D-13/D-16): a bundle built from a Config whose
+    /// `ros2.bridge_url` is set lists `ros2` in `get_definitions(None)` —
+    /// proving `register_ros2_tools` re-registered it (the vision-less
+    /// registration from `register_defaults_except` alone would still be
+    /// visible here too, so this test's real job is the source-level
+    /// invariant below confirming the re-registration carries `Some(..)`).
+    #[tokio::test]
+    async fn ros2_tools_in_bundle_with_bridge_url() {
+        let mut config = Config::default();
+        config.ros2.bridge_url = Some("ws://127.0.0.1:9".to_string());
+
+        let resolver = ProviderResolver::build(&config).expect("resolver should build");
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let input = AppRuntimeFactoryInput {
+            config: Arc::new(config),
+            resolver: Arc::new(resolver),
+            cwd,
+            process_registry: Arc::new(RwLock::new(ProcessRegistry::new_for_session(
+                "test-ros2-bridge-url".to_string(),
+            ))),
+            memory_manager: None,
+            delegate_task: None,
+            hooks_config: HooksConfig::default(),
+            emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
+            resolver_handle: None,
+        };
+
+        let bundle = build_app_runtime_bundle(input)
+            .await
+            .expect("factory bundle should build");
+
+        let defs = bundle.registry.read().await.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+
+        assert!(
+            names.contains(&"ros2".to_string()),
+            "ros2 must be visible when ros2.bridge_url is configured; got: {:?}",
+            names
         );
     }
 }

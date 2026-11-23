@@ -307,7 +307,6 @@ async fn run_prompt_turn(
         let gate = approval_gate.clone();
         let dcfg = config.dangerous_commands.clone();
         let audit_cfg = config.audit.clone();
-        let yolo = config.autonomous.yolo;
         let tool = terminal_tool.clone();
         let denials = denials.clone();
         Some(Arc::new(move |args: serde_json::Value| {
@@ -332,7 +331,9 @@ async fn run_prompt_turn(
                     &sid,
                     "acp",
                     &sid,
-                    yolo,
+                    // SC-1 / D-21: the session's LIVE level and the booted sidecar, read at
+                    // this call - never an `autonomous.yolo` captured when the turn started.
+                    ironhermes_hooks::GatePolicy::for_session(&sid),
                     false, // is_remote_backend: ACP `terminal` always runs locally
                     false, // forward_env_nonempty: ACP never forwards credentials cross-boundary
                     || async move {
@@ -355,7 +356,6 @@ async fn run_prompt_turn(
         let gate = approval_gate.clone();
         let dcfg = config.dangerous_commands.clone();
         let audit_cfg = config.audit.clone();
-        let yolo = config.autonomous.yolo;
         let tool = execute_code_tool.clone();
         let denials = denials.clone();
         Some(Arc::new(move |args: serde_json::Value| {
@@ -366,25 +366,38 @@ async fn run_prompt_turn(
             let tool = tool.clone();
             let denials = denials.clone();
             Box::pin(async move {
+                // D-01 (Phase 54 Finding 1, overturns D-11): extract the real Python
+                // source so `DangerousCommandGuardrail::check`'s `tool_name ==
+                // "execute_code"` branch can classify it, instead of the previous
+                // opaque `""` that made the branch permanently dead on this surface.
+                // Missing/non-string `code` coerces to "" rather than panicking.
+                let classify_arg = args
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let outcome = ironhermes_hooks::execute_gated_command(
                     "execute_code",
-                    "", // D-11: opaque — Python source is not shell syntax
+                    &classify_arg,
                     &guard,
                     Some(gate.as_ref()),
                     &audit_log,
                     &sid,
                     "acp",
                     &sid,
-                    yolo,
+                    // SC-1 / D-21: the session's LIVE level and the booted sidecar, read at
+                    // this call - never an `autonomous.yolo` captured when the turn started.
+                    ironhermes_hooks::GatePolicy::for_session(&sid),
                     // D-15: ACP treats EVERY execute_code call as a dangerous op requiring
                     // a permission request, closing the known cross-surface guardrail/
-                    // audit bypass at THIS surface. The empty classify_arg above always
-                    // classifies `Allow`, so `is_remote_backend: true` is deliberately
-                    // repurposed as the existing D-08 forced-approval lever to route
-                    // every call through the permission bridge regardless of
+                    // audit bypass at THIS surface. `is_remote_backend: true` is
+                    // deliberately repurposed as the existing D-08 forced-approval lever
+                    // to route every call through the permission bridge regardless of
                     // classification — NOT a real backend-remoteness claim (execute_code
-                    // always runs in the local sandbox); the dangerous-op classification
-                    // itself still comes from `DangerousCommandGuardrail`, unchanged.
+                    // always runs in the local sandbox); the real classification from
+                    // `classify_arg` above now also independently contributes via
+                    // `DangerousCommandGuardrail` (D-01), so a dangerous/evasive source is
+                    // both classified AND forced to approval on this surface.
                     true,
                     false, // forward_env_nonempty: execute_code never forwards credentials cross-boundary
                     || async move {
@@ -526,6 +539,16 @@ async fn run_prompt_turn(
                 Err(_) => {
                     tracing::warn!(session_id = %session_id, "ACP prompt: state store lock poisoned; skipping message persistence");
                 }
+            }
+
+            // D-05: same out-of-band block the web streams; not persisted, so session/load
+            // and the model never see it.
+            if !agent_result.context_warnings.is_empty() {
+                let mut block = String::from("\n--- Context Warnings ---\n");
+                for w in &agent_result.context_warnings {
+                    block.push_str(&format!("- {w}\n"));
+                }
+                (bridge.stream_callback())(&block);
             }
 
             // Usage update, sent through the SAME channel the bridge used so it preserves

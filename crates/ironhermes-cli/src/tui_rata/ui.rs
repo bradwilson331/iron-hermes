@@ -472,6 +472,9 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     // per frame from `app.selection_mode`, same discipline as `voice_phase`
     // above.
     state.visual_mode_active = app.selection_mode == selection::SelectionMode::Visual;
+    // Phase 57 plan 13 (D-09): the session's LIVE DEFCON level, read per frame from
+    // the handle `/yolo <N>` changes — never cached in `app.status`.
+    state.defcon = Some(app.defcon.get());
     // Phase 36.6.4 Plan 02 (D-04): transient copy-confirmation toast — takes
     // priority over the normal hint while its window hasn't elapsed
     // (`on_tick` clears it at expiry). Same slot, same DIM styling as the
@@ -577,6 +580,49 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| ui(f, &app)).unwrap();
+    }
+
+    /// Phase 57 plan 13 (D-09): the status row shows the session's live DEFCON level
+    /// (`DEFCON n`) and, at 4-5, that warn-class approvals are bypassed. It replaces
+    /// the on/off boolean the TUI toggle used to imply.
+    #[test]
+    fn tui_status_shows_level() {
+        use ironhermes_core::config::DefconLevel;
+        use ironhermes_core::defcon::session_defcon;
+
+        fn screen_text(app: &App) -> String {
+            let backend = TestBackend::new(120, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| ui(f, app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        }
+
+        let session = "s-tui-status-level";
+        let app = App::new_test_with_session(session);
+
+        session_defcon().set_session_level(session, DefconLevel::THREE);
+        let at_three = screen_text(&app);
+        assert!(at_three.contains("DEFCON 3"), "level 3 shown: {at_three}");
+        assert!(
+            !at_three.contains("bypass"),
+            "no bypass marker at level 3: {at_three}"
+        );
+
+        session_defcon().set_session_level(session, DefconLevel::FIVE);
+        let at_five = screen_text(&app);
+        assert!(at_five.contains("DEFCON 5"), "level 5 shown: {at_five}");
+        assert!(
+            at_five.contains("bypass"),
+            "the bypass marker shows at level 5: {at_five}"
+        );
+
+        session_defcon().forget(session);
     }
 
     #[test]

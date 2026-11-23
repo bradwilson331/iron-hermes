@@ -758,6 +758,57 @@ mod tests {
         }
     }
 
+    /// G-58.3.1-7 / D-15: the gateway hygiene shape (window 18755, threshold
+    /// 0.4396, protect 3 / 4122 tokens). A tail that starts on a tool result
+    /// used to orphan it from its assistant.tool_calls and roll the whole
+    /// compression back with `OrphanedToolPair`.
+    #[tokio::test]
+    async fn local_pruning_engine_never_splits_tool_pair_at_tail() {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        let engine = LocalPruningEngine::new(18755, 0.4396).with_protect(3, 4122);
+        let mut compacted_shapes = 0;
+        for body_len in (40..=1200).step_by(7) {
+            let mut msgs = vec![
+                ChatMessage::system("sys prompt ".repeat(1800)),
+                ChatMessage::user("hello"),
+            ];
+            for i in 0..100 {
+                let id = format!("call_{i}");
+                msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+                    id: id.clone(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: "fn".into(),
+                        arguments: "{}".into(),
+                    },
+                }]));
+                msgs.push(ChatMessage::tool_result(&id, "x".repeat(body_len)));
+            }
+            msgs.push(ChatMessage::user("next"));
+
+            let res = engine.compress(&mut msgs, make_stats(0)).await;
+            assert!(
+                res.is_ok(),
+                "body_len={body_len}: compress returned {:?}",
+                res.err()
+            );
+            assert!(
+                crate::tool_pair::check_orphan_invariant(&msgs).is_ok(),
+                "body_len={body_len}: orphan invariant violated"
+            );
+            if msgs.iter().any(|m| {
+                m.content_text()
+                    .is_some_and(|t| t.starts_with("[CONTEXT COMPACTED]"))
+            }) {
+                compacted_shapes += 1;
+            }
+        }
+        assert!(
+            compacted_shapes > 0,
+            "vacuity guard: no swept shape reached the drop path"
+        );
+    }
+
     // ── Phase 18 Plan 13: pressure-check fires without hooks (gap-closure) ──
 
     #[tokio::test]

@@ -45,7 +45,7 @@ impl Drop for MouseCaptureGuard {
 /// 2. `ratatui::init()` — raw mode + EnterAlternateScreen + panic hook (D-15)
 /// 3. `EnableMouseCapture` + RAII `MouseCaptureGuard` (D-01 — ratatui::init does NOT capture mouse)
 /// 4. Build 14-item D-18 parity deps (build_app_deps)
-/// 5. `run_app_inner` 4-arm tokio::select! (D-16)
+/// 5. `run_tui_session` — resolves `session_end_registry`, then the 4-arm `tokio::select!` loop (`run_event_loop`, D-16)
 /// 6. Guard drop → DisableMouseCapture; `ratatui::restore()` → LeaveAlternateScreen + disable_raw_mode
 pub async fn run_chat_ratatui(
     cli: &crate::cli_args::Cli,
@@ -136,17 +136,123 @@ async fn run_with_deps(
         app.submit();
     }
 
-    // Capture the Arc before run_app_inner consumes &mut app so the borrow
-    // checker is satisfied even if app is moved or dropped during cleanup.
-    let registry = app.registry.clone();
-    let result = run_app_inner(terminal, &mut app).await;
-    // D-15 (Phase 27.1.1): fire on_session_end on every registered tool --
-    // HexapodTcpTool overrides this to send stop + relax (D-14). The ratatui
-    // path had no shutdown hook before Phase 27.1.1; this closes the gap.
-    // Best-effort; do not propagate any panic out of the hook.
-    // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
+    // 49.8-23 (G-49.8-21): run_tui_session is the ONE session-end path --
+    // it resolves session_end_registry (the runtime registry, not
+    // app.registry) BEFORE the mutable borrow below, then wraps the whole
+    // event loop in the panic-safe / Err-safe teardown. No inline hook or
+    // stop call belongs here anymore; that would grow a second session-end
+    // path, which the tui_exit_stops_the_session_turns_drive drift guard
+    // (ros2_surface_wiring.rs) rejects.
+    run_tui_session(terminal, &mut app, crossterm::event::EventStream::new()).await
+}
+
+/// Returns the registry every TUI tool call ACTUALLY executes on:
+/// `spawn_turn` builds a `TurnRequest` and calls `AgentRuntime::run_turn`,
+/// which runs on `agent_runtime`'s own bundle registry. `App.registry` is a
+/// SEPARATE, TUI-local `ToolRegistry` (built in `build_app_deps` for the MCP
+/// manager and the `/toolset` session handle) whose `Ros2Session` no turn
+/// ever drives (G-49.8-21 root cause: the pre-fix TUI exit stopped
+/// `app.registry`'s session, which always reports "nothing to stop").
+/// Session-end hooks and the robot stop MUST target this function's return
+/// value, not `app.registry` directly.
+pub fn session_end_registry(app: &App) -> Arc<RwLock<ironhermes_tools::ToolRegistry>> {
+    // GREEN (49.8-23 Task 1, G-49.8-21 fix): the registry every turn's tool
+    // call actually executes on. The pre-fix target (`app.registry.clone()`)
+    // reproduced G-49.8-21 exactly — RED evidence recorded in
+    // 49.8-23-SUMMARY.md: "expected a gait-0 rest stop on
+    // /controller/traveling after the exit marker; published traveling
+    // frames: []" — because app.registry's Ros2Session never saw the walk.
+    app.agent_runtime.registry().clone()
+}
+
+/// TUI-local session-end teardown (G-49.8-21 / D-10 / D-16): the ONE place
+/// that stops the robot and runs the D-15 hooks on every ordinary TUI exit,
+/// AND on a panic or `Err` from the event loop.
+///
+/// Unwind capture is std-only (no `futures` crate in production code --
+/// `kanban/goal_loop.rs`'s `GoalLoopFuture` comment): `session` is pinned
+/// once, then polled through `std::future::poll_fn`, with each poll wrapped
+/// in `std::panic::catch_unwind`. A panic inside `session` therefore
+/// surfaces as `Poll::Ready(Err(payload))` instead of unwinding through
+/// this function, so the stop below always runs before the panic resumes.
+///
+/// This helper is deliberately NOT `ironhermes_tools::ros2::with_session_end_stop`
+/// — that seam runs no `call_session_end_hooks` (the D-15 hexapod halt) and
+/// its own doc comment reserves it for single-dispatch surfaces (CLI
+/// `run_single`). This one wraps the WHOLE TUI session, never one turn, so
+/// action goals still persist across turns until the real session end
+/// (49.8-08 session-end semantics) — wrapping a single turn here would
+/// cancel every in-flight goal at every turn boundary instead of only at
+/// the real end.
+pub async fn with_tui_session_end_stop<F>(
+    registry: Arc<RwLock<ironhermes_tools::ToolRegistry>>,
+    session: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    let mut session = std::pin::pin!(session);
+    let outcome: std::thread::Result<Result<()>> = std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::future::Future::poll(session.as_mut(), cx)
+        })) {
+            Ok(std::task::Poll::Ready(result)) => std::task::Poll::Ready(Ok(result)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(payload) => std::task::Poll::Ready(Err(payload)),
+        }
+    })
+    .await;
+
+    // D-15 (Phase 27.1.1): fire on_session_end on every tool registered on
+    // the RUNTIME registry (session_end_registry, G-49.8-21) -- the one
+    // every TUI tool call actually executes on. HexapodTcpTool overrides
+    // this to send stop + relax (D-14). Best-effort; do not propagate any
+    // panic out of the hook. Read lock only; do NOT hold a write lock here
+    // (see RESEARCH Pitfall 6).
     registry.read().await.call_session_end_hooks();
-    result
+
+    // 49.8-08 (D-10/D-16): TUI exit is a real session boundary — stop the
+    // robot and cancel any goals, on the runtime registry. Awaited, and
+    // bounded by end_session_stop's own session-end timeout (see
+    // ironhermes_tools::ros2::session), so an unreachable bridge can never
+    // wedge TUI exit.
+    let ros2_report = ironhermes_tools::ros2::end_session_stop(&registry).await;
+
+    match outcome {
+        Ok(result) => {
+            if ros2_report != "nothing to stop" {
+                tracing::info!(report = %ros2_report, "TUI exit: ros2 session-end stop");
+            }
+            result
+        }
+        Err(payload) => {
+            tracing::warn!(
+                report = %ros2_report,
+                "TUI loop panicked; ros2 session-end stop ran before resuming the panic"
+            );
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+
+/// The production composition: resolve `session_end_registry` FIRST (an
+/// owned clone, before `app` is mutably borrowed), then run the event loop
+/// inside the panic-safe / Err-safe teardown. Generic over the terminal
+/// backend and the terminal-event stream so tests can drive the exact same
+/// composition over a `TestBackend` and a channel-backed event stream
+/// (`tests/tui_session_end_stop.rs`).
+pub async fn run_tui_session<B, S>(
+    terminal: &mut ratatui::Terminal<B>,
+    app: &mut App,
+    events: S,
+) -> Result<()>
+where
+    B: ratatui::backend::Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    S: tokio_stream::Stream<Item = io::Result<crossterm::event::Event>> + Unpin,
+{
+    let registry = session_end_registry(app);
+    with_tui_session_end_stop(registry, run_event_loop(terminal, app, events)).await
 }
 
 // ── D-18 parity wiring — 14 items ────────────────────────────────────────────
@@ -159,6 +265,15 @@ async fn run_with_deps(
 /// BlocklistGuardrail → McpManager → HookRegistry → CommandRouter → AgentLoop.
 ///
 /// Concrete identifiers — grep-verified iteration 2. All 14 D-18 items below.
+/// The one security screen both TUI-built registries carry (SC-1 / D-04 / D-15): the same
+/// `SecurityToolScreen` the factory installs on the turn registry, looking the booted
+/// sidecar service up at call time.
+fn tui_tool_screen(audit: &ironhermes_core::AuditConfig) -> Arc<dyn ironhermes_hooks::ToolScreen> {
+    Arc::new(ironhermes_hooks::SecurityToolScreen::from_installed(
+        audit.clone(),
+    ))
+}
+
 async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDeps> {
     use ironhermes_agent::{
         AgentRuntime, AgentRuntimeInput, AnyClientVisionHandle,
@@ -254,12 +369,12 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let memory_manager =
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory).await?;
 
-    // Phase 28.1-05: client is kept on App for /model and /fast slash-command
-    // mutations (interactive mid-session model switching). The runtime builds its
-    // own client internally; this one is only used for status-line seeding and
-    // /model//fast rebuilds. max_turns config-drift fix: AgentRuntime sizes from
-    // config.agent.max_iterations (not max_turns); see objective note.
-    // D-18 item 1 (client for status-line + slash-command mutations):
+    // Phase 28.1-05: the runtime builds its own client internally; this one only
+    // seeds the status line and subagent runner (/model and /fast swap the
+    // runtime's client via App::apply_model_switch). max_turns config-drift fix:
+    // AgentRuntime sizes from config.agent.max_iterations (not max_turns); see
+    // objective note.
+    // D-18 item 1 (client for status-line seeding):
     let client = if let Some(ref model) = cli.model {
         let provider = cli.provider.as_deref().unwrap_or(resolver.main_provider());
         build_provider_client(&resolver, provider, model)?
@@ -286,6 +401,13 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // Skip the plain TerminalTool; wire the process-registry variant below so
     // background terminal spawns flow through drain_and_kill_session.
     let mut registry = ironhermes_tools::ToolRegistry::new();
+    // Phase 57 Plan 17 (SC-1 / D-04 / D-15): this registry and the RPC registry below are
+    // production registries built OUTSIDE the factory (agent turns themselves run on the
+    // factory bundle's registry, which plan 09 screens). Both carry the same screen as the
+    // factory's, so a tool call through either one (slash dispatch, the MCP manager, an
+    // execute_code RPC call) is screened. Created once, from the profile's audit config.
+    let tool_screen = tui_tool_screen(&config.audit);
+    registry.set_tool_screen(tool_screen.clone());
     // Phase 41.3 Plan 11 (D-19): install the resolved snapshot BEFORE
     // register_defaults_except runs, so web_search reads it instead of the
     // env-only default.
@@ -345,6 +467,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
 
     // RPC sub-registry (safe subset — no terminal, no execute_code)
     let mut rpc_registry = ironhermes_tools::ToolRegistry::new();
+    // Plan 17: the RPC sandbox registry shares the screen, set before the `Arc` wrap below
+    // (after which `set_tool_screen` would need `&mut`).
+    rpc_registry.set_tool_screen(tool_screen);
     // Phase 41.3 Plan 11 (D-19): same resolved snapshot as the main registry
     // above — this widens no capability (the hand-rolled tool list here is
     // unchanged); it only gives web_search a credential source.
@@ -365,7 +490,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     )));
     rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
     if let Some(ref mgr) = memory_manager {
-        rpc_registry.register_memory_tool(mgr.clone());
+        rpc_registry.register_memory_tool_sandboxed(mgr.clone());
     }
 
     registry.register_execute_code_tool_with_process_registry(
@@ -382,19 +507,28 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let browser_session: std::sync::Arc<
         tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
     > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    // 49.8-08 (D-13/D-16): bound as the trait object so the SAME live vision
+    // handle can be cloned into both browser and ros2 tool registration —
+    // register_ros2_tools replaces the vision-less ros2 tools
+    // register_defaults_except installed, on the same ros2_session.
     // Phase 50.4 (D-14, wave 2): AnyClientVisionHandle now takes a SharedResolver
     // (a swappable Arc<RwLock<Arc<ProviderResolver>>>) rather than a plain
     // Arc<ProviderResolver>. This CLI surface has no apply-now affordance, so it
     // wraps its own resolver in a PRIVATE handle nobody else writes to — identical
     // behaviour to before this field existed.
-    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(
-        std::sync::RwLock::new(std::sync::Arc::new(resolver.clone())),
-    )));
+    let vision_handle: std::sync::Arc<dyn ironhermes_tools::browser_vision::VisionClientHandle> =
+        std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(
+            std::sync::RwLock::new(std::sync::Arc::new(resolver.clone())),
+        )));
     registry.register_browser_tools_with_vision(
         browser_session.clone(),
         std::sync::Arc::new(resolver.clone()),
-        vision_handle,
+        vision_handle.clone(),
         std::sync::Arc::new(config.clone()),
+    );
+    registry.register_ros2_tools(
+        ironhermes_tools::ros2::Ros2ConfigSource::Live,
+        Some(vision_handle),
     );
 
     // D-18 item 9: BlocklistGuardrail (before Arc wrap — D-05)
@@ -523,6 +657,10 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // alongside agent_runtime for slash-dispatch and session-end hooks.
     // The runtime's run_turn uses runtime.bundle.registry which is built inside
     // from_config; the TUI registry stored on App is the one built above.
+    // 49.8-23 (G-49.8-21): session-end work (hooks + the ros2 robot stop)
+    // targets the RUNTIME registry via event_loop::session_end_registry, not
+    // App.registry above — the TUI registry's Ros2Session is never driven by
+    // a turn, so stopping it reports "nothing to stop" on every real walk.
     //
     // DECISION (Phase 28.1-05): The TUI's pre-built registry (with its custom
     // tool set) is passed as the canonical registry. AgentRuntime::from_config
@@ -674,8 +812,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         &hermes_home,
     ));
 
-    // Phase 22.4.2 Plan 00: D-09 session-toggle Arc fields
-    let yolo_enabled = Arc::new(std::sync::atomic::AtomicBool::new(yolo));
+    // Phase 22.4.2 Plan 00: D-09 session-toggle Arc fields. (Phase 57: `/yolo` is the
+    // audited session DEFCON dial now; `App::new` takes the session's live handle from
+    // the process-wide registry, seeded from the default `main.rs` booted.)
     let verbose_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let statusbar_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let debug_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -699,7 +838,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // HERE — `build_app_deps` runs strictly after `run_chat_ratatui`'s
     // alt-screen entry + `EnableMouseCapture` (both happen before
     // `run_with_deps`, which calls this fn) and strictly before
-    // `run_app_inner`'s `EventStream::new()` starts reading terminal
+    // `run_event_loop`'s terminal-event stream starts reading terminal
     // events. `Picker::from_query_stdio()` writes/reads stdio momentarily
     // per the crate's own doc comment — calling it lazily on first overlay
     // open would risk the query's response bytes being consumed by the
@@ -722,7 +861,6 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         history_path,
         status_initial,
         cancel_parent,
-        client,
         registry,
         browser_session: browser_session.clone(),
         mouse_capture_enabled,
@@ -732,7 +870,6 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         context_compressor: None,
         personality_overlay,
         // Phase 22.4.2 Plan 00: D-09 toggle Arcs
-        yolo_enabled,
         verbose_enabled,
         statusbar_enabled,
         debug_enabled,
@@ -859,12 +996,112 @@ async fn build_mcp_manager(
 
 // ── 4-arm tokio::select! event loop ──────────────────────────────────────────
 
-async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
-    use crossterm::event::EventStream;
+/// SIGTERM/SIGHUP listeners feeding a graceful-quit `select!` arm (G-49.8-21
+/// Task 2, D-10/D-16). Before this, a closed terminal window (SIGHUP) or
+/// `kill`/`systemctl stop` (SIGTERM) took the default action — immediate
+/// termination with no stop — so a ROSPider walk in flight kept executing
+/// its last Twist. This arm turns both into the existing graceful
+/// `should_quit` path instead, so `run_tui_session`'s teardown (49.8-23)
+/// runs the robot stop. SIGKILL and power loss remain unhandleable
+/// (documented in Task 3's `docs/ros2-integration.md` Known limitations).
+#[cfg(unix)]
+struct QuitSignals {
+    sigterm: Option<tokio::signal::unix::Signal>,
+    sighup: Option<tokio::signal::unix::Signal>,
+}
+
+#[cfg(unix)]
+impl QuitSignals {
+    /// Creates both listeners once, before the loop — creation registers
+    /// each handler synchronously. A creation failure logs at warn and
+    /// leaves that slot `None` (that signal then takes the default action).
+    fn new() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        let sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to install SIGTERM handler; SIGTERM will take the default action"
+                );
+                None
+            }
+        };
+        let sighup = match signal(SignalKind::hangup()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to install SIGHUP handler; SIGHUP will take the default action"
+                );
+                None
+            }
+        };
+        Self { sigterm, sighup }
+    }
+
+    /// Resolves with the signal's name on the next delivery of either.
+    /// `Signal::recv` returns a fresh future per call — unlike the one-shot
+    /// `ctrl_c()` future, this is the documented-safe pattern to poll every
+    /// `select!` iteration, so no re-arm dance is needed here. With both
+    /// slots `None`, pends forever (mirrors `recv_pending`'s fallback) —
+    /// the `select!` arm then never fires and that signal takes the default
+    /// action.
+    async fn recv(&mut self) -> Option<&'static str> {
+        match (self.sigterm.as_mut(), self.sighup.as_mut()) {
+            (Some(term), Some(hup)) => tokio::select! {
+                _ = term.recv() => Some("SIGTERM"),
+                _ = hup.recv() => Some("SIGHUP"),
+            },
+            (Some(term), None) => {
+                term.recv().await;
+                Some("SIGTERM")
+            }
+            (None, Some(hup)) => {
+                hup.recv().await;
+                Some("SIGHUP")
+            }
+            (None, None) => std::future::pending().await,
+        }
+    }
+}
+
+/// Non-unix fallback: no signal handling is available, so `recv` pends
+/// forever and that `select!` arm never fires (mirrors `recv_pending`'s
+/// no-channel fallback).
+#[cfg(not(unix))]
+struct QuitSignals;
+
+#[cfg(not(unix))]
+impl QuitSignals {
+    fn new() -> Self {
+        Self
+    }
+
+    async fn recv(&mut self) -> Option<&'static str> {
+        std::future::pending().await
+    }
+}
+
+/// 4-arm `tokio::select!` event loop (D-16), generic over the ratatui
+/// `Backend` and the terminal-event stream (49.8-23, G-49.8-21) so
+/// `tests/tui_session_end_stop.rs` can drive the SAME composition
+/// `run_with_deps` uses, over a `TestBackend` and a channel-backed event
+/// stream instead of a real terminal + `EventStream::new()`. Behaviourally
+/// identical to the former `run_app_inner` — the only difference is that
+/// `events` comes from the parameter instead of a local `EventStream::new()`.
+pub async fn run_event_loop<B, S>(
+    terminal: &mut ratatui::Terminal<B>,
+    app: &mut App,
+    mut events: S,
+) -> Result<()>
+where
+    B: ratatui::backend::Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    S: tokio_stream::Stream<Item = io::Result<crossterm::event::Event>> + Unpin,
+{
     use tokio::{signal, time};
     use tokio_stream::StreamExt;
-
-    let mut events = EventStream::new(); // Pitfall 10 — local to fn, not on App
 
     // Phase 36.6.2 Plan 03 (TUI-02): wire the approval channel. The sender is
     // cloned by spawn_turn to build the per-turn TuiApprovalGate; the receiver is
@@ -893,11 +1130,48 @@ async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<
     }
     let mut clarify_rx = app.clarify_rx.take();
 
+    // Phase 54 Plan 02 (D-04): wire the yolo-bypass notice channel — mirrors the
+    // approval channel above. The sender is cloned by spawn_turn to build the
+    // per-turn TuiApprovalGate's notifier; the receiver is drained by
+    // recv_yolo_notice below and surfaced as a Role::System transcript line
+    // (never a direct println!/eprintln!, which would corrupt the ratatui frame).
+    if app.yolo_notice_tx.is_none() {
+        let (yolo_notice_tx, yolo_notice_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        app.yolo_notice_tx = Some(yolo_notice_tx);
+        app.yolo_notice_rx = Some(yolo_notice_rx);
+    }
+    let mut yolo_notice_rx = app.yolo_notice_rx.take();
+
     let mut tick = time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
-    let ctrl_c = signal::ctrl_c(); // Pitfall 6 — created ONCE outside loop, then pinned
+    // ctrl_c signal handling (G-49.8-21, D-10/D-16):
+    // 1. The future is created once outside the loop so no SIGINT delivered
+    //    between iterations is ever missed.
+    // 2. It is RE-ARMED after every Ok resolution via `ctrl_c.set(signal::ctrl_c())`
+    //    because `tokio::signal::ctrl_c()` is an `async fn` that resolves
+    //    exactly once; polling the same completed future again panics with
+    //    "`async fn` resumed after completion" (reproduced on tokio 1.52.3 —
+    //    see .planning/debug/tui-exit-mid-walk-no-stop.md).
+    // 3. In raw mode a ctrl+c KEY press arrives as a KeyEvent on the `events`
+    //    arm, so this arm only ever sees an EXTERNALLY delivered SIGINT.
+    // 4. tokio keeps its process-wide SIGINT handler installed once
+    //    registered, so a delivery in the brief gap before the re-armed
+    //    future is first polled is absorbed, never the default kill.
+    let ctrl_c = signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    // Err from ctrl_c means the SIGINT handler could not be installed. Once
+    // that happens the arm is disabled via this precondition and never
+    // re-armed — a failing future would otherwise resolve immediately on
+    // every iteration, busy-spinning the loop and, through the
+    // double-ctrl+c state machine, risking a spurious exit. The key ctrl+c
+    // (a KeyEvent, point 3 above) keeps working either way.
+    let mut ctrl_c_enabled = true;
+
+    // G-49.8-21 Task 2 (D-10/D-16): SIGTERM/SIGHUP graceful-quit listeners.
+    // Created once before the loop, same as ctrl_c above, but recv() is
+    // safe to poll every iteration without re-arming (see QuitSignals doc).
+    let mut quit_signals = QuitSignals::new();
 
     loop {
         let size = terminal.size()?;
@@ -924,7 +1198,29 @@ async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<
             // Phase 41.1 Plan 10 (G-41.1-1): drain clarify requests from spawned
             // turn tasks and surface/enqueue them (mirrors the approval arm above).
             Some(req) = recv_clarify_request(&mut clarify_rx) => app.surface_clarify_request(req),
-            _ = &mut ctrl_c => app.handle_ctrl_c_signal(),
+            // Phase 54 Plan 02 (D-04): drain yolo-bypass notices from spawned
+            // turn tasks and surface them as Role::System transcript lines.
+            Some(notice) = recv_yolo_notice(&mut yolo_notice_rx) => app.surface_yolo_notice(notice),
+            ctrl_c_result = &mut ctrl_c, if ctrl_c_enabled => match ctrl_c_result {
+                Ok(()) => {
+                    app.handle_ctrl_c_signal();
+                    ctrl_c.set(signal::ctrl_c());
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to install SIGINT handler; ctrl+c signal handling disabled for this session");
+                    ctrl_c_enabled = false;
+                }
+            },
+            // G-49.8-21 Task 2 (D-10/D-16): SIGTERM/SIGHUP end the session
+            // through the same graceful should_quit path as /quit — there is
+            // no double-press here, these signals mean end the session now.
+            // The loop then leaves through the existing should_quit path
+            // below (history save, break), and run_tui_session's teardown
+            // runs the robot stop.
+            Some(name) = quit_signals.recv() => {
+                tracing::info!(signal = name, "TUI received termination signal; ending session gracefully");
+                app.should_quit = true;
+            }
             _ = tick.tick() => {
                 app.on_tick();
                 // Phase 36.17.8 (D-08): drain any transcripts delivered by the
@@ -973,6 +1269,16 @@ async fn recv_approval_request(
     }
 }
 
+/// Await the next yolo-bypass notice `String` from a spawned turn task, or
+/// `pending()` when no notice channel is wired (defensive — it is always wired
+/// at startup). Mirrors `recv_approval_request` exactly (Phase 54 Plan 02, D-04).
+async fn recv_yolo_notice(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>) -> Option<String> {
+    match rx.as_mut() {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Await the next `ClarifyRequest` from a spawned turn task, or `pending()` when
 /// no clarify channel is wired (defensive — it is always wired at startup).
 /// Mirrors `recv_approval_request` exactly (Phase 41.1 Plan 10, G-41.1-1).
@@ -995,7 +1301,7 @@ async fn recv_clarify_request(
 /// (Phase 36.6.2 Plan 02, D-01), so `reconcile_scroll`'s max-scroll
 /// rectangle was always 8 rows too tall whenever the thinking pane was open.
 ///
-/// Used by `run_app_inner` to pass `transcript_area` to `reconcile_scroll`.
+/// Used by `run_event_loop` to pass `transcript_area` to `reconcile_scroll`.
 pub(crate) fn compute_transcript_area(
     size: ratatui::prelude::Size,
     thinking_expanded: bool,
@@ -1109,10 +1415,6 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let session_id_for_capture = session_id.clone();
     let text_for_opt_out = app.last_submitted_text.clone();
 
-    // Phase 36.3.12 D-08: snapshot the live `/yolo` toggle in the sync body (mirrors
-    // the voice Arcs above) so the spawned async block can read its CURRENT value at
-    // gating time without borrowing `app` across the `tokio::spawn` boundary.
-    let yolo_enabled_for_gating = app.yolo_enabled.clone();
     // Phase 36.3.12 Plan 10 (WR-01): the process-lifetime store (see AppDeps
     // doc) — cloning the Arc, not calling `ApprovalsStore::load()`, is what
     // makes the `[s]ession` tier persist across every spawn_turn dispatch.
@@ -1122,6 +1424,11 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     // overlay instead of the blocking CliApprovalGate stdin prompt (RESEARCH
     // Pitfall 2 — a blocking stdin read conflicts with the raw-mode EventStream).
     let approval_tx_for_gate = app.approval_tx.clone();
+    // Phase 54 Plan 02 (D-04): the yolo-notice-channel sender, cloned so the
+    // spawned task's TuiApprovalGate can announce a yolo bypass on the transcript
+    // instead of a direct println!/eprintln! (which would corrupt the ratatui
+    // frame under crossterm raw mode).
+    let yolo_notice_tx_for_gate = app.yolo_notice_tx.clone();
     // Phase 41.1 Plan 10 (G-41.1-1): the clarify-channel sender + the SHARED
     // registry, cloned so the spawned task's messaging_wiring routes clarify
     // through the overlay instead of clarify_tool.rs's raw-println fallback.
@@ -1226,18 +1533,33 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         // terminal/execute_code gating via execute_gated_command) AND the
         // TurnRequest.approval_gate field (which gates the guardrail
         // NeedsApproval branch for other tools, e.g. MCP mutations) — a third
-        // /yolo consumer (quick-260823-qyp, DD-01). The intercepts take the
-        // turn-start `yolo_now` snapshot below; the gate takes the live Arc
-        // itself so a mid-turn /yolo toggle is observed for the rest of the turn.
-        let yolo_now = yolo_enabled_for_gating.load(std::sync::atomic::Ordering::SeqCst);
+        // gate. Neither the gate nor the intercepts hold a yolo flag (Phase 57 D-21):
+        // `execute_gated_command` reads the session's LIVE DEFCON level at each call,
+        // so a `/yolo <N>` typed mid-turn is observed by the very next gated call.
         let tui_gate: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>> =
             approval_tx_for_gate.map(|tx| {
-                std::sync::Arc::new(crate::tui_rata::approval_gate_tui::TuiApprovalGate::new(
-                    tx,
-                    approvals_for_gating.clone(),
-                    yolo_enabled_for_gating.clone(),
-                )) as std::sync::Arc<dyn ironhermes_core::ApprovalGate>
+                std::sync::Arc::new(
+                    crate::tui_rata::approval_gate_tui::TuiApprovalGate::new_with_notice_tx(
+                        tx,
+                        approvals_for_gating.clone(),
+                        yolo_notice_tx_for_gate,
+                    ),
+                ) as std::sync::Arc<dyn ironhermes_core::ApprovalGate>
             });
+
+        // Phase 54.3 D-03: flush-time notice target for the defensive legacy-CLI
+        // fallback arm below only (it leaves `approval_gate` unset). When the TUI gate
+        // is wired, `approval_gate` itself is the fallback notifier `run_turn` uses.
+        let yolo_notifier_field: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>> =
+            if tui_gate.is_none() {
+                Some(std::sync::Arc::new(
+                    crate::approval_gate::CliApprovalGate::from_shared(
+                        approvals_for_gating.clone(),
+                    ),
+                ))
+            } else {
+                None
+            };
 
         let (approval_gate_field, terminal_intercept, execute_code_intercept) = match tui_gate {
             // Channel wired (production): surface the overlay for every gated call.
@@ -1249,7 +1571,6 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
                     session_id.clone(),
                     "tui",
                     session_id.clone(),
-                    yolo_now,
                     gate.clone(),
                 )),
                 Some(crate::tui_rata::approval_gate_tui::build_tui_gated_execute_code_intercept(
@@ -1258,7 +1579,6 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
                     session_id.clone(),
                     "tui",
                     session_id.clone(),
-                    yolo_now,
                     gate.clone(),
                 )),
             ),
@@ -1272,7 +1592,6 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
                     session_id.clone(),
                     "tui",
                     session_id.clone(),
-                    yolo_now,
                     approvals_for_gating.clone(),
                 )),
                 Some(crate::approval_gate::build_gated_execute_code_intercept(
@@ -1281,7 +1600,6 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
                     session_id.clone(),
                     "tui",
                     session_id.clone(),
-                    yolo_now,
                     approvals_for_gating.clone(),
                 )),
             ),
@@ -1323,6 +1641,11 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             // gated call surfaces the overlay instead of the blocking stdin prompt.
             terminal_intercept,
             execute_code_intercept,
+            // Phase 54.3 D-03: `approval_gate` above (the TuiApprovalGate) is the
+            // flush-time notice target `run_turn` falls back to; the defensive
+            // legacy-CLI fallback arm (no `approval_gate`) supplies its own notifier
+            // above. Notice target only — never consulted for an approval decision.
+            yolo_notifier: yolo_notifier_field,
         };
 
         // Phase 46.7 Plan 06 (D-22): captured immediately before the turn runs
@@ -1358,15 +1681,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         // before `result` is consumed by the terminal-event match below.
         let reply_for_tts = result.as_ref().ok().and_then(|r| r.final_response.clone());
 
-        let terminal_event = match result {
-            // Phase 36.2 Plan 07/10 fix: forward the per-turn aggregated
-            // token count so the status-bar `tokens_used` field updates.
-            Ok(agent_result) => StreamEvent::Finished {
-                total_tokens: agent_result.total_usage.total_tokens,
-            },
-            Err(_) if cancel_token.is_cancelled() => StreamEvent::Cancelled,
-            Err(e) => StreamEvent::Error(e.to_string()),
-        };
+        let terminal_event = turn_terminal_event(result, cancel_token.is_cancelled());
         let _ = tx.send(terminal_event);
 
         // Phase 36.17.8: speak the reply when voice TTS is active. Sent AFTER the
@@ -1396,6 +1711,24 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         drop(per_permit);
         drop(global_permit);
     });
+}
+
+/// Map a finished `run_turn` result onto the turn's terminal `StreamEvent`.
+fn turn_terminal_event(
+    result: Result<ironhermes_agent::AgentResult>,
+    cancelled: bool,
+) -> StreamEvent {
+    match result {
+        // Phase 36.2 Plan 07/10 fix: forward the per-turn aggregated
+        // token count so the status-bar `tokens_used` field updates.
+        // Phase 58.3.1 D-05: forward the turn's context warnings too.
+        Ok(agent_result) => StreamEvent::Finished {
+            total_tokens: agent_result.total_usage.total_tokens,
+            context_warnings: agent_result.context_warnings,
+        },
+        Err(_) if cancelled => StreamEvent::Cancelled,
+        Err(e) => StreamEvent::Error(e.to_string()),
+    }
 }
 
 // ── Phase 46.7 Plan 06: TUI post-turn deliverable capture (D-13/D-15/D-22) ──
@@ -1445,6 +1778,96 @@ fn capture_turn_scoped_deliverable(
 
 #[cfg(test)]
 mod tests {
+    /// Phase 58.3.1 D-05 (WR-03): the turn task forwards `AgentResult.context_warnings`.
+    #[test]
+    fn turn_terminal_event_forwards_context_warnings() {
+        use crate::tui_rata::stream_events::StreamEvent;
+        let notice = "Small context window (32000 tokens): this session uses the compact profile";
+        let mut r = ironhermes_agent::AgentResult::budget_exhausted(Vec::new(), 0);
+        r.total_usage.total_tokens = 42;
+        r.context_warnings = vec![notice.to_string()];
+        match super::turn_terminal_event(Ok(r), false) {
+            StreamEvent::Finished {
+                total_tokens,
+                context_warnings,
+            } => {
+                assert_eq!(total_tokens, 42);
+                assert_eq!(context_warnings, vec![notice.to_string()]);
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+        assert!(matches!(
+            super::turn_terminal_event(Err(anyhow::anyhow!("boom")), true),
+            StreamEvent::Cancelled
+        ));
+        match super::turn_terminal_event(Err(anyhow::anyhow!("boom")), false) {
+            StreamEvent::Error(e) => assert!(e.contains("boom")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// SC-1 / D-04 / D-15 (plan 57-17): the TUI's main registry and its execute_code RPC
+    /// registry are built outside the factory, so they get ONE screen from the same helper.
+    #[test]
+    fn tui_registries_share_one_screen() {
+        let screen = super::tui_tool_screen(&ironhermes_core::AuditConfig::default());
+        let mut main = ironhermes_tools::ToolRegistry::new();
+        let mut rpc = ironhermes_tools::ToolRegistry::new();
+        main.set_tool_screen(screen.clone());
+        rpc.set_tool_screen(screen);
+        let main_screen = main
+            .tool_screen()
+            .expect("main registry carries the screen");
+        let rpc_screen = rpc.tool_screen().expect("rpc registry carries the screen");
+        assert!(
+            std::ptr::addr_eq(
+                std::sync::Arc::as_ptr(&main_screen),
+                std::sync::Arc::as_ptr(&rpc_screen)
+            ),
+            "both registries must share the very same screen"
+        );
+    }
+
+    /// SC-1 (plan 57-17), source-structural: inside `build_app_deps`, the RPC registry gets
+    /// the screen BEFORE it is wrapped in an `Arc` for execute_code, and the main registry
+    /// gets it BEFORE the `RwLock` wrap (after either wrap `set_tool_screen` needs `&mut`).
+    /// Backed by plan 16's `every_production_registry_is_screened` sweep.
+    #[test]
+    fn tui_build_app_deps_screens_both_registries() {
+        let source = include_str!("event_loop.rs");
+        let production = source.split("#[cfg(test)]").next().expect("source");
+        let body = production
+            .split("async fn build_app_deps(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ensure_home_dirs(").next())
+            .expect("build_app_deps body");
+        let non_comment: Vec<&str> = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        let line_of = |needle: &str| {
+            non_comment
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` not found in build_app_deps"))
+        };
+        let rpc_screen = line_of("rpc_registry.set_tool_screen(");
+        let rpc_wrap = line_of("Arc::new(rpc_registry)");
+        assert!(
+            rpc_screen < rpc_wrap,
+            "rpc_registry.set_tool_screen must precede Arc::new(rpc_registry)"
+        );
+        let main_screen = non_comment
+            .iter()
+            .position(|line| line.trim_start().starts_with("registry.set_tool_screen("))
+            .expect("registry.set_tool_screen( not found in build_app_deps");
+        let main_wrap = line_of("RwLock::new(registry)");
+        assert!(
+            main_screen < main_wrap,
+            "registry.set_tool_screen must precede RwLock::new(registry)"
+        );
+    }
+
     /// INV-25.1-19: Phase 25.1 GAP-8 closure.
     /// The rata chat REPL bootstrap MUST register browser tools and wire the
     /// shared Arc into BOTH the App-level AgentLoop AND the per-turn AgentLoop

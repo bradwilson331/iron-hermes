@@ -193,6 +193,21 @@ async fn complete_and_dispatch(
 }
 
 // ---------------------------------------------------------------------------
+// 49.8-08 (D-10/D-16): did this job touch ros2?
+// ---------------------------------------------------------------------------
+
+/// True when any appended message's tool call is named `ros2` or `rospider`.
+/// Used at cron job end to decide whether to await the D-10 robot-stop hook —
+/// a job that never called into the ros2 module has nothing to stop.
+pub(crate) fn job_touched_ros2(appended: &[ChatMessage]) -> bool {
+    appended.iter().any(|msg| {
+        msg.tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|c| matches!(c.function.name.as_str(), "ros2" | "rospider")))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -350,7 +365,10 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     // so we use scope_to() to produce an owned copy. For the no-filter case,
     // scope_to with all registered toolsets preserves all tools. Guardrails
     // and intercepts are NOT carried over by scope_to — consistent with the
-    // existing enabled_toolsets branch behaviour (no regression).
+    // existing enabled_toolsets branch behaviour (no regression). Phase 57 plan 09
+    // (T-57-36): the security SCREEN is carried over, and it applies the full floor to
+    // `terminal` / `execute_code` because this copy has no gated intercept, so a cron job's
+    // tools are no longer unguarded.
     let tool_registry_scoped = {
         let reg = ctx.tool_registry.read().await;
         let all_toolsets = reg.list_toolsets();
@@ -404,7 +422,15 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     // If targets_for_tts is empty → no TTS registration;
     // REQ-37.2-05 fires in complete_and_dispatch.
 
-    let mut agent = AgentLoop::new(client, tool_registry_scoped, max_turns);
+    // Phase 58.3.1 D-09: size requests against the window of the endpoint (and model,
+    // when the job overrides it) this client talks to; cron loops have no context engine.
+    let window_endpoint = match job.model.as_deref() {
+        Some(m) => resolver.resolve_main_with_model(m),
+        None => resolver.resolve_for_main().clone(),
+    };
+    let mut agent = AgentLoop::new(client, tool_registry_scoped, max_turns)
+        .with_window_endpoint(window_endpoint)
+        .with_compact_profile_mode(ctx.config.agent.compact_profile);
     // Install the cron-distinct budget (§6.4). This budget is separate from any
     // interactive gateway budget — draining it does not affect interactive chat.
     agent = agent.with_budget(cron_budget);
@@ -463,6 +489,13 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     // -----------------------------------------------------------------------
     // (6) Process outcome — Ok with final_response | empty | Err
     // -----------------------------------------------------------------------
+    // 49.8-08 (D-10/D-16): computed by reference BEFORE the match below moves
+    // `outcome` — an errored or timed-out run may have left motion or a goal
+    // running, so `Err(_)` is conservatively treated as touched too.
+    let touched_ros2 = match &outcome {
+        Ok(result) => job_touched_ros2(&result.appended),
+        Err(_) => true,
+    };
     let (output, success) = match outcome {
         Ok(result) => {
             let final_text = result.final_response.unwrap_or_default();
@@ -481,6 +514,19 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
             (format!("[Agent error: {}]", e), false)
         }
     };
+
+    // 49.8-08 (D-10/D-16): a job that touched ros2/rospider (or errored, which
+    // may have left motion or a goal running) is a real session boundary —
+    // stop the robot and cancel any goals. Awaited, and bounded by
+    // end_session_stop's own session-end timeout (see
+    // ironhermes_tools::ros2::session), so an unreachable bridge can never
+    // wedge job completion.
+    if touched_ros2 {
+        let ros2_report = ironhermes_tools::ros2::end_session_stop(&ctx.tool_registry).await;
+        if ros2_report != "nothing to stop" {
+            info!(job_id = %job.id, report = %ros2_report, "cron job end: ros2 session-end stop");
+        }
+    }
 
     info!(job_id=%job.id, success=%success, "cron job completed");
 
@@ -1034,5 +1080,34 @@ mod tests {
             "complete_and_dispatch should succeed: {:?}",
             result
         );
+    }
+
+    fn tool_call_msg(name: &str) -> ChatMessage {
+        ChatMessage::assistant_tool_calls(vec![ironhermes_core::ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: ironhermes_core::FunctionCall {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }])
+    }
+
+    #[test]
+    fn job_touched_ros2_detects_ros2_and_rospider_calls() {
+        assert!(job_touched_ros2(&[tool_call_msg("ros2")]));
+        assert!(job_touched_ros2(&[tool_call_msg("rospider")]));
+        assert!(job_touched_ros2(&[
+            ChatMessage::user("hi"),
+            tool_call_msg("web_search"),
+            tool_call_msg("ros2"),
+        ]));
+    }
+
+    #[test]
+    fn job_touched_ros2_false_without_ros2_calls() {
+        assert!(!job_touched_ros2(&[]));
+        assert!(!job_touched_ros2(&[ChatMessage::user("hi")]));
+        assert!(!job_touched_ros2(&[tool_call_msg("web_search")]));
     }
 }

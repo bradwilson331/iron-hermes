@@ -150,6 +150,33 @@ impl AnyClient {
         }
     }
 
+    /// `chat_completion` with D-09 learn-shrink-retry around a context-length
+    /// rejection (auxiliary callers; see `aux_fit`).
+    pub async fn chat_completion_fitting(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSchema]>,
+        model: Option<&str>,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        extra: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<ChatResponse> {
+        crate::aux_fit::chat_with_context_recovery(
+            self.base_url(),
+            model.unwrap_or_else(|| self.model()),
+            messages,
+            max_tokens,
+            |m, mt| {
+                let extra = extra.clone();
+                async move {
+                    self.chat_completion(&m, tools, model, mt, temperature, extra)
+                        .await
+                }
+            },
+        )
+        .await
+    }
+
     /// Get the model name from the inner client.
     pub fn model(&self) -> &str {
         match self {
@@ -281,7 +308,10 @@ pub fn wire_fallback_if_configured(mut agent: AgentLoop, resolver: &ProviderReso
                     // Cause E fix: pass the fallback's canonical provider name via
                     // with_fallback_named so AgentLoop can update self.provider_name
                     // on failover and usage_events rows carry the correct label.
-                    agent = agent.with_fallback_named(fb_client, fb_name.clone());
+                    agent = agent
+                        .with_fallback_named(fb_client, fb_name.clone())
+                        // Phase 58.3.1 D-12: the fallback is sized against its own window.
+                        .with_fallback_window_endpoint(fb_endpoint.clone());
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -381,7 +411,7 @@ impl ironhermes_tools::browser_vision::VisionClientHandle for AnyClientVisionHan
         }];
 
         let response = client
-            .chat_completion(&messages, None, None, Some(1024), None, None)
+            .chat_completion_fitting(&messages, None, None, Some(1024), None, None)
             .await?;
 
         // Extract text content from choices[0].message.content
@@ -487,7 +517,7 @@ impl ironhermes_core::SummarizationClientHandle for AnyClientSummarizationHandle
         ];
 
         let response = client
-            .chat_completion(&messages, None, None, Some(max_tokens as usize), None, None)
+            .chat_completion_fitting(&messages, None, None, Some(max_tokens as usize), None, None)
             .await?;
 
         // Extract text content from choices[0].message.content (same shape as vision handle).

@@ -48,6 +48,11 @@ pub mod state;
 // terminal/execute_code intercepts. Server-only like `state`, its sole caller.
 #[cfg(feature = "server")]
 pub mod web_approval_gate;
+// Phase 57 D-14 (999.3): `resolve_web_approval` / `session_defcon_level` server fns.
+// Unconditional like `provider_config_api` -- the `#[server]` macro handles the
+// client/server split (the wasm client needs the call stubs), and the `_inner` cores
+// with their server-only imports are gated internally.
+pub mod approval_api;
 pub mod ws;
 // Phase 36.3.7.11 Plan 01 — kanban dashboard read surface + WS.
 // `kanban_api` is unconditional (the `#[server]` macros handle the
@@ -62,6 +67,15 @@ pub mod kanban_ws;
 // client/server split, and the internal helper fns are gated with
 // `#[cfg(not(target_arch = "wasm32"))]`.
 pub mod provider_config_api;
+// Phase 58.2 Plan 10 (D-13/D-23): Tier 2 memory tab server fns. Unconditional like
+// `menu_api` -- the `#[server]` macro handles the client/server split; the `*_logic`
+// fns are gated with `#[cfg(feature = "server")]`.
+pub mod tier2_api;
+// Phase 54.7 Plan 07 (D-06/D-08/D-17): voice panel server helpers --
+// option-list discovery, Test mic and Test connection. Unconditional like
+// `provider_config_api` -- the `#[server]` macro handles the client/server
+// split, and the `*_impl` cores are gated with `#[cfg(not(target_arch = "wasm32"))]`.
+pub mod voice_api;
 // Phase 46.9 Plan 06 (D-03/D-04): provider secret set/rotate/clear over
 // ironhermes-vault::SecretStore — the phase's isolated security-sensitive
 // surface. Unconditional like `provider_config_api`; internal helper fns
@@ -106,6 +120,11 @@ pub mod audio_route;
 // JSON number array, breaking the iframe viewer. Body is gated
 // `#[cfg(feature = "server")]`; the module is otherwise empty on wasm.
 pub mod artifact_route;
+// Phase 54.9 Plan 08 (D-13, D-11): GET /openui/frame — the vendored OpenUI renderer
+// inlined into one static document under a strict CSP, for a sandboxed iframe. Raw
+// axum handler mounted in main.rs (and mirrored in login_page.rs), behind require_auth.
+// Body is gated `#[cfg(feature = "server")]`; the module is otherwise empty on wasm.
+pub mod openui_route;
 // Phase 46.7 Plan 05 (D-06): GET /chat-attachments/{session_id}/{id} raw
 // session-attachment serving route. Same raw-axum-handler pattern as
 // artifact_route above (Vec<u8>-via-server-fn-codec would break both the
@@ -122,6 +141,22 @@ pub mod audio_cache;
 // handles the client/server split, and the internal helper fn is gated with
 // `#[cfg(not(target_arch = "wasm32"))]`.
 pub mod display_tz_api;
+// Phase 54.9 Plan 01 (D-07/D-08): menu layout get/set (`ui.menu` in the
+// process-home config.yaml). Unconditional like `display_tz_api` — `#[server]`
+// handles the client/server split; helpers are gated `#[cfg(feature = "server")]`.
+pub mod menu_api;
+// Phase 54.9 Plan 10 (D-14/D-16): saved OpenUI views, one JSON file per view under the
+// ACTIVE profile's home. Unconditional like `menu_api`; the store is `feature = "server"`.
+pub mod openui_views_api;
+// Phase 54.10 Plan 01 (D-01/D-03): Dashboard boards, one JSON file per board under the ACTIVE
+// profile's home. Unconditional like `openui_views_api`; the store is `feature = "server"`.
+pub mod dashboard_api;
+// Phase 54.10 Plan 05 (D-05/D-07/D-10/D-11): read-only data for the native Dashboard tiles and
+// the Reports reader. Unconditional like `dashboard_api`; the server fns are `#[server]`.
+pub mod dashboard_tiles_api;
+// Phase 54.9 Plan 10 (D-09): the opt-in Thesys hosted Gateway (key presence + streaming
+// generation). Unconditional like `openui_views_api`; the streamer is `feature = "server"`.
+pub mod openui_gateway;
 // Phase 47.3 Plan 01 (D-06/D-07): operator authentication — AuthState,
 // SessionStore, rate limiter, require_auth deny-by-default middleware, and
 // the /auth/* raw axum routes. Body gated `#[cfg(feature = "server")]`
@@ -162,6 +197,14 @@ mod profile_api_vault_gate_thread_safety_tests;
 // read/write logic, not the narrower widened-pure-fn class like
 // `profile_dir_for`).
 pub mod profile_activation_api;
+// Phase 54.4 Plan 04 (D-08/D-24): the Logs screen's server read path —
+// `read_log_tail` returns a bounded, incremental tail of the newest
+// `web.log.*` or of `audit.jsonl`. Unconditional like `profile_activation_api`
+// — the `#[server]` macro handles the client/server split, and internal
+// helper fns are gated with `#[cfg(feature = "server")]`. Registered through
+// `register_server_functions()`, so `require_auth` wraps it like every other
+// `#[server]` fn.
+pub mod logs_api;
 // Phase 47.4 Plan 06 (D-09/D-11/D-14): the real, profile-scoped judge probe
 // — `verify_profile`. Unconditional like `profile_api` — the `#[server]`
 // macro handles the client/server split, and internal helper fns are gated
@@ -337,6 +380,10 @@ pub mod gateway_status_api;
 // two independent config gates, SIGTERM-only stop, env-scrubbed detached
 // spawn, audited every attempt including refusals.
 pub mod gateway_control_api;
+// Phase 54.13: raw config.yaml web editor server fns (`get_config_yaml`,
+// `check_config_yaml`). Unconditional like `gateway_control_api`: the `#[server]`
+// macro splits client/server; native helpers are `#[cfg(feature = "server")]`.
+pub mod config_yaml_api;
 // Phase 48.2 Plan 12 (D-06/D-08/D-09/D-10/D-11/D-12/D-14, G-48.2-7): the
 // Buzz platform's read/write surface over `gateway.platforms["buzz"]` — an
 // explicit-allowlist DTO (never a passthrough of the shared

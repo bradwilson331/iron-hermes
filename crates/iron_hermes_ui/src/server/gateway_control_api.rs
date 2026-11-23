@@ -885,6 +885,7 @@ mod tests {
             web_process_control_enabled: control,
             remote_blueprint_run_enabled: false,
             remote_loop_enabled: false,
+            ..Default::default()
         }
     }
 

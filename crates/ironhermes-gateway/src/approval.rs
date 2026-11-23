@@ -23,7 +23,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ironhermes_core::{ApprovalGate, ApprovalOutcome, ApprovalsStore, AuditLog, KeyKind};
+use ironhermes_core::{
+    ApprovalGate, ApprovalOutcome, ApprovalsStore, AuditLog, KeyKind, SecurityEvent,
+    YoloBypassSummary, sanitize_notice_field,
+};
 
 use crate::adapter::PlatformAdapter;
 use crate::rate_limiter::with_rate_limit_retry;
@@ -256,7 +259,8 @@ impl ApprovalCoordinator {
         // to `safe_tool`. Remote MCP tool names are attacker-influenceable (D-09), so
         // apply the SAME treatment to `reason` before interpolation to prevent
         // prompt-injection (fake descriptions / line breaks hiding the real tool).
-        let safe_reason: String = reason
+        // D-19: the chat prompt never shows the DEFCON level; the audit calls keep `reason`.
+        let safe_reason: String = strip_defcon_clause(reason)
             .replace(['\n', '\r'], " ")
             .chars()
             .take(200)
@@ -477,6 +481,51 @@ impl ApprovalCoordinator {
         }
     }
 
+    /// Phase 54.11 D-19 (operator, 2026-11-01): every yolo bypass of one agent turn
+    /// goes to the LOG as ONE line and sends NOTHING to chat. Bypass notices in
+    /// Telegram/Discord/Slack were operator-reported spam; the audit rows (per-call
+    /// and rollup, written before the flusher invokes this) remain the record.
+    pub async fn notify_yolo_bypass_turn(&self, chat_id: &str, summary: &YoloBypassSummary) {
+        tracing::info!(
+            target: "ironhermes::yolo",
+            chat_id = %sanitize_notice_field(chat_id),
+            "{}",
+            yolo_turn_notice(summary)
+        );
+    }
+
+    /// Phase 57 D-12 / D-16: tell the originating chat that something critical happened,
+    /// as ONE line through the same `send_message` path the approval prompt and the yolo
+    /// notices use (no second transport, no retry loop of its own).
+    ///
+    /// Only critical kinds are posted (`SecurityEventKind::is_critical`: Blocked,
+    /// SidecarUnavailable, CredentialDetected, JobBlocked, DefconChanged, ...); `WarnRan`
+    /// and `BypassRan` post nothing. The line is built from the event's kind, tool and rule
+    /// ids ONLY (no DEFCON level, D-19). `event.summary` is deliberately not echoed: it is the
+    /// producer's free text, and the chat must never carry command text or a secret
+    /// value. Tool and rule ids are sanitised like every other operator-facing field
+    /// (an MCP tool name can be remote-server-supplied).
+    ///
+    /// Best-effort and appends no audit entry: the producer wrote its own row.
+    pub async fn notify_security_event(&self, chat_id: &str, event: &SecurityEvent) {
+        if !event.kind.is_critical() {
+            return;
+        }
+        let tool = sanitize_notice_field(&event.tool);
+        let rules: Vec<String> = event
+            .rule_ids
+            .iter()
+            .map(|r| sanitize_notice_field(r))
+            .collect();
+        let rules = if rules.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", rules.join(", "))
+        };
+        let notice = format!("Security: {:?} \u{2014} {tool}{rules}", event.kind);
+        let _ = with_rate_limit_retry(|| self.adapter.send_message(chat_id, &notice, None)).await;
+    }
+
     /// Test-only helper: clear all pending entries, dropping every oneshot sender.
     ///
     /// This simulates a coordinator restart with outstanding pending approvals —
@@ -530,6 +579,31 @@ impl ApprovalGate for GatewayApprovalGate {
     async fn resolve(&self, session_id: &str, approved: bool) -> bool {
         self.coordinator.resolve(session_id, approved).await
     }
+
+    /// Phase 54.11 D-19: sends NOTHING to chat. The audit row was already written by
+    /// gated_exec, and [`notify_yolo_bypass_turn`](ApprovalGate::notify_yolo_bypass_turn) is
+    /// the only gateway bypass chat sender; a per-call chat line here is the "many identical
+    /// messages at once" spam from any hop that loses the turn's `YOLO_LEDGER`.
+    async fn notify_yolo_bypass(&self, _session_id: &str, _tool_name: &str, _reason: &str) {}
+
+    /// Phase 54.3 D-03/D-09: one chat message per bypassing turn. Uses
+    /// `self.chat_id` — the gate is bound to this turn's chat and is
+    /// authoritative, whereas the summary's `chat_id` came from whichever gated
+    /// call happened to record first.
+    async fn notify_yolo_bypass_turn(&self, summary: &YoloBypassSummary) {
+        self.coordinator
+            .notify_yolo_bypass_turn(&self.chat_id, summary)
+            .await;
+    }
+
+    /// Phase 57 D-12 / D-16: a critical security event reaches this turn's chat.
+    /// `chat_id` is the approval target the gate was bound to (for a Buzz channel turn
+    /// that is the sender's own DM, never the channel).
+    async fn notify_security_event(&self, _session_id: &str, event: &SecurityEvent) {
+        self.coordinator
+            .notify_security_event(&self.chat_id, event)
+            .await;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -540,6 +614,47 @@ impl ApprovalGate for GatewayApprovalGate {
 /// (`*`, `?`, `$`, `~`) that could differ at expansion time (D-06 / T-45-09).
 pub fn has_shell_expansion(s: &str) -> bool {
     s.contains(['*', '?', '$', '~'])
+}
+
+/// One-line summary of a turn's yolo bypasses: [`YoloBypassSummary::short_line`] plus the
+/// de-duplicated reasons. Sanitization is PER FIELD (`short_line()` / `reasons_capped()` run
+/// `sanitize_notice_field`) because an MCP tool name can be remote-supplied; never re-cap the
+/// assembled line, or one long reason cuts the tool list away. One line, so no forged second line.
+pub(crate) fn yolo_turn_notice(summary: &YoloBypassSummary) -> String {
+    let mut notice = summary.short_line();
+    let reasons: Vec<String> = summary
+        .reasons_capped(5)
+        .iter()
+        .map(|r| strip_defcon_clause(r))
+        .collect();
+    if !reasons.is_empty() {
+        notice.push_str(" \u{2014} reason: ");
+        notice.push_str(&reasons.join("; "));
+    }
+    notice
+}
+
+/// Phase 54.11 D-19: remove every " at DEFCON <digits>" clause so chat notices never show
+/// the security level. Runs BEFORE the newline-strip and truncation at each chat sink; the
+/// audit rows keep the raw reason.
+fn strip_defcon_clause(text: &str) -> String {
+    const CLAUSE: &str = " at DEFCON ";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(CLAUSE) {
+        let after = &rest[pos + CLAUSE.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            // Not the clause: keep the text and look past it.
+            out.push_str(&rest[..pos + CLAUSE.len()]);
+            rest = after;
+        } else {
+            out.push_str(&rest[..pos]);
+            rest = &after[digits..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

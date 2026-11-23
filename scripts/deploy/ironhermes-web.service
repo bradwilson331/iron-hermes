@@ -8,6 +8,9 @@
 Description=IronHermes Web UI Server
 After=network-online.target
 Wants=network-online.target
+# Cap restart storms: 5 starts in 60s window
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -16,15 +19,22 @@ WorkingDirectory=%h
 EnvironmentFile=-%h/.ironhermes/.env
 Restart=always
 RestartSec=5
-# Cap restart storms: 5 starts in 60s window
-StartLimitIntervalSec=60
-StartLimitBurst=5
 # Unlike the gateway, this server handles SIGTERM directly (main.rs
 # shutdown_signal() selects on both SIGTERM and Ctrl-C), so the systemd
 # default KillSignal (SIGTERM) is correct here — no override needed.
 # TimeoutStopSec gives the graceful-shutdown path time to flush the tracing
 # WorkerGuards before a hard kill.
 TimeoutStopSec=15
+# 58.1 D-14: the web server hosts the same agent runtime, so agent workloads
+# launched from web turns follow the same D-11 job-scope path (their own
+# ironhermes-job-*.scope, outside this unit). Same cap and kill/OOM policy as
+# the gateway unit (see ironhermes-gateway.service for the full rationale).
+# Tune with `systemctl --user edit ironhermes-web` (a drop-in survives
+# reinstall; web-install.sh overwrites this file).
+MemoryHigh=6G
+MemoryMax=8G
+OOMPolicy=continue
+KillMode=control-group
 
 [Install]
 WantedBy=default.target

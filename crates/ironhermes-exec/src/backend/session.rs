@@ -9,6 +9,10 @@
 
 use uuid::Uuid;
 
+/// Prefix of every session's in-band cwd marker; the wrapped script prints the
+/// marker on each normal exit path, so its presence proves the script ran.
+pub(crate) const CWD_MARKER_PREFIX: &str = "__HERMES_CWD_";
+
 /// Backend-agnostic session state: snapshot path, cwd marker, and whether the
 /// snapshot has been successfully bootstrapped yet.
 ///
@@ -49,7 +53,7 @@ impl Session {
         Self {
             snapshot_path: format!("/tmp/hermes-snap-{id}.sh"),
             cwd_file: format!("/tmp/hermes-cwd-{id}.txt"),
-            cwd_marker: format!("__HERMES_CWD_{id}__"),
+            cwd_marker: format!("{CWD_MARKER_PREFIX}{id}__"),
             id,
             ready: false,
             cwd: initial_cwd.into(),

@@ -109,8 +109,17 @@ fn factory_only_opens_the_store_when_the_vault_is_enabled() {
 fn rpc_registry_receives_the_resolved_snapshot() {
     const SRC: &str = include_str!("../src/app_runtime_factory.rs");
 
+    // Phase 57 Plan 09 added a trailing `screen` argument, which rustfmt wraps onto several
+    // lines, so the call is located by its opening and checked over the argument window
+    // instead of as one literal. The assertion is unchanged in meaning: the call must carry
+    // the memory manager and the resolved `tool_credentials` snapshot.
+    let call_at = SRC
+        .find("let rpc_registry = build_rpc_registry(")
+        .expect("the factory must build the RPC registry through build_rpc_registry(");
+    let window: String = SRC[call_at..].chars().take(200).collect();
     assert!(
-        SRC.contains("build_rpc_registry(input.memory_manager.clone(), tool_credentials.clone())"),
+        window.contains("input.memory_manager.clone()")
+            && window.contains("tool_credentials.clone()"),
         "build_rpc_registry must be called with the resolved tool_credentials snapshot, \
          not just the memory manager"
     );

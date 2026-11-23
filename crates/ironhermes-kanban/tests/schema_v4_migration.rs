@@ -22,6 +22,7 @@
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+use ironhermes_kanban::schema::SCHEMA_VERSION;
 use ironhermes_kanban::store::KanbanStore;
 use rusqlite::Connection;
 
@@ -83,7 +84,12 @@ fn fresh_db_has_v4_shape() {
             r.get(0)
         })
         .expect("read schema_version");
-    assert_eq!(version, 4, "fresh DB must land at schema_version 4");
+    // The v4 shape is asserted above; the version row tracks the current
+    // SCHEMA_VERSION (v5 added generation_ledger — see generation_ledger_migration.rs).
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "fresh DB must land at the current schema_version"
+    );
 }
 
 /// Migration-ladder path: a hand-crafted v3 DB (has goal_toolset but NO
@@ -162,8 +168,8 @@ fn v3_db_upgrades_to_v4() {
         })
         .expect("read schema_version after migration");
     assert_eq!(
-        version, 4,
-        "schema_version row must be bumped to 4 after migration"
+        version, SCHEMA_VERSION,
+        "schema_version row must be bumped to the current version after migration"
     );
 
     // Existing rows must be preserved. output_path is NULL on pre-v4 rows.
@@ -213,7 +219,10 @@ fn migration_is_idempotent() {
             r.get(0)
         })
         .expect("read schema_version on second open");
-    assert_eq!(version, 4, "schema_version must remain 4 on re-open");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "schema_version must remain at the current version on re-open"
+    );
 
     // output_path column and task_attachments table must still be present.
     let cols = read_tasks_columns(&store.conn);

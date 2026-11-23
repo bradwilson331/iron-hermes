@@ -608,6 +608,16 @@ pub struct ToolRegistry {
     /// production async seam (`build_app_runtime_bundle`) before any tool is
     /// registered.
     credentials: Arc<crate::credentials::ToolCredentials>,
+    /// Phase 57 Plan 09 (SC-1 / D-15): the async security screen every tool call that is not
+    /// owned by a gated `terminal` / `execute_code` intercept passes through. `None` until a
+    /// host installs one. Unlike `guardrails`, the screen IS inherited by `scope_to` copies,
+    /// and by every registry derived from this one in the factory (RPC, delegate children).
+    tool_screen: Option<Arc<dyn ironhermes_hooks::ToolScreen>>,
+    /// Phase 49.8 D-01/D-10: the one persistent rosbridge connection shared by
+    /// every ros2-toolset tool this registry registers (`register_ros2_tools`)
+    /// and by every registry `scope_to` derives — the handle 49.8-07's
+    /// `end_session_stop` and 49.8-08's surface wiring use for D-10/D-16.
+    ros2_session: Arc<crate::ros2::Ros2Session>,
 }
 
 impl ToolRegistry {
@@ -633,7 +643,118 @@ impl ToolRegistry {
             // Phase 41.3 Plan 11 (D-19): env-only snapshot until with_credentials
             // installs the real one — env lookups stay live either way.
             credentials: Arc::new(crate::credentials::ToolCredentials::env_only()),
+            tool_screen: None,
+            // Phase 49.8 D-01: not-yet-connected — lazily connects on first use.
+            ros2_session: crate::ros2::Ros2Session::new(),
         }
+    }
+
+    /// Phase 57 Plan 09 (SC-1): install the security screen. Replaces any previous one.
+    pub fn set_tool_screen(&mut self, screen: Arc<dyn ironhermes_hooks::ToolScreen>) {
+        self.tool_screen = Some(screen);
+    }
+
+    /// Phase 57 Plan 09: the installed security screen, if any. A clone of the same `Arc`, so
+    /// `Arc::ptr_eq` tells whether a derived registry inherited it.
+    pub fn tool_screen(&self) -> Option<Arc<dyn ironhermes_hooks::ToolScreen>> {
+        self.tool_screen.clone()
+    }
+
+    /// Phase 57 Plan 09 (SC-1): screen one call made by an agent turn. `gate` is the turn's
+    /// approval gate, so security events reach the surface that issued the call; `None`
+    /// publishes them on the process-local bus instead.
+    ///
+    /// Returns `Skip` when no screen is installed, and for `terminal` / `execute_code` when a
+    /// session-scoped gated intercept is registered for exactly `session_id` (plan 07's path
+    /// screens that call itself, so each call is screened exactly once). The legacy global
+    /// intercept key never counts: it is session-agnostic by design and is not the gated path.
+    pub async fn screen_call(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        session_id: &str,
+        gate: Option<&dyn ironhermes_core::ApprovalGate>,
+    ) -> ironhermes_hooks::ScreenDecision {
+        self.screen_call_for(name, args, session_id, session_id, gate)
+            .await
+    }
+
+    /// Phase 57 CR-02 (D-09 / D-15): as [`Self::screen_call`], with the two roles of a session
+    /// id split apart.
+    ///
+    /// `intercept_session` is the dispatch id: the gated-intercept presence check stays keyed
+    /// on it, so a call an intercept owns is still skipped here and screened once.
+    /// `level_session` is the session whose live DEFCON level the screen judges the call at,
+    /// and whose id the audit rows carry. They differ only for a delegate child, which
+    /// dispatches under its runner's transcript label but is judged at the delegating chat's
+    /// level. Keeping the presence check on the dispatch id is deliberate: keyed on
+    /// `level_session`, a level key that happened to match an intercept registration would make
+    /// the screen Skip a call that intercept never sees.
+    pub async fn screen_call_for(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        intercept_session: &str,
+        level_session: &str,
+        gate: Option<&dyn ironhermes_core::ApprovalGate>,
+    ) -> ironhermes_hooks::ScreenDecision {
+        let gated = matches!(name, "terminal" | "execute_code")
+            && intercept_session != LEGACY_GLOBAL_INTERCEPT_SESSION
+            && self
+                .intercepts
+                .get(name)
+                .is_some_and(|(_schema, sessions)| sessions.contains_key(intercept_session));
+        self.screen_with(name, args, level_session, gate, gated)
+            .await
+    }
+
+    async fn screen_with(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        session_id: &str,
+        gate: Option<&dyn ironhermes_core::ApprovalGate>,
+        gated_intercept_present: bool,
+    ) -> ironhermes_hooks::ScreenDecision {
+        let Some(screen) = self.tool_screen.as_ref() else {
+            return ironhermes_hooks::ScreenDecision::Skip;
+        };
+        let call = ironhermes_hooks::ToolCallSubject {
+            tool_name: name,
+            args,
+            session_id,
+            gated_intercept_present,
+            gate,
+        };
+        screen.screen(&call).await
+    }
+
+    /// Phase 57 Plan 09: tell the screen how the caller resolved a `Warn` (D-07 / D-21).
+    /// A no-op when no screen is installed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_screen_resolution(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        session_id: &str,
+        gate: Option<&dyn ironhermes_core::ApprovalGate>,
+        decision: &str,
+        resolution: &str,
+        reason: &str,
+    ) {
+        let Some(screen) = self.tool_screen.as_ref() else {
+            return;
+        };
+        let call = ironhermes_hooks::ToolCallSubject {
+            tool_name: name,
+            args,
+            session_id,
+            gated_intercept_present: false,
+            gate,
+        };
+        screen
+            .record_resolution(&call, decision, resolution, reason)
+            .await;
     }
 
     /// Phase 41.3 Plan 11 (D-19): install the resolved credential snapshot.
@@ -650,6 +771,40 @@ impl ToolRegistry {
     /// this registry constructs was handed.
     pub fn credentials(&self) -> Arc<crate::credentials::ToolCredentials> {
         self.credentials.clone()
+    }
+
+    /// Phase 49.8 D-01/D-10: the one persistent rosbridge connection this
+    /// registry's ros2-toolset tools share — the handle 49.8-07's
+    /// `end_session_stop` and 49.8-08's surface wiring use to reach it.
+    pub fn ros2_session(&self) -> Arc<crate::ros2::Ros2Session> {
+        self.ros2_session.clone()
+    }
+
+    /// Phase 49.8 D-05/D-07: registers the generic `ros2` tool AND the
+    /// high-level `rospider` tool (49.8-09) — the single construction path
+    /// for both. Registering again replaces each tool by name and reuses the
+    /// same session `Arc`, so re-registering never orphans an open
+    /// connection. Every downstream caller (composition roots and tests
+    /// alike) picks up `RospiderTool` automatically the next time it calls
+    /// this method — no separate registration path exists.
+    pub fn register_ros2_tools(
+        &mut self,
+        source: crate::ros2::Ros2ConfigSource,
+        vision: Option<Arc<dyn crate::browser_vision::VisionClientHandle>>,
+    ) {
+        let creds = self.credentials();
+        self.register(Box::new(crate::ros2::Ros2Tool::new(
+            self.ros2_session(),
+            source.clone(),
+            creds.clone(),
+            vision.clone(),
+        )));
+        self.register(Box::new(crate::ros2::RospiderTool::new(
+            self.ros2_session(),
+            source,
+            creds,
+            vision,
+        )));
     }
 
     /// Phase 36.17.7 D-06 (Path B — REVISION BLOCKER 2): returns the current
@@ -907,7 +1062,10 @@ impl ToolRegistry {
     /// The original `Arc<RwLock<ToolRegistry>>` is NOT mutated — callers get an
     /// independent view. Guardrails, intercepts, and `toolset_config` are NOT
     /// carried over (the scoped registry is lightweight; callers may re-apply
-    /// them if needed).
+    /// them if needed). The Phase 57 security screen IS carried over: a scoped copy
+    /// (the cron runner's registry) has no guardrails and no gated intercept, so the
+    /// screen, which applies the full floor in that case, is what keeps it from running
+    /// tools unguarded.
     pub fn scope_to(&self, toolset_names: &[String]) -> Self {
         let allowed: std::collections::HashSet<&str> =
             toolset_names.iter().map(|s| s.as_str()).collect();
@@ -957,6 +1115,15 @@ impl ToolRegistry {
             // silently degrade a credential-backed tool exactly the way a
             // dropped MCP tool did before the exemption above (D-09a).
             credentials: self.credentials.clone(),
+            // Phase 57 Plan 09 (SC-1 / T-57-36): a scoped copy keeps the parent's screen.
+            // Guardrails are NOT carried (above), so the screen is the only gate a scoped
+            // registry (the cron runner's) has; it applies the full floor to `terminal` /
+            // `execute_code` because a scoped copy has no gated intercept.
+            tool_screen: self.tool_screen.clone(),
+            // Phase 49.8 D-10: scoped registry shares the parent's persistent
+            // rosbridge session so a session-end stop reaches the same
+            // connection regardless of which registry view fired it.
+            ros2_session: self.ros2_session.clone(),
         }
     }
 
@@ -1003,7 +1170,9 @@ impl ToolRegistry {
                 }
             })
             .collect();
-        rows.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
+        rows.sort_by(|a, b| {
+            (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str()))
+        });
         rows
     }
 
@@ -1455,6 +1624,73 @@ impl ToolRegistry {
             }
         }
 
+        // Phase 57 Plan 09 (SC-1 / Pitfall 6): the async security screen. This is the path
+        // `execute_code`'s RPC bridge, the realtime tool bridge and the gateway's direct
+        // `dispatch()` callers take, and none of them pass through agent_loop. There is no
+        // session id and no approval gate here: the legacy sentinel stands in for the
+        // session (so the level is the process default), a Block is an error, and a Warn is
+        // an error unless it may bypass at a bypass-active level (DEFCON 4-5, D-21). Nothing
+        // on this path can ask an operator, so a Warn that cannot bypass fails closed.
+        // `gated_intercept_present` is false by construction: this path never reaches an
+        // intercept, so `terminal` / `execute_code` get the full floor from the screen.
+        match self
+            .screen_with(name, &args, LEGACY_GLOBAL_INTERCEPT_SESSION, None, false)
+            .await
+        {
+            ironhermes_hooks::ScreenDecision::Block { reason, .. } => {
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    ironhermes_hooks::format_guardrail_error(
+                        name,
+                        &reason,
+                        "security-screen",
+                        &self.error_detail,
+                    )
+                ));
+            }
+            ironhermes_hooks::ScreenDecision::Warn {
+                reason, bypassable, ..
+            } => {
+                let level =
+                    ironhermes_hooks::screen::session_level(LEGACY_GLOBAL_INTERCEPT_SESSION);
+                if bypassable && level.yolo_bypass_active() {
+                    self.record_screen_resolution(
+                        name,
+                        &args,
+                        LEGACY_GLOBAL_INTERCEPT_SESSION,
+                        None,
+                        "allowed",
+                        "bypass",
+                        &reason,
+                    )
+                    .await;
+                } else {
+                    self.record_screen_resolution(
+                        name,
+                        &args,
+                        LEGACY_GLOBAL_INTERCEPT_SESSION,
+                        None,
+                        "denied",
+                        "no_gate",
+                        &reason,
+                    )
+                    .await;
+                    return Err(anyhow::anyhow!(
+                        "{}",
+                        ironhermes_hooks::format_guardrail_error(
+                            name,
+                            &format!(
+                                "{reason} (approval required; this path has no approval gate)"
+                            ),
+                            "security-screen",
+                            &self.error_detail,
+                        )
+                    ));
+                }
+            }
+            ironhermes_hooks::ScreenDecision::Allow | ironhermes_hooks::ScreenDecision::Skip => {}
+        }
+
         // All guardrails passed — fire the post-guardrail hook before execution.
         // This is where ToolCalled events should be emitted (after permit, before execute).
         let args_str = args.to_string();
@@ -1498,9 +1734,9 @@ impl ToolRegistry {
     /// call `register_defaults_except(&["terminal"])` then register your custom
     /// terminal variant afterwards.
     ///
-    /// Current default tool set (Phase 41.3 Plan 08):
+    /// Current default tool set (Phase 49.8 Plan 01):
     ///   terminal, read_file, write_file, patch_file, search_files,
-    ///   web_search, web_answer, web_read, hexapod_tcp, hexapod_video
+    ///   web_search, web_answer, web_read, hexapod_tcp, hexapod_video, ros2
     pub fn register_defaults(&mut self) {
         self.register_defaults_except(&[]);
     }
@@ -1561,6 +1797,12 @@ impl ToolRegistry {
         register_unless_skipped!(Box::new(HexapodTcpTool), "hexapod_tcp");
         // Phase 27.1.4: hexapod video tool — is_available() hides this when HEXAPOD_IP is unset.
         register_unless_skipped!(Box::new(HexapodVideoTool), "hexapod_video");
+        // Phase 49.8 D-05/D-07: generic ros2 tool — is_available() hides this when
+        // no rosbridge URL resolves (env or ros2.bridge_url). This is the single
+        // construction path; do not hand-roll a separate ros2 tool list elsewhere.
+        if !skip.contains(&"ros2") {
+            self.register_ros2_tools(crate::ros2::Ros2ConfigSource::Live, None);
+        }
     }
 
     /// Register the memory tool with a shared `MemoryManager` handle (Plan 20-02).
@@ -1568,9 +1810,38 @@ impl ToolRegistry {
     /// The handle delegates writes through the manager so the optional mirror
     /// provider is kept in sync. Callers build the handle via
     /// `ironhermes_agent::memory::factory::build_memory_manager`.
+    ///
+    /// 58.2 D-12: this is the one shared seam. When the manager carries a Tier 2 handle the
+    /// Tier 2 tools (`memory_search`, ...) are registered here too, so every root that already
+    /// calls this gets them with no per-root wiring.
     pub fn register_memory_tool(&mut self, manager: SharedMemoryManager) {
         use crate::memory_tool::MemoryTool;
-        self.register(Box::new(MemoryTool::new(manager)));
+        use crate::tier2_tools::{Tier2ToolScope, build_tier2_tools, tier2_handle_of};
+        let tier2 = tier2_handle_of(&manager);
+        self.register(Box::new(
+            MemoryTool::new(manager).with_tier2(tier2.is_some()),
+        ));
+        if let Some(h) = tier2 {
+            for t in build_tier2_tools(h, Tier2ToolScope::Full) {
+                self.register(t);
+            }
+        }
+    }
+
+    /// 58.2 D-12: execute_code RPC registries; write/maintenance Tier 2 tools are never exposed
+    /// to sandboxed code. The Tier 1 `memory` tool is registered exactly as before.
+    pub fn register_memory_tool_sandboxed(&mut self, manager: SharedMemoryManager) {
+        use crate::memory_tool::MemoryTool;
+        use crate::tier2_tools::{Tier2ToolScope, build_tier2_tools, tier2_handle_of};
+        let tier2 = tier2_handle_of(&manager);
+        self.register(Box::new(
+            MemoryTool::new(manager).with_tier2(tier2.is_some()),
+        ));
+        if let Some(h) = tier2 {
+            for t in build_tier2_tools(h, Tier2ToolScope::ReadOnly) {
+                self.register(t);
+            }
+        }
     }
 
     /// Register the skill_manage tool for the 'learning' toolset (Phase 33).
@@ -1750,10 +2021,15 @@ impl ToolRegistry {
         config: Arc<ironhermes_core::Config>,
     ) {
         use crate::send_audio_tool::SendAudioTool;
-        use crate::tts::build_tts_registry;
+        use crate::tts::build_tts_registry_with_vault;
         use crate::tts_tool::TextToSpeechTool;
 
-        let tts_registry = Arc::new(build_tts_registry(&config.tts));
+        // Phase 54.7 D-02/D-19: vault-aware so a `secret/voice/*` reference resolves on
+        // the agent-tool / gateway path when `vault.enabled`.
+        let tts_registry = Arc::new(build_tts_registry_with_vault(
+            &config.tts,
+            ironhermes_core::voice_http::voice_vault_config(&config),
+        ));
         // Phase 36.17.7 D-06 (Path B): record the session_key on the registry
         // BEFORE SendAudioTool consumes it via move — so
         // `tts_registration_status()` can later distinguish Live vs Inspection.
@@ -1815,8 +2091,14 @@ impl ToolRegistry {
     /// NOT an LLM tool — STT is a capture-loop feature, not Claude-accessible (RESEARCH
     /// Claude's-Discretion). Do NOT call `self.register(...)` here.
     pub fn register_stt_registry(&mut self, config: Arc<ironhermes_core::Config>) {
-        use crate::stt::build_stt_registry;
-        self.stt_registry = Some(Arc::new(build_stt_registry(&config.stt)));
+        // Phase 54.7 D-02/D-19: vault-aware so a `secret/voice/*` reference resolves on
+        // the capture-loop / per-session web paths too (the TTS twin is
+        // `register_tts_tools`).
+        use crate::stt::build_stt_registry_with_vault;
+        self.stt_registry = Some(Arc::new(build_stt_registry_with_vault(
+            &config.stt,
+            ironhermes_core::voice_http::voice_vault_config(&config),
+        )));
     }
 
     /// Phase 25.1 D-04: register all 11 browser_* tools sharing one Arc<Mutex<Option<BrowserSession>>>.
@@ -2034,11 +2316,16 @@ impl ToolRegistry {
         generation_wiring: Option<crate::delegate_task::GenerationSurfaceWiring>,
     ) {
         use crate::delegate_task::DelegateTaskTool;
-        let mut tool = DelegateTaskTool::new(runner, semaphore, memory_manager, config, cancel_token)
-            // Phase 41.3 Plan 11 (D-19): always install this registry's own
-            // resolved snapshot — a delegate child must never silently fall
-            // back to `DelegateTaskTool::new`'s env-only default.
-            .with_credentials(self.credentials());
+        let mut tool =
+            DelegateTaskTool::new(runner, semaphore, memory_manager, config, cancel_token)
+                // Phase 41.3 Plan 11 (D-19): always install this registry's own
+                // resolved snapshot — a delegate child must never silently fall
+                // back to `DelegateTaskTool::new`'s env-only default.
+                .with_credentials(self.credentials())
+                // Phase 57 Plan 09 (SC-1 / D-15): a delegate child is screened by the SAME
+                // screen as the registry that registered the tool. When none is installed yet
+                // the tool falls back to a screen over the process-installed sidecar service.
+                .with_tool_screen(self.tool_screen());
         if let Some(cb) = progress_callback {
             tool = tool.with_progress_callback(cb);
         }
@@ -2061,6 +2348,13 @@ impl ToolRegistry {
         use crate::artifact::{ArtifactTool, DEFAULT_ARTIFACT_CAP};
         let audit = Arc::new(ironhermes_core::AuditLog::load(config.audit.clone()));
         self.register(Box::new(ArtifactTool::new(audit, DEFAULT_ARTIFACT_CAP)));
+    }
+
+    /// Register the `report_publish` tool (Phase 54.10 D-09..D-12). Same audit
+    /// wiring as [`Self::register_artifact_tool`]; toolset `artifacts`.
+    pub fn register_report_tool(&mut self, config: Arc<ironhermes_core::Config>) {
+        let audit = Arc::new(ironhermes_core::AuditLog::load(config.audit.clone()));
+        self.register(Box::new(crate::report::ReportPublishTool::new(audit)));
     }
 
     /// Register the execute_code tool with a separate RPC dispatch registry.
@@ -2238,6 +2532,42 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// 58.2 D-12: the execute_code RPC registry gets `memory` plus only the read-only Tier 2 subset.
+    #[test]
+    fn sandboxed_registers_only_read_only_tier2_subset() {
+        use crate::tier2_tools::{TIER2_READ_ONLY_TOOL_NAMES, stub_manager};
+        let mut reg = ToolRegistry::new();
+        reg.register_memory_tool_sandboxed(stub_manager(true));
+        let mut got: Vec<&str> = reg.list_tools();
+        got.sort_unstable();
+        let mut want: Vec<&str> = vec!["memory"];
+        want.extend(TIER2_READ_ONLY_TOOL_NAMES);
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    /// 58.2 D-29 / D-02: the `memory` tool description names memory_search only with a Tier 2 handle.
+    #[test]
+    fn registered_memory_tool_mentions_memory_search_only_with_tier2() {
+        use crate::tier2_tools::stub_manager;
+        for sandboxed in [false, true] {
+            for (tier2, want) in [(true, true), (false, false)] {
+                let mut reg = ToolRegistry::new();
+                if sandboxed {
+                    reg.register_memory_tool_sandboxed(stub_manager(tier2));
+                } else {
+                    reg.register_memory_tool(stub_manager(tier2));
+                }
+                let d = reg.get("memory").unwrap().description().to_string();
+                assert_eq!(
+                    d.contains("memory_search"),
+                    want,
+                    "sandboxed={sandboxed} tier2={tier2}"
+                );
+            }
+        }
+    }
+
     /// Phase 25.2 Plan 12 Task 2: lock the public signature of register_web_extract_tool
     /// against drift. Plan 14 wires this method against AnyClientSummarizationHandle from
     /// the agent crate; if the signature shape ever changes, this test fails at compile time.
@@ -2248,6 +2578,44 @@ mod tests {
             std::sync::Arc<dyn ironhermes_core::SummarizationClientHandle>,
             std::sync::Arc<ironhermes_core::SkillRegistry>,
         ) = ToolRegistry::register_web_extract_tool;
+    }
+
+    /// Phase 54.7 Plan 09 (D-02/D-19): `register_stt_registry` — the shared STT registry the
+    /// CLI capture loop and per-session web paths use — builds through the vault-aware
+    /// builder so a `secret/voice/*` reference resolves there too (the TTS twin,
+    /// `register_tts_tools`, was fixed in plan 03).
+    #[test]
+    fn register_stt_registry_uses_vault_aware_builder() {
+        // Behaviour: an openai_compatible base_url yields an available provider.
+        let mut config = ironhermes_core::Config::default();
+        config.stt.openai_compatible.base_url = "http://127.0.0.1:1".to_string();
+        let mut registry = ToolRegistry::new();
+        registry.register_stt_registry(Arc::new(config));
+        let stt = registry
+            .stt_registry
+            .as_ref()
+            .expect("register_stt_registry stores the registry");
+        let provider = stt
+            .get("openai_compatible")
+            .expect("openai_compatible must be registered");
+        assert!(provider.is_available());
+
+        // Wiring: the plain builder cannot resolve vault references, so the function body
+        // must call the vault-aware one with the config-derived vault settings.
+        let src = include_str!("registry.rs");
+        let start = src
+            .find("pub fn register_stt_registry(")
+            .expect("register_stt_registry present");
+        let body = &src[start..];
+        let body = &body[..body.find("\n    }\n").expect("end of fn")];
+        assert!(
+            body.contains("build_stt_registry_with_vault("),
+            "register_stt_registry must use the vault-aware builder: {body}"
+        );
+        assert!(
+            body.contains("voice_vault_config("),
+            "register_stt_registry must pass the config-derived vault: {body}"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -2817,7 +3185,9 @@ mod tests {
         let schemas = registry.get_definitions(None);
 
         assert!(
-            !schemas.iter().any(|s| s.function.name == "config_field_prereq"),
+            !schemas
+                .iter()
+                .any(|s| s.function.name == "config_field_prereq"),
             "a config_field-gated tool with no snapshot must be absent from get_definitions()"
         );
     }
@@ -3030,7 +3400,10 @@ mod tests {
 
         unsafe { std::env::remove_var("PLAN11_SCOPE_TO_PROBE_KEY") };
 
-        assert!(parent_answer, "sanity: the probe key must have been visible");
+        assert!(
+            parent_answer,
+            "sanity: the probe key must have been visible"
+        );
         assert_eq!(
             parent_answer, scoped_answer,
             "a scoped clone's credentials() must answer identically to its parent's"
@@ -3064,6 +3437,7 @@ mod tests {
             None,
             None,
             creds.clone(),
+            None,
         )
         .expect("build_child_registry must succeed");
 
@@ -3204,7 +3578,11 @@ mod tests {
             }
             fn prerequisites(&self) -> Vec<Prerequisite> {
                 vec![
-                    Prerequisite::env_var("FAKE_UNGROUPED_REQUIRED_KEY", "ungrouped required key", true),
+                    Prerequisite::env_var(
+                        "FAKE_UNGROUPED_REQUIRED_KEY",
+                        "ungrouped required key",
+                        true,
+                    ),
                     Prerequisite::grouped_env_var("FAKE_A_KEY", "fake provider A", "fake_provider"),
                     Prerequisite::grouped_env_var("FAKE_B_KEY", "fake provider B", "fake_provider"),
                 ]
@@ -3947,6 +4325,70 @@ mod tests {
         registry.register(Box::new(MockTool {
             tool_name: "dup_name",
         }));
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 54 Plan 04 (D-16c): falsification tests for ADR-0005 Finding 5 —
+    // a hostile MCP server bypassing the normal `McpTool::new` / prefixing
+    // path (simulated here with a hand-rolled `Tool` trait object) must not
+    // be able to shadow a real intercepted built-in via `register_dynamic`.
+    // The registry's own doc comment/panic text labels this guard "D-15" —
+    // this is the registry's own D-15 collision guard, a DIFFERENT, earlier
+    // (Phase-25-era) decision than this phase's D-15 (SSRF regression pins).
+    // -------------------------------------------------------------------
+
+    /// Test: register_dynamic panics when a hostile MCP tool name collides
+    /// with the real "terminal" built-in registered via `register_intercepted`
+    /// (the exact construction production code uses for the intercepted
+    /// built-in, via `crate::terminal::TerminalTool::schema()`). This is the
+    /// MCP-relevant path — `McpTool` is always registered through
+    /// `register_dynamic` (see `crates/ironhermes-mcp/src/server_task.rs`),
+    /// not the static `register()` path covered by the test above.
+    #[test]
+    #[should_panic(expected = "already registered as an intercepted tool")]
+    fn cannot_shadow_builtin_via_register_dynamic() {
+        use crate::terminal::TerminalTool;
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted(
+            "terminal",
+            TerminalTool::new().schema(),
+            test_handler("real-terminal-result"),
+        );
+        // Simulate a hostile MCP integration that bypasses `McpTool::new`'s
+        // normal server-name prefixing (`make_prefixed_name`) and attempts to
+        // register a bare "terminal" name directly.
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "terminal",
+        }));
+    }
+
+    /// Companion selectivity test (D-16c): without this, a `register_dynamic`
+    /// guard that refused EVERY dynamic registration would also pass the
+    /// `should_panic` test above. A dynamic registration with a name that does
+    /// NOT collide with any intercepted tool must succeed.
+    #[test]
+    fn register_dynamic_accepts_non_colliding_name() {
+        use crate::terminal::TerminalTool;
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted(
+            "terminal",
+            TerminalTool::new().schema(),
+            test_handler("real-terminal-result"),
+        );
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "github__create_issue",
+        }));
+        let schemas = registry.get_definitions(None);
+        let count = schemas
+            .iter()
+            .filter(|s| s.function.name == "github__create_issue")
+            .count();
+        assert_eq!(
+            count, 1,
+            "a non-colliding dynamically-registered tool must succeed and \
+             appear exactly once in get_definitions(None) — proving the \
+             collision guard is selective, not a blanket refusal"
+        );
     }
 
     /// Test: dispatch_intercepts returns Some(Ok("hello")) for a known intercepted tool.
@@ -4938,7 +5380,11 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert_eq!(
-            err_msg, "Tool call blocked by security policy",
+            err_msg,
+            format!(
+                "Tool call blocked by security policy. It did not run. {}",
+                ironhermes_hooks::refusal::NO_CIRCUMVENTION_NOTICE
+            ),
             "minimal detail must not leak tool name: {err_msg}"
         );
         assert!(
@@ -5539,6 +5985,14 @@ mod tests {
             tools.contains(&"artifact"),
             "register_artifact_tool must register a tool named 'artifact'; got: {tools:?}"
         );
+    }
+
+    #[test]
+    fn register_report_tool_registers_report_publish() {
+        use ironhermes_core::config::Config;
+        let mut registry = ToolRegistry::new();
+        registry.register_report_tool(Arc::new(Config::default()));
+        assert!(registry.list_tools().contains(&"report_publish"));
     }
 
     /// Regression guard (RESEARCH Pitfall 4): the `artifact` tool must survive the

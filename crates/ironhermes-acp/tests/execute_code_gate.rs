@@ -25,7 +25,7 @@ use ironhermes_acp::handlers::POLICY_DENIAL_PREFIX;
 use ironhermes_acp::tool_render::DENIAL_HEADLINE;
 use ironhermes_core::{Config, ProviderResolver};
 use ironhermes_state::StateStore;
-use wiremock::matchers::any;
+use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Mirrors `tests/tool_render.rs`'s own `text_of` helper — extracts the plain text from a
@@ -108,7 +108,7 @@ fn sse_final_text_with_usage() -> String {
 /// Mount the tool-call SSE for the first provider call, then a plain final-text SSE for
 /// every subsequent call (the follow-up turn after the tool result is appended).
 async fn mount_tool_call_then_final_text(server: &MockServer, tool_call_sse: String) {
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -117,7 +117,7 @@ async fn mount_tool_call_then_final_text(server: &MockServer, tool_call_sse: Str
         .up_to_n_times(1)
         .mount(server)
         .await;
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -138,7 +138,7 @@ async fn mount_two_turns_of_tool_call_then_final_text(
     first_turn_tool_call_sse: String,
     second_turn_tool_call_sse: String,
 ) {
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -147,7 +147,7 @@ async fn mount_two_turns_of_tool_call_then_final_text(
         .up_to_n_times(1)
         .mount(server)
         .await;
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -156,7 +156,7 @@ async fn mount_two_turns_of_tool_call_then_final_text(
         .up_to_n_times(1)
         .mount(server)
         .await;
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -165,7 +165,7 @@ async fn mount_two_turns_of_tool_call_then_final_text(
         .up_to_n_times(1)
         .mount(server)
         .await;
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -195,8 +195,14 @@ impl PermissionAnswer {
         matches!(
             (self, &option.kind),
             (PermissionAnswer::AllowOnce, PermissionOptionKind::AllowOnce)
-                | (PermissionAnswer::AllowAlways, PermissionOptionKind::AllowAlways)
-                | (PermissionAnswer::RejectOnce, PermissionOptionKind::RejectOnce)
+                | (
+                    PermissionAnswer::AllowAlways,
+                    PermissionOptionKind::AllowAlways
+                )
+                | (
+                    PermissionAnswer::RejectOnce,
+                    PermissionOptionKind::RejectOnce
+                )
         )
     }
 }
@@ -312,9 +318,11 @@ async fn execute_code_call_raises_a_permission_request_and_runs_when_approved() 
                 .block_task()
                 .run_until(async move |mut session| {
                     session.send_prompt("please run some python")?;
-                    let (_updates, permission_requests_seen) =
-                        drain_answering_permission_requests(&mut session, PermissionAnswer::AllowOnce)
-                            .await;
+                    let (_updates, permission_requests_seen) = drain_answering_permission_requests(
+                        &mut session,
+                        PermissionAnswer::AllowOnce,
+                    )
+                    .await;
 
                     assert!(
                         permission_requests_seen >= 1,
@@ -346,8 +354,11 @@ async fn execute_code_denied_outcome_yields_a_tool_error_and_no_side_effect() {
 
     let server = MockServer::start().await;
     let args = serde_json::json!({"code": format!("open('{}', 'w').close()", sentinel.display())});
-    mount_tool_call_then_final_text(&server, sse_tool_call("execute_code", "call_exec_deny", args))
-        .await;
+    mount_tool_call_then_final_text(
+        &server,
+        sse_tool_call("execute_code", "call_exec_deny", args),
+    )
+    .await;
 
     let (config, resolver) = build_config_and_resolver_pointed_at(&server.uri());
     let (state_store, _state_tmp) = build_state_store();
@@ -408,7 +419,8 @@ async fn execute_code_denied_outcome_yields_a_tool_error_and_no_side_effect() {
 async fn tier2_blocked_terminal_command_is_refused_without_any_permission_request() {
     let server = MockServer::start().await;
     let args = serde_json::json!({"command": "rm -rf /"});
-    mount_tool_call_then_final_text(&server, sse_tool_call("terminal", "call_term_block", args)).await;
+    mount_tool_call_then_final_text(&server, sse_tool_call("terminal", "call_term_block", args))
+        .await;
 
     let (config, resolver) = build_config_and_resolver_pointed_at(&server.uri());
     let (state_store, _state_tmp) = build_state_store();
@@ -432,9 +444,11 @@ async fn tier2_blocked_terminal_command_is_refused_without_any_permission_reques
                 .block_task()
                 .run_until(async move |mut session| {
                     session.send_prompt("please clean everything up")?;
-                    let (updates, permission_requests_seen) =
-                        drain_answering_permission_requests(&mut session, PermissionAnswer::AllowOnce)
-                            .await;
+                    let (updates, permission_requests_seen) = drain_answering_permission_requests(
+                        &mut session,
+                        PermissionAnswer::AllowOnce,
+                    )
+                    .await;
 
                     assert_eq!(
                         permission_requests_seen, 0,
@@ -490,9 +504,11 @@ async fn benign_terminal_command_runs_without_prompting() {
                 .block_task()
                 .run_until(async move |mut session| {
                     session.send_prompt("please say hello")?;
-                    let (updates, permission_requests_seen) =
-                        drain_answering_permission_requests(&mut session, PermissionAnswer::AllowOnce)
-                            .await;
+                    let (updates, permission_requests_seen) = drain_answering_permission_requests(
+                        &mut session,
+                        PermissionAnswer::AllowOnce,
+                    )
+                    .await;
 
                     assert_eq!(
                         permission_requests_seen, 0,
@@ -662,7 +678,10 @@ async fn allow_always_does_not_leak_into_a_new_session() {
                         PermissionAnswer::AllowAlways,
                     )
                     .await;
-                    assert_eq!(seen, 1, "session A's curl call must raise one permission request");
+                    assert_eq!(
+                        seen, 1,
+                        "session A's curl call must raise one permission request"
+                    );
                     Ok(())
                 })
                 .await?;
@@ -754,8 +773,8 @@ async fn denied_execute_code_call_surfaces_denial_headline_and_prefix_to_both_en
                         }
                         _ => None,
                     });
-                    let failed_content =
-                        failed_content.expect("expected a FAILED tool_call_update carrying content");
+                    let failed_content = failed_content
+                        .expect("expected a FAILED tool_call_update carrying content");
                     let has_headline = failed_content
                         .iter()
                         .filter_map(content_text)
@@ -780,7 +799,13 @@ async fn denied_execute_code_call_surfaces_denial_headline_and_prefix_to_both_en
     // echoed back to the provider as a `tool` role message on the FOLLOW-UP completion
     // request (the second request this turn made), so assert against that request body —
     // observable without adding a new production accessor.
-    let requests = server.received_requests().await.unwrap_or_default();
+    let requests = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .collect::<Vec<_>>();
     agent_task.abort();
     assert!(
         requests.len() >= 2,

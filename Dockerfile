@@ -37,18 +37,22 @@
 #
 # Build: podman build -t ironhermes .
 #
-# Run (two-step flow — see docs/CONTAINER.md for the full walkthrough):
-#   # 1. First start. No IP override: binds loopback, mints a password,
-#   #    prints it once to the container log.
+# Run (docs/CONTAINER.md has the full walkthrough). The documented default is
+# the hardened compose file (D-01): read-only rootfs, noexec tmpfs, minimal
+# capabilities, no-new-privileges, resource ceilings.
+#   docker compose up -d        # or: podman compose up -d
+#   docker compose logs ironhermes   # read the generated password NOW, it is
+#                                    # printed once
+# Two steps because the bind guard keeps the UI on loopback until you opt in:
+# re-up with IRONHERMES_IP=0.0.0.0, IRONHERMES_WEB_PASSWORD_HASH and
+# IRONHERMES_WEB_ALLOWED_ORIGINS set (see docker-compose.yml).
+#
+# A plain `podman run` / `docker run` still works but is UNHARDENED: none of the
+# compose-level runtime flags apply (the image's own uid-10000 drop does):
 #   podman run -d --name ironhermes -v ironhermes-data:/opt/data -p 8080:8080 \
 #       -e OPENROUTER_API_KEY=sk-or-... ironhermes
-#   podman logs ironhermes   # read the password now — never printed again
-#
-#   # 2. Expose it, explicitly (a recreate, since -e can't be added to a
-#   #    running container). The named volume carries the hash across.
-#   podman rm -f ironhermes
-#   podman run -d --name ironhermes -v ironhermes-data:/opt/data -p 8080:8080 \
-#       -e IP=0.0.0.0 -e OPENROUTER_API_KEY=sk-or-... ironhermes
+#   podman logs ironhermes   # read the password now, never printed again
+#   # then recreate with -e IP=0.0.0.0 to expose it deliberately.
 #
 # BREAKING CHANGE (quick task 260820-8h5): this image's default bind address
 # changed from 0.0.0.0 to loopback. Any existing deployment that relied on
@@ -57,16 +61,19 @@
 # Once IP is passed, behavior is identical to before.
 # =============================================================================
 
-# --- Stage 0: gosu for privilege dropping ---
-FROM docker.io/tianon/gosu:1.17 AS gosu_source
-
 # --- Stage 1: Rust + Dioxus build ---
 # Edition 2024 requires rustc >= 1.85; pin for reproducibility.
 # Base is Debian *trixie* (glibc 2.41), NOT bookworm (glibc 2.36): the prebuilt
 # `dx` binary that binstall fetches below is linked against glibc 2.39 (Dioxus
 # builds its release binaries on Ubuntu 24.04). On bookworm `dx` fails at
 # startup with "GLIBC_2.38/2.39 not found". Runtime stage must match (trixie).
-FROM docker.io/library/rust:1.96-trixie AS builder
+#
+# Pinned to the multi-arch INDEX digest (linux/amd64 + linux/arm64 both listed),
+# resolved 2026-11-01. The tag stays for readability; the digest is what is
+# pulled (D-04 #4). Re-resolve: GET the tag's manifest from registry-1.docker.io
+# with the OCI-index Accept header and read `docker-content-digest`, then
+# confirm `podman manifest inspect <ref>@<digest>` lists both arches.
+FROM docker.io/library/rust:1.96-trixie@sha256:1f0dbad1df66647807e6952d1db85d0b2bda7606cb2139d82517e4f009967376 AS builder
 WORKDIR /build
 
 # Build-time system deps:
@@ -98,6 +105,7 @@ COPY Cargo.toml Cargo.lock ./
 # cargo needs the full manifest set to resolve the workspace.
 COPY crates/ironhermes-core/Cargo.toml crates/ironhermes-core/Cargo.toml
 COPY crates/ironhermes-state/Cargo.toml crates/ironhermes-state/Cargo.toml
+COPY crates/ironhermes-tier2/Cargo.toml crates/ironhermes-tier2/Cargo.toml
 COPY crates/ironhermes-trajectory/Cargo.toml crates/ironhermes-trajectory/Cargo.toml
 COPY crates/ironhermes-tools/Cargo.toml crates/ironhermes-tools/Cargo.toml
 COPY crates/ironhermes-agent/Cargo.toml crates/ironhermes-agent/Cargo.toml
@@ -114,6 +122,15 @@ COPY crates/ironhermes-artifacts/Cargo.toml crates/ironhermes-artifacts/Cargo.to
 COPY crates/iron_hermes_ui/Cargo.toml crates/iron_hermes_ui/Cargo.toml
 COPY crates/ironhermes-blackbox/Cargo.toml crates/ironhermes-blackbox/Cargo.toml
 COPY crates/ironhermes-vault/Cargo.toml crates/ironhermes-vault/Cargo.toml
+# ironhermes-acp and ironhermes-restgw were missing from this list (the later
+# `COPY crates/ crates/` made the build work regardless); listed here so the
+# manifest layer matches the workspace. The three security crates are Phase 57:
+# the wire types (MIT), the sidecar client (MIT) and the AGPL detection sidecar.
+COPY crates/ironhermes-acp/Cargo.toml crates/ironhermes-acp/Cargo.toml
+COPY crates/ironhermes-restgw/Cargo.toml crates/ironhermes-restgw/Cargo.toml
+COPY crates/ironhermes-security-proto/Cargo.toml crates/ironhermes-security-proto/Cargo.toml
+COPY crates/ironhermes-security/Cargo.toml crates/ironhermes-security/Cargo.toml
+COPY crates/ironhermes-tirith/Cargo.toml crates/ironhermes-tirith/Cargo.toml
 COPY providers/memory-sqlite/Cargo.toml providers/memory-sqlite/Cargo.toml
 COPY providers/memory-grafeo/Cargo.toml providers/memory-grafeo/Cargo.toml
 COPY providers/memory-duckdb/Cargo.toml providers/memory-duckdb/Cargo.toml
@@ -127,8 +144,11 @@ COPY providers/ providers/
 #    already covered by `COPY crates/ crates/` — the repo has no root assets/)
 COPY skills/ skills/
 
-# CLI binary (management + `ironhermes web set-password`).
-RUN cargo build --release --bin ironhermes
+# CLI binary (management + `ironhermes web set-password`) and the security
+# sidecar (Phase 57 D-02), built in the SAME cargo invocation so the sidecar is
+# always the same build as the main binary. With the default DEFCON level 3 a
+# missing sidecar blocks terminal/execute_code (D-12), so the image must carry it.
+RUN cargo build --release --bin ironhermes --bin ironhermes-tirith
 
 # Fullstack web bundle: WASM client + axum server binary + public/ assets.
 # dx drives the dual (client+server) build and asset optimization.
@@ -138,7 +158,17 @@ RUN dx bundle --platform web -p iron_hermes_ui --release
 # --- Stage 2: Minimal runtime ---
 # trixie-slim (glibc 2.41) to match the builder: the binaries copied from the
 # builder are linked against trixie's glibc, so the runtime must be >= that.
-FROM docker.io/library/debian:trixie-slim AS runtime
+# Multi-arch INDEX digest, resolved 2026-11-01; re-resolve as for the builder.
+FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime
+
+# OCI image labels (D-04 #6). version, revision and created come from CI
+# metadata (docker/metadata-action). licenses is MIT AND AGPL-3.0-only because
+# the image ships the AGPL-3.0-only ironhermes-tirith sidecar.
+LABEL org.opencontainers.image.title="IronHermes" \
+      org.opencontainers.image.description="IronHermes agent: Dioxus web UI, CLI and gateway in a hardened container" \
+      org.opencontainers.image.source="https://github.com/bradwilson331/iron-hermes" \
+      org.opencontainers.image.documentation="https://github.com/bradwilson331/iron-hermes/blob/main/docs/CONTAINER.md" \
+      org.opencontainers.image.licenses="MIT AND AGPL-3.0-only"
 
 # Runtime deps:
 # - python3: execute_code sandbox
@@ -174,52 +204,62 @@ FROM docker.io/library/debian:trixie-slim AS runtime
 #   377 MB without — roughly 730 MB, about two thirds of the image, for a
 #   toolset that is disabled by default. Drop chromium, fonts-liberation, and
 #   the CHROMIUM_PATH ENV for deployments that never enable it.
+# - libnss-wrapper: lets a remapped IRONHERMES_UID/GID resolve to the
+#   `ironhermes` name without usermod (D-14 remap under --read-only). The
+#   privilege drop itself uses setpriv from util-linux, already in the image.
+# - libstdc++6: C++ runtime for USearch (Tier 2 vector index, Phase 58.2 D-14)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
         ca-certificates \
         procps \
         libasound2t64 \
+        libstdc++6 \
         curl \
         tini \
         vim-tiny \
         chromium \
-        fonts-liberation && \
+        fonts-liberation \
+        libnss-wrapper && \
     rm -rf /var/lib/apt/lists/* && \
     { [ -e /usr/bin/vi ] || ln -s /usr/bin/vim.tiny /usr/bin/vi; }
-
-# gosu from dedicated stage (avoids apt security-repo dependency)
-COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/gosu
 
 # Non-root runtime user (UID 10000, home at /opt/data)
 RUN useradd -u 10000 -m -d /opt/data ironhermes
 
 # CLI (management) + the fullstack web bundle (server binary + public/ assets)
 COPY --from=builder /build/target/release/ironhermes /usr/local/bin/ironhermes
+# Security sidecar (Phase 57). Next to `ironhermes` so the sibling lookup finds
+# it for the CLI/gateway; the UI server binary lives under /opt/ironhermes/web
+# and finds it through PATH (/usr/local/bin).
+COPY --from=builder /build/target/release/ironhermes-tirith /usr/local/bin/ironhermes-tirith
+# The sidecar is AGPL-3.0-only (links tirith-core). Its LICENSE and the NOTICE
+# carrying the source link travel with the binary (D-01, Pitfall 11).
+COPY crates/ironhermes-tirith/LICENSE crates/ironhermes-tirith/NOTICE /usr/share/doc/ironhermes-tirith/
+# Fail the build if the sidecar is not the pinned tirith-core (T-57-62).
+RUN case "$(/usr/local/bin/ironhermes-tirith --version)" in *'tirith-core 0.4.2'*) ;; *) exit 1 ;; esac
 COPY --from=builder /build/target/dx/iron_hermes_ui/release/web/ /opt/ironhermes/web/
 
 # Skill bundles (read-only reference copies baked into the image).
 #
 # The skills the agent actually loads live on the /opt/data volume: the
-# default search roots are $IRONHERMES_HOME/skills and $HOME/.agents/skills
+# default search roots are $IRONHERMES_HOME/skills, $IRONHERMES_HOME/optional-skills
+# (a default root since Phase 54.1 D-09) and $HOME/.agents/skills
 # (build_skill_search_paths in ironhermes-core/src/skills.rs), and HOME for
-# the ironhermes user IS /opt/data. Baking them here and seeding the volume
-# from the entrypoint (cp -rn, skip-if-exists) means image upgrades ship new
-# skills while operator edits and Hub installs on the volume are preserved.
+# the ironhermes user IS /opt/data. The entrypoints seed the volume from these
+# baked copies with docker/seed-bundled.sh (Phase 54.8): a file that is absent
+# is copied, a pristine older bundled copy (sha256 in skills/.bundled-history)
+# is upgraded, and an operator edit or Hub install is kept untouched. So image
+# upgrades ship new skills without clobbering local changes.
 #
 # skills/ and optional-skills/ are kept as SEPARATE roots on purpose:
-#   * skills/ seeds $IRONHERMES_HOME/skills — scanned by every call site,
-#     including the ones that hardcode that root rather than reading
-#     skills.extra_paths.
-#   * optional-skills/ seeds $IRONHERMES_HOME/optional-skills — NOT scanned by
-#     default, which is what "optional" means. Opt in either by adding the
-#     path to skills.extra_paths in config.yaml (which also gives those skills
-#     the Official trust label, since resolve_source keys off an
-#     "optional-skills" path component) or via the web UI's skill-import
-#     wizard, whose Local Path quick-pick already probes exactly this
-#     directory (list_known_skill_dirs in skills_import_api.rs).
+#   * skills/ seeds $IRONHERMES_HOME/skills.
+#   * optional-skills/ seeds $IRONHERMES_HOME/optional-skills. Skills found
+#     under an "optional-skills" path component get the Official trust label
+#     (resolve_source). The web UI's skill-import wizard Local Path quick-pick
+#     also probes this directory (list_known_skill_dirs in skills_import_api.rs).
 #
-# Layout on both sides is <root>/<category>/<slug>/SKILL.md — the loader's
+# Layout on both sides is <root>/<category>/<slug>/SKILL.md; the loader's
 # scan depth is bounded at 2, so the category level must stay directly under
 # the search root. Do not nest optional-skills/ inside skills/.
 COPY --chown=ironhermes:ironhermes skills/ /opt/ironhermes/skills/
@@ -228,7 +268,11 @@ COPY --chown=ironhermes:ironhermes optional-skills/ /opt/ironhermes/optional-ski
 # Templates and entrypoints
 COPY --chown=ironhermes:ironhermes env.example /opt/ironhermes/.env.example
 COPY --chown=ironhermes:ironhermes cli-config.yaml.example /opt/ironhermes/cli-config.yaml.example
-COPY --chown=ironhermes:ironhermes docker/ /opt/ironhermes/docker/
+# docker/ is sourced by the entrypoints WHILE STILL ROOT (priv-drop.sh), so it
+# must stay root-owned and not group/other-writable: the app uid runs agent
+# code and must not be able to rewrite what root executes on the next start.
+COPY docker/ /opt/ironhermes/docker/
+RUN chmod -R go-w /opt/ironhermes/docker
 COPY --chmod=0755 docker/web-entrypoint.sh /usr/local/bin/web-entrypoint.sh
 
 WORKDIR /opt/ironhermes
@@ -263,14 +307,16 @@ ENV IRONHERMES_GATEWAY=1
 #   is default-disabled (Phase 25.1 D-04, high blast radius) and a regression
 #   test pins that default.
 #
-# browser.no_sandbox is deliberately NOT set. Chromium's sandbox comes up fine
-# as UID 10000 under rootless podman — verified in this image with
-# `chromium --headless --dump-dom about:blank` (exit 0, sandbox intact). It
-# only fails where the host disables unprivileged user namespaces (Ubuntu
-# 23.10+ AppArmor and similar), or when the container is forced to run as root
-# and chromium refuses outright. The root case is best fixed by not running as
-# root; see docs/CONTAINER.md §6 before disabling the sandbox.
+# D-21 (phase 54.11): browser.no_sandbox is ON by default in the image via
+# IRONHERMES_BROWSER_NO_SANDBOX=1 (read at browser launch; docker/dev-tools.Dockerfile
+# is FROM this image and inherits it). The hardened profile's default seccomp
+# blocks Chromium's namespace sandbox (zygote exit 134 under --read-only,
+# cap-drop ALL, no-new-privs), so the compensating control is the container
+# hardening itself: uid 10000, no capabilities, no_new_privs, empty bounding
+# set, read-only rootfs under compose. Where the runtime allows the sandbox,
+# restore it with `-e IRONHERMES_BROWSER_NO_SANDBOX=0`.
 ENV CHROMIUM_PATH=/usr/bin/chromium
+ENV IRONHERMES_BROWSER_NO_SANDBOX=1
 
 # How long (seconds) to give the background gateway to shut down cleanly after
 # it is sent SIGTERM, before the entrypoint stops waiting and lets the
@@ -282,6 +328,11 @@ ENV IRONHERMES_GATEWAY_STOP_TIMEOUT=5
 VOLUME ["/opt/data"]
 
 EXPOSE 8080
+
+# GET / is the only unauthenticated 200 route; every other path returns 401
+# (audit section 3.2), so the probe must target `/` and never /health. IP must
+# be loopback or 0.0.0.0 for this loopback probe to reach the server.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -fsS -o /dev/null "http://127.0.0.1:${PORT}/" || exit 1
 
 # tini is PID 1; the entrypoint runs as its direct child.
 #

@@ -109,7 +109,8 @@ pub struct AuditEntry {
     /// RFC3339 UTC timestamp of the resolution.
     pub ts: String,
     /// `"mcp_mutation"`, `"shell_command"`, or `"new_issuer"` (Phase 46.1 D-02:
-    /// non-blocking audit floor for a newly-added, non-baseline MCP-OAuth issuer).
+    /// non-blocking audit floor for a newly-added, non-baseline MCP-OAuth issuer),
+    /// or `"defcon_change"` (Phase 57 D-10: a session DEFCON level change or refusal).
     pub kind: String,
     /// `server__tool` name for MCP, or the shell command string.
     pub tool: String,
@@ -285,9 +286,24 @@ impl AuditLog {
     /// Append one JSONL entry — write + flush + fsync, serialized by `write_lock` across
     /// the whole sequence (D-02/D-03). Append-mode only; never atomic tmp+rename.
     pub async fn append(&self, entry: &AuditEntry) -> std::io::Result<()> {
-        use std::io::Write as _;
-
         let _guard = self.write_lock.lock().await;
+        self.write_entry(entry)
+    }
+
+    /// Synchronous variant of [`AuditLog::append`] for call sites that cannot
+    /// await (slash-command handlers). Same on-disk guarantees as `append`
+    /// (append-mode, 0600 file, 0700 parent, flushed and fsynced before it
+    /// returns); it does not take the per-instance tokio mutex, which never
+    /// serialized across instances anyway.
+    pub fn append_sync(&self, entry: &AuditEntry) -> std::io::Result<()> {
+        self.write_entry(entry)
+    }
+
+    /// The shared write sequence behind [`AuditLog::append`] and
+    /// [`AuditLog::append_sync`]: open append-mode 0600, create the parent
+    /// 0700, write the line, flush, `sync_data`, then chmod.
+    fn write_entry(&self, entry: &AuditEntry) -> std::io::Result<()> {
+        use std::io::Write as _;
 
         let line =
             serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -557,5 +573,35 @@ mod tests {
                 .contains("sk-live-should-never-appear-anywhere-in-output")
         );
         assert!(entry.args.contains(REDACTED_MARKER));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_sync_writes_same_shape() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sync-parent").join("audit.jsonl");
+        let log = AuditLog::with_path(path.clone(), AuditConfig::default());
+        let entry = test_entry(&json!({"key": "value"}), log.config());
+
+        log.append_sync(&entry).expect("append_sync must succeed");
+        log.append_sync(&entry)
+            .expect("second append_sync must succeed");
+
+        let contents = std::fs::read_to_string(&path).expect("read back");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2, "append mode, one line per call");
+        let parsed: AuditEntry = serde_json::from_str(lines[0]).expect("AuditEntry shape");
+        assert_eq!(parsed.kind, "mcp_mutation");
+        assert_eq!(parsed.session, "sess1");
+        let file_mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "audit.jsonl must be mode 0600");
+        let dir_mode = std::fs::metadata(path.parent().expect("parent"))
+            .expect("parent meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "parent must be mode 0700");
     }
 }

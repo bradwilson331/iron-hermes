@@ -1,6 +1,5 @@
 ---
 source: crates/ironhermes-cli/tests/status_cmd_schema.rs
-assertion_line: 9
 expression: json
 ---
 {
@@ -65,6 +64,7 @@ expression: json
   },
   "yolo": {
     "enabled": false,
+    "level": 3,
     "source": "disabled"
   }
 }

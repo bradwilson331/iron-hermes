@@ -18,7 +18,7 @@ use ironhermes_acp::event_bridge::{AcpEventBridge, NotificationSink};
 use ironhermes_acp::handlers::DenialLedger;
 use ironhermes_core::{Config, ProviderResolver};
 use ironhermes_state::StateStore;
-use wiremock::matchers::any;
+use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Mirrors `event_bridge.rs`'s private `KEEPALIVE_INTERVAL_SECS` default (60s) — the
@@ -184,7 +184,7 @@ async fn tool_result_failure_produces_failed_update() {
 
 #[tokio::test]
 async fn two_simultaneously_in_flight_tools_get_distinct_ids_and_each_result_updates_only_its_own()
- {
+{
     let updates = drive_and_collect(|_stream, tool_progress, tool_result| {
         tool_progress("terminal", "started");
         tool_progress("browser", "started");
@@ -210,7 +210,10 @@ async fn two_simultaneously_in_flight_tools_get_distinct_ids_and_each_result_upd
     };
     assert_eq!(terminal_update.tool_call_id, terminal_call.tool_call_id);
     assert_eq!(browser_update.tool_call_id, browser_call.tool_call_id);
-    assert_eq!(terminal_update.fields.status, Some(ToolCallStatus::Completed));
+    assert_eq!(
+        terminal_update.fields.status,
+        Some(ToolCallStatus::Completed)
+    );
     assert_eq!(browser_update.fields.status, Some(ToolCallStatus::Failed));
 }
 
@@ -317,8 +320,7 @@ async fn send_update_is_forwarded_through_the_same_channel() {
 /// `drive_and_collect` shape above (which drives everything before dropping in one go).
 async fn new_heartbeat_bridge() -> (CollectingSink, AcpEventBridge, tokio::task::JoinHandle<()>) {
     let sink = CollectingSink::default();
-    let (bridge, drain_handle) =
-        AcpEventBridge::new(
+    let (bridge, drain_handle) = AcpEventBridge::new(
         Arc::new(sink.clone()),
         "acp_test_session",
         "/tmp",
@@ -373,7 +375,10 @@ async fn heartbeat_fires_once_after_one_silent_interval() {
         panic!("expected ToolCall first, got {:?}", updates[0]);
     };
     let SessionUpdate::ToolCallUpdate(heartbeat) = &updates[1] else {
-        panic!("expected ToolCallUpdate (heartbeat) second, got {:?}", updates[1]);
+        panic!(
+            "expected ToolCallUpdate (heartbeat) second, got {:?}",
+            updates[1]
+        );
     };
     assert_eq!(heartbeat.tool_call_id, call.tool_call_id);
     assert_eq!(heartbeat.fields.status, Some(ToolCallStatus::InProgress));
@@ -715,7 +720,7 @@ where
 #[tokio::test]
 async fn full_prompt_round_trip_emits_usage_update() {
     let server = MockServer::start().await;
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -777,6 +782,107 @@ async fn full_prompt_round_trip_emits_usage_update() {
     agent_task.abort();
 }
 
+/// Phase 58.3.1 D-05 (WR-03): the once-per-session compact notice rides
+/// `AgentResult.context_warnings`; ACP must stream it as ONE `agent_message_chunk`
+/// after the reply text and before the `usage_update`.
+#[tokio::test]
+async fn acp_prompt_streams_compact_notice_as_agent_message_chunk() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(sse_text_only_with_usage(), "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut config = Config::default();
+    config.model.default = "test-model".to_string();
+    config.agent.compact_profile = ironhermes_core::config::CompactProfileMode::On;
+    let mut models = std::collections::HashMap::new();
+    models.insert(
+        "test-model".to_string(),
+        ironhermes_core::config_extras::ProviderModelConfig {
+            context_length: Some(32_000),
+            ..Default::default()
+        },
+    );
+    config.providers.insert(
+        "openrouter".to_string(),
+        ironhermes_core::ProviderConfig {
+            base_url: Some(server.uri()),
+            api_key: Some("test-key".to_string()),
+            models,
+            ..Default::default()
+        },
+    );
+    let resolver = ProviderResolver::build(&config).expect("ProviderResolver::build");
+    let (config, resolver) = (Arc::new(config), Arc::new(resolver));
+    let (state_store, _state_tmp) = build_state_store();
+    let (agent_channel, client_channel) = Channel::duplex();
+
+    let agent_task = tokio::spawn(async move {
+        ironhermes_acp::entry::run_acp_over(config, resolver, state_store, agent_channel).await
+    });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp_path = tmp.path().to_path_buf();
+
+    let client_result = Client
+        .builder()
+        .name("acp-compact-notice-test-client")
+        .connect_with(client_channel, async move |cx| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+
+            cx.build_session(&tmp_path)
+                .block_task()
+                .run_until(async move |mut session| {
+                    session.send_prompt("hello from the compact-notice test")?;
+                    let updates = read_all_updates(&mut session).await;
+
+                    let notice_idx: Vec<usize> = updates
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, u)| text_of(u).is_some_and(|t| t.contains("compact profile")))
+                        .map(|(i, _)| i)
+                        .collect();
+                    assert_eq!(
+                        notice_idx.len(),
+                        1,
+                        "expected exactly one compact-notice chunk, got: {updates:?}"
+                    );
+                    let idx = notice_idx[0];
+                    let text = text_of(&updates[idx]).unwrap();
+                    assert!(text.contains("32000"), "window number missing: {text}");
+                    assert!(
+                        text.contains("--- Context Warnings ---"),
+                        "header missing: {text}"
+                    );
+                    let last_world = updates
+                        .iter()
+                        .rposition(|u| text_of(u).is_some_and(|t| t.contains("world")))
+                        .expect("reply text chunk");
+                    let usage_idx = updates
+                        .iter()
+                        .position(|u| matches!(u, SessionUpdate::UsageUpdate(_)))
+                        .expect("usage update");
+                    assert!(
+                        last_world < idx && idx < usage_idx,
+                        "notice must follow reply text and precede usage: {updates:?}"
+                    );
+                    Ok(())
+                })
+                .await
+        })
+        .await;
+
+    client_result.expect("client exchange should succeed");
+    agent_task.abort();
+}
+
 /// Plan-level `<verification>`: a tool-using prompt yields, in order, at least one
 /// `agent_message_chunk`-or-`tool_call` activity, a `tool_call` immediately followed
 /// (eventually) by its terminal `tool_call_update`, and a trailing `usage_update` — and a
@@ -784,7 +890,7 @@ async fn full_prompt_round_trip_emits_usage_update() {
 #[tokio::test]
 async fn tool_using_prompt_yields_ordered_updates_and_writes_trajectory() {
     let server = MockServer::start().await;
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -793,7 +899,7 @@ async fn tool_using_prompt_yields_ordered_updates_and_writes_trajectory() {
         .up_to_n_times(1)
         .mount(&server)
         .await;
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")

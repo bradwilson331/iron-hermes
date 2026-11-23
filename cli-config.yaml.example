@@ -89,6 +89,10 @@ terminal:
   # the base safe-env set (Phase 42 D-05). Local-only; distinct from forward_env.
   # terminal_env_allowlist: []
   # terminal_env_allowlist: [KUBECONFIG, AWS_PROFILE]
+  # Site-deploy-from-chat (Phase 54.8) needs these passed through:
+  # terminal_env_allowlist: [CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, GITHUB_TOKEN]
+  # WARNING: every allowlisted variable is readable by any command the agent
+  # runs. The values themselves go in .env, single-quoted (e.g. GITHUB_TOKEN='...').
 
   # --- docker backend (only consulted when backend: docker) ---
   # Container CLI to shell out to. Explicit, never auto-detected by probing
@@ -164,6 +168,11 @@ gateway:
 
   # Compression threshold for gateway (default: 0.85)
   # compression_threshold: 0.85
+
+  # Per-turn deadline in seconds (Phase 54.8 D-07). A turn still running after
+  # this is cancelled, which frees its run slot; the chat gets a timeout
+  # notice. <= 0 disables the deadline. Default 1800.
+  # turn_timeout_secs: 1800
 
   # Platform adapters
   # The `platforms:` map is empty by default. Each platform key (telegram,
@@ -381,6 +390,24 @@ batch:
 security:
   # Redact secrets in logs and output (default: true)
   # redact_secrets: true
+
+  # DEFCON strictness dial, 1 (strictest) .. 5 (most permissive). Default: 3,
+  # today's "needs approval" behaviour. Warn-class approvals are bypassed only
+  # at 4-5; levels 1-3 always reach a real approval. Also gates skill-symlink
+  # enforcement (hard-reject at 1-2) and new MCP OAuth issuer confirmation (1-2).
+  # `/yolo <N>` overrides the level for ONE session and never writes back to
+  # this file; a restart returns every session to this value.
+  # defcon_level: 3
+
+  # Authorize remote surfaces (chat platforms and the web UI) to change a
+  # session's DEFCON level with `/yolo <N>` (default: false). An independent
+  # opt-in beside the other `remote_*_enabled` flags; TUI and CLI are local and
+  # always allowed.
+  # defcon_remote_change_enabled: false
+
+  # DEPRECATED aliases (still honoured, warn once at load): `autonomous.yolo`
+  # (true -> defcon_level 5, false -> 3) and `skills.defcon_level`. Precedence:
+  # security.defcon_level, then skills.defcon_level, then autonomous.yolo.
 
 # --- Provider Overrides ---
 # Per-provider configuration. This is the canonical place to wire API keys
@@ -677,11 +704,40 @@ mcp_servers: {}
 #     url: "https://builds.mcp.cloudflare.com/mcp"
 #     oauth_provider: "cloudflare_builds"
 
+# --- Site projects (Phase 54.8, D-20) ---
+# Sites the bot may edit and deploy from chat ("change X on <site>"). Each key
+# is a site name (lowercase letters, digits, '-'). A mistyped entry never stops
+# the gateway: `ironhermes sites list` reports it by name and field, and
+# `ironhermes sites show <name>` refuses it. Put REAL repo names and URLs only
+# in your own config.yaml, never in this shipped example. Credentials never go
+# here: they live in `.env` (single-quoted). See docs/SITE-DEPLOY-FROM-CHAT.md.
+# sites:
+#   demo-site:
+#     repo: example-org/demo-site          # GitHub owner/name
+#     clone_path: workspace/demo-site      # must live under workspace/ (no symlinks)
+#     base_branch: main                    # default: main
+#     # wrangler_config: wrangler.jsonc    # optional path inside the repo
+#     # wrangler: the agent runs a production `wrangler deploy` of the merged commit.
+#     deploy_mode: wrangler
+#     # git_connected: merging triggers the Cloudflare build, the agent deploys nothing
+#     # (production.deploy_args must then be empty):
+#     # deploy_mode: git_connected
+#     # Staging MUST select its own target (--env <name>, -e <name> or --name <name>)
+#     # and its own url, both distinct from production. Only those flags are accepted.
+#     staging:
+#       deploy_args: ["--env", "staging"]
+#       url: "https://demo-site-staging.example.workers.dev"
+#     production:
+#       # Empty deploy_args = the bare default `wrangler deploy` target.
+#       deploy_args: []
+#       url: "https://demo-site.example.workers.dev"
+
 # --- Autonomous Mode ---
 # Controls yolo (auto-approve dangerous commands) behavior. D-11/D-12/D-14.
 autonomous:
   # When true, skip dangerous-command approval prompts. Budget 100% /
   # fatal error / user interrupt remain unskippable (G-01/G-04/G-09).
+  # DEPRECATED alias for `security.defcon_level` (true -> 5, false -> 3).
   # yolo: false
 
 # --- Browser Automation ---
@@ -707,6 +763,59 @@ browser:
 
   # Persistent user data directory for cookies/localStorage (null = ephemeral per session).
   # user_data_dir: null
+
+# --- ROS 2 (rosbridge) ---
+# Phase 49.8: talks to a ROS 2 (Humble) robot over a rosbridge WebSocket. See
+# docs/robots/rospider.md for the full operator walkthrough and
+# docs/CONFIGURATION.md's "ROS 2 (`ros2:`)" section for every key.
+# ros2:
+#   # rosbridge WebSocket URL. null (with no IRONHERMES_ROS2_BRIDGE_URL override) hides
+#   # both the ros2 and rospider tools. Moving ironhermes onto the robot itself is a URL
+#   # change only, to ws://localhost:9090 (D-02).
+#   bridge_url: null
+#
+#   # Allowlisted publish targets. Empty = nothing permitted (deny-by-default, D-04) —
+#   # the inverse of browser.allowed_domains's allow-all-when-empty default.
+#   publish:
+#     - name: "/controller/cmd_vel"
+#       type: "geometry_msgs/msg/Twist"
+#       limits:
+#         "linear.x": [-0.1, 0.1]
+#         "angular.z": [-0.5, 0.5]
+#
+#   # Allowlisted call_service targets. Same deny-by-default semantics as publish.
+#   services: []
+#
+#   # Allowlisted send_goal action targets. Same deny-by-default semantics as publish.
+#   actions: []
+#
+#   # Hard physical-safety caps, clamped in-tool. Never relaxed by --yolo/autonomous.yolo (D-11).
+#   caps:
+#     max_linear_velocity: 0.10       # m/s; 0 disables linear motion
+#     max_angular_velocity: 0.5       # rad/s; 0 disables angular motion
+#     max_motion_duration_secs: 5.0   # auto-stop fires at expiry (D-09); <= 0 falls back to the default
+#     motion_publish_hz: 10.0         # <= 0 falls back to the default
+#     max_subscribe_messages: 20      # bounded-sample subscribe cap (D-12); 0 disables sampling
+#     max_subscribe_secs: 10.0        # <= 0 falls back to the default
+#     max_goal_secs: 120.0            # <= 0 falls back to the default
+#
+#   # The Hiwonder ROSPider's default topic/service/servo names — every value is
+#   # config-overridable so an on-robot name that differs can be corrected without a
+#   # code change (see docs/robots/rospider.md "Reconcile names on your robot").
+#   rospider:
+#     cmd_vel_topic: "/controller/cmd_vel"
+#     traveling_topic: "/controller/traveling"   # gait-0 rest stop target; a zero Twist alone leaves a ROSPider stepping in place
+#     pose_topic: "/controller/set_pose_euler"
+#     gait_topic: "/step_controller/cmd_param"
+#     builtin_pose_service: "/controller/set_pose_1"
+#     servo_topic: "/servo_controller"
+#     camera_pan_servo_id: 19
+#     camera_compressed_topic: "/depth_cam/rgb/image_compressed"
+#     camera_raw_topic: "/depth_cam/rgb/image_raw"
+#     imu_topic: "/imu"
+#     battery_topic: "/ros_robot_controller/battery"
+#     odom_topic: "/odom"
+#     scan_topic: "/scan"
 
 # --- Web Extract ---
 # Phase 25.2 D-22: web content extraction and summarization configuration.
@@ -949,15 +1058,23 @@ voice:
   # Maximum allowed recording length in seconds. Default: 120.
   # max_recording_seconds: 120
 
-  # Barge-in behavior during agent TTS playback. Supported:
-  #   "push_to_interrupt" — turn-based; user presses the record key to interrupt
+  # Which voice family runs (Phase 54.7). Supported:
+  #   "turn_based" — record, transcribe (stt:), think, speak (tts:). The default.
+  #   "realtime"   — full-duplex realtime voice over an OpenAI-Realtime-compatible
+  #                  server + WebRTC (web/orb only). Configured by the top-level
+  #                  `realtime:` block below. When realtime cannot start it
+  #                  gracefully degrades to the turn-based path. CLI/TUI stays
+  #                  turn-based.
+  # A config WITHOUT this key and with barge_in_mode: "open_mic" loads as
+  # "realtime" (migration); otherwise it loads as "turn_based".
+  # service: "turn_based"
+
+  # Barge-in behavior during agent TTS playback — governs TURN-BASED interruption
+  # only (voice.service chooses the family). Supported:
+  #   "push_to_interrupt" — user presses the record key to interrupt
   #                         (CLI/TUI + web). The default and only mode for CLI/TUI.
-  #   "open_mic"          — Mode C full-duplex realtime voice over OpenAI Realtime
-  #                         API + WebRTC (web/orb only, Phase 36.17.12). Requires an
-  #                         OpenAI key resolvable via providers.openai.api_key_env
-  #                         (default OPENAI_API_KEY in ~/.ironhermes/.env). When the
-  #                         key/realtime is unavailable it gracefully degrades to the
-  #                         turn-based path (D-07). CLI/TUI stays turn-based (D-11).
+  #   "open_mic"          — legacy value; read as service: "realtime" when
+  #                         `service` is not set (migration input only).
   #   "half_duplex"       — deferred (not wired).
   # Default: "push_to_interrupt".
   # barge_in_mode: "push_to_interrupt"
@@ -967,23 +1084,13 @@ voice:
   #   enabled: false
   #   phrase: "hey hermes"
 
-  # OpenAI Realtime API model for the open-mic WebRTC voice path
-  # (voice.barge_in_mode: open_mic, Phase 36.17.12). The server resolves this
-  # from config and validates against a whitelist before any network call.
-  # Changing to an unlisted model triggers the D-07 graceful fallback to
-  # turn-based voice. Current GA model (2026): "gpt-realtime".
-  # Default: "gpt-realtime".
+  # LEGACY keys voice.realtime_model / voice.realtime_voice /
+  # voice.realtime_transcription_model are superseded by the top-level
+  # `realtime:` block below. They are still read as fallbacks for any unset
+  # `realtime:` field and are dropped on the next save from the web Voice panel.
+  # Prefer setting model / voice / transcription_model under `realtime:`.
   # realtime_model: "gpt-realtime"
-
-  # OpenAI Realtime agent voice (open-mic WebRTC path). Server-resolved and
-  # whitelist-validated; an unlisted value triggers the D-07 fallback. One of:
-  # alloy, shimmer, echo, verse, ash, ballad, coral, sage. Default: "shimmer".
   # realtime_voice: "shimmer"
-
-  # Input-audio transcription model for the realtime path. When set, the provider
-  # transcribes YOUR speech and the web UI shows it in the transcript card.
-  # Server-resolved + whitelist-validated. One of "gpt-4o-mini-transcribe"
-  # (default), "gpt-4o-transcribe", "whisper-1", or "off" to disable.
   # realtime_transcription_model: "gpt-4o-mini-transcribe"
 
   # Realtime input tuning (Phase 36.17.12 BUG 5 fix). These shape the GA
@@ -1012,14 +1119,40 @@ voice:
   # detects end-of-speech; raise if it cuts off too early.
   # web_silence_threshold_rms: 5.0
 
+# --- Realtime voice (Phase 54.7) ---
+# Endpoint, key reference and model for the realtime voice service
+# (voice.service: realtime). Web/orb only; server home config only.
+# The server mints an ephemeral token at {base_url}/realtime/client_secrets and
+# the BROWSER connects directly to {base_url}/realtime/calls, so base_url must be
+# reachable from the browser. Model / voice accept any value inside a strict
+# charset + length rule (no whitelist).
+# realtime:
+#   provider: "openai_compatible"
+#   # Default: https://api.openai.com/v1
+#   base_url: "https://api.openai.com/v1"
+#   # Optional key REFERENCE (never a key value): a VOICE_KEY_* environment
+#   # variable name or a secret/voice/* vault entry. Unset on the default OpenAI
+#   # URL uses the implicit OpenAI key; unset on a custom URL sends no key.
+#   # api_key_ref: "VOICE_KEY_REALTIME"
+#   model: "gpt-realtime"
+#   voice: "shimmer"
+#   # Or "off" to disable input transcription.
+#   transcription_model: "gpt-4o-mini-transcribe"
+
 # --- STT (Speech-to-Text) ---
 # STT provider configuration used to transcribe microphone audio (web voice
 # mode + CLI). Requires a provider API key in ~/.ironhermes/.env:
 #   - groq   → GROQ_API_KEY
 #   - openai → VOICE_TOOLS_OPENAI_KEY (preferred) or OPENAI_API_KEY
+# A custom OpenAI-compatible server (whisper.cpp, faster-whisper-server) needs
+# no key: set stt.openai_compatible.base_url below.
 stt:
-  # Active STT provider. Supported: "auto", "groq", "openai". Default: "auto".
-  # "auto" selects the first provider whose API key is present at runtime.
+  # Active STT provider. Supported: "auto", "groq", "openai", "openai_compatible".
+  # Default: "auto". "auto" picks the first configured provider in the fixed
+  # order openai_compatible > groq > openai (openai_compatible when its
+  # base_url is set, so a local server is never bypassed by a cloud key that
+  # happens to be in the environment; then groq when GROQ_API_KEY is set,
+  # then openai when VOICE_TOOLS_OPENAI_KEY is set).
   # provider: "auto"
 
   # Groq STT settings
@@ -1032,11 +1165,27 @@ stt:
   #   # OpenAI Whisper model. Default: "whisper-1".
   #   model: "whisper-1"
 
+  # OpenAI-compatible STT server (whisper.cpp, faster-whisper-server, ...).
+  # Available exactly when base_url is set; no key is needed. STT_OPENAI_MODEL /
+  # STT_GROQ_MODEL do NOT apply to this provider.
+  # openai_compatible:
+  #   # Server root (include /v1 if your server uses it). http or https only.
+  #   base_url: "http://localhost:8178"
+  #   # Optional endpoint path. Default: "/audio/transcriptions".
+  #   # whisper.cpp serves transcription at "/inference".
+  #   path: "/inference"
+  #   # Optional key REFERENCE (never a key value): a VOICE_KEY_* environment
+  #   # variable name or a secret/voice/* vault entry. Unset = no Authorization header.
+  #   # api_key_ref: "VOICE_KEY_WHISPER"
+  #   # Model id sent in the form. Default: "whisper-1".
+  #   model: "whisper-1"
+
 # --- TTS (Text-to-Speech) ---
 # Phase 36.17.5 D-12: TTS provider configuration.
 tts:
   # Active TTS provider. Supported: "edge" (Microsoft Edge TTS — keyless),
-  # "elevenlabs" (requires ELEVENLABS_API_KEY), "openai" (requires OPENAI_API_KEY).
+  # "elevenlabs" (requires ELEVENLABS_API_KEY), "openai" (requires OPENAI_API_KEY),
+  # "openai_compatible" (a Kokoro-style server at openai_compatible.base_url).
   # Default: "edge". This is the GLOBAL fallback; per-avatar overrides under
   # `identities:` win over it (Phase 40.5). See docs/VOICE-TO-VOICE.md.
   # provider: "edge"
@@ -1067,6 +1216,24 @@ tts:
   #   # OpenAI TTS voice. Default: "alloy". One of: alloy, echo, fable, onyx, nova, shimmer.
   #   voice: "alloy"
   #   # Audio output format. Default: "mp3".
+  #   format: "mp3"
+
+  # OpenAI-compatible TTS server (Kokoro, openedai-speech, ...). Available
+  # exactly when base_url is set; no key is needed. The OpenAI/ElevenLabs keys
+  # are never sent to this host.
+  # openai_compatible:
+  #   # Server root INCLUDING any /v1 segment. http or https only.
+  #   base_url: "http://localhost:8880/v1"
+  #   # Optional endpoint path. Default: "/audio/speech".
+  #   # path: "/audio/speech"
+  #   # Optional key REFERENCE (never a key value): a VOICE_KEY_* environment
+  #   # variable name or a secret/voice/* vault entry. Unset = no Authorization header.
+  #   # api_key_ref: "VOICE_KEY_KOKORO"
+  #   # Model id. Default: "tts-1" (Kokoro: "kokoro").
+  #   model: "kokoro"
+  #   # Voice id. Default: "alloy" (Kokoro example: "af_heart").
+  #   voice: "af_heart"
+  #   # Requested format: mp3, opus or wav. Default: "mp3".
   #   format: "mp3"
 
 # --- Identities (Phase 40.5: per-avatar voice + orb appearance) ---

@@ -232,9 +232,10 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("verbose", "Toggle verbose tool output", Configuration).platform(CliOnly),
         CommandDef::new(
             "yolo",
-            "Toggle dangerous command auto-approval",
+            "Set this session's DEFCON level (1 strictest .. 5)",
             Configuration,
         )
+        .args_hint("[1-5]")
         .platform(Universal),
         CommandDef::new("reasoning", "Set reasoning level", Configuration)
             .args_hint("[level|show|hide]")

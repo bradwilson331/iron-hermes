@@ -546,7 +546,11 @@ pub async fn set_tool_credential(
                     }
                     _ => {
                         use secrecy::ExposeSecret;
-                        let mut config = config;
+                        // RR-05 (WR-06): serialise with the other root writers and reload under
+                        // the lock so the insert never lands on a stale copy; no `.await` below.
+                        let _root_write = crate::server::profile_activation_api::lock_root_config_write();
+                        drop(config);
+                        let mut config = load_root_config().map_err(ServerFnError::new)?;
                         config
                             .tools
                             .credentials
@@ -610,7 +614,10 @@ pub async fn clear_tool_credential(
                         Ok(())
                     }
                     _ => {
-                        let mut config = config;
+                        // RR-05 (WR-06): as in `set_tool_credential`.
+                        let _root_write = crate::server::profile_activation_api::lock_root_config_write();
+                        drop(config);
+                        let mut config = load_root_config().map_err(ServerFnError::new)?;
                         config.tools.credentials.remove(&key_name);
                         config.save().map_err(|_| {
                             ServerFnError::new(format!(
@@ -868,6 +875,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -954,6 +962,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -1010,6 +1019,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             vault,
             ..Config::default()
@@ -1058,6 +1068,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             vault,
             ..Config::default()
@@ -1097,6 +1108,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         };

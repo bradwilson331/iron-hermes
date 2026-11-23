@@ -127,11 +127,24 @@ fn model_id_looks_malformed(model: &str) -> Option<&'static str> {
 /// `system`; demote every other `system` message to `user` in place (content,
 /// name, and position preserved). Zero-copy when nothing needs changing, so the
 /// common (uncompressed) turn and OpenAI-only turns pay no allocation.
+///
+/// Also replaces tool-call `arguments` that are not valid JSON with `{}`.
+/// llama-server re-parses every replayed tool call when it renders the chat
+/// template, so one truncated call from the model (e.g. `{"query": "Qwen2`)
+/// made every later request in the session fail with HTTP 500. History keeps
+/// the raw text; the tool result already carries the parse error for the model.
 fn normalize_non_leading_system(messages: &[ChatMessage]) -> std::borrow::Cow<'_, [ChatMessage]> {
+    let bad_args = |m: &ChatMessage| {
+        m.tool_calls.as_ref().is_some_and(|calls| {
+            calls
+                .iter()
+                .any(|c| serde_json::from_str::<serde_json::Value>(&c.function.arguments).is_err())
+        })
+    };
     let needs_fix = messages
         .iter()
         .enumerate()
-        .any(|(i, m)| i != 0 && m.role == Role::System);
+        .any(|(i, m)| (i != 0 && m.role == Role::System) || bad_args(m));
     if !needs_fix {
         return std::borrow::Cow::Borrowed(messages);
     }
@@ -139,13 +152,18 @@ fn normalize_non_leading_system(messages: &[ChatMessage]) -> std::borrow::Cow<'_
         .iter()
         .enumerate()
         .map(|(i, m)| {
+            let mut m = m.clone();
             if i != 0 && m.role == Role::System {
-                let mut demoted = m.clone();
-                demoted.role = Role::User;
-                demoted
-            } else {
-                m.clone()
+                m.role = Role::User;
             }
+            if let Some(calls) = m.tool_calls.as_mut() {
+                for c in calls.iter_mut() {
+                    if serde_json::from_str::<serde_json::Value>(&c.function.arguments).is_err() {
+                        c.function.arguments = "{}".to_string();
+                    }
+                }
+            }
+            m
         })
         .collect();
     std::borrow::Cow::Owned(fixed)
@@ -154,6 +172,37 @@ fn normalize_non_leading_system(messages: &[ChatMessage]) -> std::borrow::Cow<'_
 #[cfg(test)]
 mod system_norm_tests {
     use super::*;
+
+    #[test]
+    fn invalid_tool_call_arguments_become_empty_object_on_wire() {
+        let call = |args: &str| ToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "web_search".to_string(),
+                arguments: args.to_string(),
+            },
+        };
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::assistant_tool_calls(vec![
+                call(r#"{"query": "Qwen2"#),
+                call(r#"{"q":1}"#),
+            ]),
+        ];
+        let out = normalize_non_leading_system(&msgs);
+        let calls = out[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].function.arguments, "{}");
+        assert_eq!(
+            calls[1].function.arguments, r#"{"q":1}"#,
+            "valid args untouched"
+        );
+        // History itself is not rewritten.
+        assert_eq!(
+            msgs[1].tool_calls.as_ref().unwrap()[0].function.arguments,
+            r#"{"query": "Qwen2"#
+        );
+    }
 
     #[test]
     fn demotes_non_leading_system_to_user() {
@@ -240,6 +289,33 @@ impl LlmClient {
     /// `cache_control` markers attach per the system_and_3 strategy.
     pub fn set_prompt_caching(&mut self, cfg: ironhermes_core::config::PromptCachingConfig) {
         self.prompt_caching = cfg;
+    }
+
+    /// `chat_completion` with D-09 learn-shrink-retry around a context-length
+    /// rejection (auxiliary callers; see `aux_fit`).
+    pub async fn chat_completion_fitting(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSchema]>,
+        model: Option<&str>,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        extra: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<ChatResponse> {
+        crate::aux_fit::chat_with_context_recovery(
+            self.base_url(),
+            model.unwrap_or_else(|| self.model()),
+            messages,
+            max_tokens,
+            |m, mt| {
+                let extra = extra.clone();
+                async move {
+                    self.chat_completion(&m, tools, model, mt, temperature, extra)
+                        .await
+                }
+            },
+        )
+        .await
     }
 
     /// Non-streaming chat completion.
@@ -583,41 +659,76 @@ impl LlmClient {
 /// A streaming tool call delta: (index, id, name, arguments).
 pub type ToolCallDelta = (usize, Option<String>, Option<String>, Option<String>);
 
+/// Per-index accumulator for `assemble_tool_calls_from_stream`. The two extra
+/// fields (`delta_count`, `id_ever_seen`) exist purely for the empty-id
+/// diagnostic below — they add no allocation and are never part of the
+/// returned `ToolCall`.
+#[derive(Default)]
+struct ToolCallAccum {
+    id: String,
+    name: String,
+    arguments: String,
+    delta_count: u32,
+    id_ever_seen: bool,
+}
+
 /// Assemble a complete ChatMessage from streaming tool call deltas.
 pub fn assemble_tool_calls_from_stream(deltas: &[ToolCallDelta]) -> Vec<ToolCall> {
-    let mut tool_calls: HashMap<usize, (String, String, String)> = HashMap::new();
+    let mut tool_calls: HashMap<usize, ToolCallAccum> = HashMap::new();
 
     for (index, id, name, arguments) in deltas {
-        let entry = tool_calls
-            .entry(*index)
-            .or_insert_with(|| (String::new(), String::new(), String::new()));
+        let entry = tool_calls.entry(*index).or_default();
+        entry.delta_count += 1;
 
-        if let Some(id) = id
-            && !id.is_empty()
-        {
-            entry.0 = id.clone();
+        if let Some(id) = id {
+            entry.id_ever_seen = true;
+            if !id.is_empty() {
+                entry.id = id.clone();
+            }
         }
         if let Some(name) = name
             && !name.is_empty()
         {
-            entry.1 = name.clone();
+            entry.name = name.clone();
         }
         if let Some(args) = arguments {
-            entry.2.push_str(args);
+            entry.arguments.push_str(args);
+        }
+    }
+
+    // Observation only: this diagnostic does not alter what is returned below.
+    // See DIAGNOSIS.md § FALSIFIED — this records whether assembly is the
+    // origin of an empty tool_call_id reaching the provider, without masking
+    // it with a synthesized id.
+    for (index, accum) in &tool_calls {
+        if accum.id.is_empty() {
+            let index = *index;
+            let delta_count = accum.delta_count;
+            let id_ever_seen = accum.id_ever_seen;
+            let function_name = accum.name.as_str();
+            warn!(
+                index,
+                delta_count,
+                id_ever_seen,
+                function_name,
+                "assemble_tool_calls_from_stream: tool call at index {index} has an empty id \
+                 after {delta_count} delta(s) seen (id_ever_seen={id_ever_seen}, \
+                 function_name={function_name:?})"
+            );
         }
     }
 
     let mut calls: Vec<(usize, ToolCall)> = tool_calls
         .into_iter()
-        .map(|(idx, (id, name, args))| {
+        .map(|(idx, accum)| {
             (
                 idx,
                 ToolCall {
-                    id,
+                    id: accum.id,
                     call_type: "function".to_string(),
                     function: FunctionCall {
-                        name,
-                        arguments: args,
+                        name: accum.name,
+                        arguments: accum.arguments,
                     },
                 },
             )
@@ -626,4 +737,123 @@ pub fn assemble_tool_calls_from_stream(deltas: &[ToolCallDelta]) -> Vec<ToolCall
 
     calls.sort_by_key(|(idx, _)| *idx);
     calls.into_iter().map(|(_, tc)| tc).collect()
+}
+
+#[cfg(test)]
+mod assemble_tool_calls_from_stream_tests {
+    use super::*;
+
+    /// The LIVE OpenRouter frame shape captured in DIAGNOSIS.md for the
+    /// single-tool-call case: id+name arrive in frame 1 (with an empty
+    /// `arguments` string), then three pure-argument frames with no id/name.
+    /// Assembly is EXONERATED for this shape — the id survives intact and no
+    /// warning fires. This pins the known-good path so a future change
+    /// cannot silently regress it into the failure this task instruments.
+    #[test]
+    #[tracing_test::traced_test]
+    fn exonerated_path_single_tool_call_live_frame_shape_keeps_id_and_does_not_warn() {
+        let deltas: Vec<ToolCallDelta> = vec![
+            (
+                0,
+                Some("toolu_01JZ5qVfPz5Jieu8HRSyAA41".to_string()),
+                Some("get_weather".to_string()),
+                Some(String::new()),
+            ),
+            (0, None, None, Some(String::new())),
+            (0, None, None, Some("{\"city\": \"Paris".to_string())),
+            (0, None, None, Some("\"}".to_string())),
+        ];
+
+        let calls = assemble_tool_calls_from_stream(&deltas);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "toolu_01JZ5qVfPz5Jieu8HRSyAA41");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, "{\"city\": \"Paris\"}");
+        assert!(
+            !logs_contain("has an empty id"),
+            "assembly must not warn on the known-good, exonerated frame shape"
+        );
+    }
+
+    /// No delta for index 0 ever carries an `id` field (not even `Some("")`).
+    /// The warning must fire and must name index 0.
+    #[test]
+    #[tracing_test::traced_test]
+    fn no_id_ever_supplied_for_an_index_warns_and_names_it() {
+        let deltas: Vec<ToolCallDelta> = vec![
+            (
+                0,
+                None,
+                Some("get_weather".to_string()),
+                Some(String::new()),
+            ),
+            (0, None, None, Some("{}".to_string())),
+        ];
+
+        let calls = assemble_tool_calls_from_stream(&deltas);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "", "id must still be empty — no synthesis");
+        assert!(
+            logs_contain("tool call at index 0 has an empty id"),
+            "warning must fire and name index 0"
+        );
+        assert!(
+            logs_contain("id_ever_seen=false"),
+            "warning must record that no id field was ever seen for this index"
+        );
+        assert!(
+            logs_contain("after 2 delta(s) seen"),
+            "warning must record the delta count observed for this index"
+        );
+    }
+
+    /// Parallel tool calls: index 0 gets an id, index 1 never does. This is
+    /// the leading untested hypothesis for the production failure (DIAGNOSIS.md
+    /// § FALSIFIED #3). The warning must fire for index 1 ONLY, and index 0's
+    /// id must remain intact and unwarned.
+    #[test]
+    #[tracing_test::traced_test]
+    fn parallel_tool_calls_warns_only_for_the_index_missing_an_id() {
+        let deltas: Vec<ToolCallDelta> = vec![
+            (
+                0,
+                Some("call_has_id_0".to_string()),
+                Some("fn_a".to_string()),
+                Some(String::new()),
+            ),
+            (1, None, Some("fn_b".to_string()), Some(String::new())),
+            (0, None, None, Some("{\"a\":1}".to_string())),
+            (1, None, None, Some("{\"b\":2}".to_string())),
+        ];
+
+        let calls = assemble_tool_calls_from_stream(&deltas);
+
+        assert_eq!(calls.len(), 2);
+        let call_0 = calls
+            .iter()
+            .find(|c| c.function.name == "fn_a")
+            .expect("index 0 call");
+        let call_1 = calls
+            .iter()
+            .find(|c| c.function.name == "fn_b")
+            .expect("index 1 call");
+        assert_eq!(
+            call_0.id, "call_has_id_0",
+            "index 0's id must remain intact"
+        );
+        assert_eq!(
+            call_1.id, "",
+            "index 1's id must still be empty — no synthesis"
+        );
+        assert!(
+            logs_contain("tool call at index 1 has an empty id"),
+            "warning must fire for index 1"
+        );
+        assert!(
+            !logs_contain("tool call at index 0 has an empty id"),
+            "warning must NOT fire for index 0 — its id is intact"
+        );
+    }
 }

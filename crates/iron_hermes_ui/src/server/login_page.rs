@@ -1350,6 +1350,11 @@ mod tests {
                 "/artifacts/{id}/raw",
                 axum::routing::get(crate::server::artifact_route::serve_artifact_raw),
             )
+            // Phase 54.9 Plan 08 (D-13): must mirror main.rs's route set exactly.
+            .route(
+                "/openui/frame",
+                axum::routing::get(crate::server::openui_route::serve_openui_frame),
+            )
             .route(
                 "/chat-attachments/{session_id}/{id}",
                 axum::routing::get(crate::server::chat_attachment_route::serve_chat_attachment),
@@ -1552,6 +1557,7 @@ mod tests {
         for (method, uri) in [
             ("GET", "/api/anything"),
             ("GET", "/api/ws/chat"),
+            ("GET", "/openui/frame"),
             (
                 "GET",
                 "/artifacts/00000000-0000-0000-0000-000000000000",

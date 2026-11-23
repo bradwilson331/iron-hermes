@@ -19,11 +19,18 @@
 //! checked first. Tests in `approval_gate_test.rs` (test `tier2_never_reaches_gate`) prove
 //! this invariant.
 //!
-//! # D-13 yolo bypass
+//! # D-13 / D-21 bypass is decided upstream
 //!
-//! `yolo=true` auto-allows Tier-1 commands without reading stdin or the approval store.
-//! It does NOT bypass a Tier-2 `Block` — the guard's `Block` fires before any yolo check
-//! in the gate (D-03 ordering).
+//! [`CliApprovalGate`] (and the `build_gated_*_intercept` builders that wrap it) carry no yolo
+//! flag since Phase 57: `ironhermes_hooks::execute_gated_command` reads the session's LIVE DEFCON
+//! level through `GatePolicy::for_session(&session_id)` and bypasses a Warn only at levels 4-5,
+//! writing the `resolution="bypass"` audit row and the per-turn ledger entry. A gate that IS
+//! consulted always asks, so it passes `false` to [`prompt_for_approval`]. A Tier-2 `Block`
+//! is never bypassed (D-03 ordering): it fires before any bypass decision.
+//!
+//! [`prompt_for_approval`] and [`prompt_for_approval_with_reader`] keep their `yolo` parameter
+//! for their one other caller, `quick_command::dispatch_quick_command`, whose caller-supplied
+//! flag is unchanged.
 //!
 //! # C-3 TOCTOU warning
 //!
@@ -80,20 +87,17 @@ use crate::io_gate::can_prompt;
 /// parallel prompt system" instruction.
 pub struct CliApprovalGate {
     store: std::sync::Arc<ApprovalsStore>,
-    yolo: bool,
 }
 
 impl CliApprovalGate {
     /// `store`: the `ApprovalsStore` for session/always caching (mirrors Quick
     /// Command's `store` parameter) — `Arc`-wrapped so it can move into the
-    /// `spawn_blocking` bridge closure. `yolo`: forwarded to `prompt_for_approval`,
-    /// though in practice `execute_gated_command` already short-circuits its own
-    /// yolo bypass before ever consulting this gate — kept for API completeness
-    /// and direct-construction testability.
-    pub fn new(store: ApprovalsStore, yolo: bool) -> Self {
+    /// `spawn_blocking` bridge closure. The gate carries no yolo or DEFCON state:
+    /// bypass is decided and audited upstream by `execute_gated_command` (D-21), so
+    /// a gate that is consulted always asks.
+    pub fn new(store: ApprovalsStore) -> Self {
         Self {
             store: std::sync::Arc::new(store),
-            yolo,
         }
     }
 
@@ -108,8 +112,8 @@ impl CliApprovalGate {
     /// constructor at every per-dispatch gate construction so an `[s]ession`
     /// grant survives to the next dispatch instead of being lost when a fresh
     /// `ApprovalsStore::load()` reset its empty `session` set.
-    pub fn from_shared(store: std::sync::Arc<ApprovalsStore>, yolo: bool) -> Self {
-        Self { store, yolo }
+    pub fn from_shared(store: std::sync::Arc<ApprovalsStore>) -> Self {
+        Self { store }
     }
 }
 
@@ -129,7 +133,6 @@ impl ironhermes_core::ApprovalGate for CliApprovalGate {
             .to_string();
         let cache_key = ApprovalsStore::normalize_command(&command);
         let store = self.store.clone();
-        let yolo = self.yolo;
 
         // Send bridge (see struct doc): run the non-Send `prompt_for_approval`
         // future to completion on a dedicated blocking-pool thread via a nested
@@ -141,7 +144,9 @@ impl ironhermes_core::ApprovalGate for CliApprovalGate {
                 &cache_key,
                 KeyKind::Command,
                 &store,
-                yolo,
+                // D-21: never auto-approve here. A bypass (DEFCON 4-5) is decided, audited
+                // and announced upstream before this gate is ever consulted.
+                false,
             ))
         })
         .await
@@ -168,6 +173,169 @@ impl ironhermes_core::ApprovalGate for CliApprovalGate {
     /// mirroring the trait's "safe to call with nothing pending" contract).
     async fn resolve(&self, _session_id: &str, _approved: bool) -> bool {
         false
+    }
+
+    /// D-04 (Phase 54 Finding 1): a `yolo=true` bypass is announced on stderr —
+    /// never stdout, so the notice never contaminates piped command output (the
+    /// same reasoning [`prompt_for_approval`]'s doc already states for why its own
+    /// interactive prompt writes to stdout only when a real operator is watching).
+    ///
+    /// Phase 54.3: this is the PER-CALL unscoped fallback, reached only when a
+    /// bypass happens outside any `YOLO_LEDGER` turn scope. The per-turn path is
+    /// [`notify_yolo_bypass_turn`](ironhermes_core::ApprovalGate::notify_yolo_bypass_turn).
+    async fn notify_yolo_bypass(&self, _session_id: &str, tool_name: &str, reason: &str) {
+        eprintln!("\n{}", format_yolo_bypass_notice(tool_name, reason));
+    }
+
+    /// Phase 54.3 D-03/D-09: ONE short line per bypassing turn, on stderr.
+    ///
+    /// Stderr, never stdout: stdout is the agent's answer channel, and
+    /// interleaving a notice there corrupts piped output. The text comes from
+    /// [`format_yolo_bypass_turn_notice`] (the shared `short_line()`), so it is
+    /// newline-free and length-capped by construction.
+    async fn notify_yolo_bypass_turn(&self, summary: &ironhermes_core::YoloBypassSummary) {
+        eprintln!("\n{}", format_yolo_bypass_turn_notice(summary));
+    }
+}
+
+/// Pure formatter for the D-04 yolo-bypass notice — factored out of
+/// [`CliApprovalGate::notify_yolo_bypass`] so its CONTENT is unit-testable.
+/// Phase 54.3: serves the per-call unscoped-fallback path when no `YOLO_LEDGER`
+/// scope is installed; the per-turn path is [`format_yolo_bypass_turn_notice`].
+/// Raw stderr writes have no in-process capture seam in this crate today (no
+/// existing `std::io::Write` abstraction to inject a test double through), so
+/// this function is the strongest testable surface available: it proves the
+/// message names the tool and carries the reason, even though the test cannot
+/// also prove the `eprintln!` above actually reaches stderr.
+fn format_yolo_bypass_notice(tool_name: &str, reason: &str) -> String {
+    format!("[YOLO BYPASS] `{tool_name}` ran without approval — reason: {reason}")
+}
+
+/// Pure formatter for the Phase 54.3 per-turn yolo-bypass notice (D-03, D-09).
+///
+/// Delegates to [`ironhermes_core::YoloBypassSummary::short_line`] — the single
+/// shared formatter every surface consumes — so the CLI never builds its own
+/// count-and-tool-list string. `short_line()` already strips `\n`/`\r` and every
+/// other control character per field and caps the line at 200 chars, so the CLI
+/// inherits the stderr-discipline guarantee (no forged second line from a
+/// remote-supplied tool name) rather than re-deriving it.
+pub fn format_yolo_bypass_turn_notice(summary: &ironhermes_core::YoloBypassSummary) -> String {
+    summary.short_line()
+}
+
+#[cfg(test)]
+mod yolo_bypass_notice_tests {
+    use super::{format_yolo_bypass_notice, format_yolo_bypass_turn_notice};
+    use ironhermes_core::{YoloBypass, YoloBypassSummary};
+
+    /// Task 3 (D-04): the formatted notice names the tool and carries the
+    /// guardrail reason. This is the strongest assertion available for the CLI
+    /// surface (see `format_yolo_bypass_notice`'s doc) — it fails if the
+    /// override stops composing this content, though it cannot observe the
+    /// live stderr write itself.
+    ///
+    /// Phase 54.3: this covers the PER-CALL unscoped-fallback formatter, which
+    /// is retained unchanged. The per-turn contract is asserted by the sibling
+    /// tests below.
+    #[test]
+    fn notify_yolo_bypass_message_names_tool_and_reason() {
+        let msg = format_yolo_bypass_notice("execute_code", "dangerous pattern matched");
+        assert!(msg.contains("execute_code"), "must name the tool: {msg}");
+        assert!(
+            msg.contains("dangerous pattern matched"),
+            "must contain the guardrail reason: {msg}"
+        );
+    }
+
+    /// Phase 54.3 D-03/D-09: N bypasses in one turn render as ONE short line
+    /// carrying the aggregate count and the tool name.
+    #[test]
+    fn turn_notice_is_one_short_line_naming_count_and_tools() {
+        let reason = "command contains shell metacharacters — string-level matching cannot verify safety; approval required (D-09)";
+        let mut summary = YoloBypassSummary::single("sess", "cli-repl", "chat", "terminal", reason);
+        summary.items.push(YoloBypass {
+            tool: "terminal".to_string(),
+            reason: reason.to_string(),
+        });
+        let msg = format_yolo_bypass_turn_notice(&summary);
+        assert!(msg.contains('2'), "must carry the count: {msg}");
+        assert!(msg.contains("terminal"), "must name the tool: {msg}");
+        assert!(!msg.contains('\n'), "must be a single line: {msg:?}");
+        assert!(!msg.contains('\r'), "must be a single line: {msg:?}");
+        assert!(msg.chars().count() <= 200, "must be <= 200 chars: {msg}");
+    }
+
+    /// T-54.3-13: a remote-supplied MCP tool name carrying a newline must not be
+    /// able to forge a second notice line on stderr.
+    #[test]
+    fn turn_notice_strips_newlines_from_a_hostile_tool_name() {
+        let summary = YoloBypassSummary::single(
+            "sess",
+            "cli-repl",
+            "chat",
+            "terminal\nFAKE: yolo is off",
+            "reason\rwith carriage return",
+        );
+        let msg = format_yolo_bypass_turn_notice(&summary);
+        assert!(!msg.is_empty(), "must still produce a notice");
+        assert!(!msg.contains('\n'), "no embedded newline: {msg:?}");
+        assert!(!msg.contains('\r'), "no embedded carriage return: {msg:?}");
+        assert!(
+            !msg.lines().any(|l| l.trim_start().starts_with("FAKE:")),
+            "a forged line must not survive: {msg:?}"
+        );
+    }
+}
+
+/// Phase 57 plan 13 (D-21, T-57-68): a `CliApprovalGate` carries no yolo or DEFCON state and
+/// never approves by itself. Even with the session at the highest bypass level it passes
+/// `false` to `prompt_for_approval`, so on the non-TTY path it returns `Denied`.
+///
+/// The "no operator at a terminal" condition is pinned with the `test-support` TTY override
+/// rather than assumed from how the suite was launched.
+#[cfg(all(test, feature = "test-support"))]
+mod never_auto_approve_tests {
+    use super::*;
+    use ironhermes_core::config::DefconLevel;
+    use ironhermes_core::defcon::session_defcon;
+    use ironhermes_core::{ApprovalGate, ApprovalOutcome};
+
+    /// Resets the process-globals this test pins, including on a failed assertion.
+    struct Pins(&'static str);
+
+    impl Drop for Pins {
+        fn drop(&mut self) {
+            crate::io_gate::set_force_tty_for_test(None);
+            session_defcon().forget(self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_gate_never_auto_approves() {
+        let session = "s-cli-gate-never-auto";
+        let _pins = Pins(session);
+        session_defcon().set_session_level(session, DefconLevel::FIVE);
+        crate::io_gate::set_force_tty_for_test(Some(false));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gate = CliApprovalGate::from_shared(std::sync::Arc::new(ApprovalsStore::with_path(
+            dir.path().join("approvals.json"),
+        )));
+        let outcome = gate
+            .request_approval(
+                session,
+                "terminal",
+                "reason",
+                &serde_json::json!({ "command": "curl https://example.com" }),
+            )
+            .await;
+
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Denied,
+            "with no operator and the session at DEFCON 5, the gate must still deny: \
+             bypass is decided upstream, never here"
+        );
     }
 }
 
@@ -199,7 +367,8 @@ impl ironhermes_core::ApprovalGate for CliApprovalGate {
 /// - `tool`: the already-registered `terminal` tool (`AgentRuntime::terminal_tool_arc`).
 /// - `config`: the resolved config this turn is running under.
 /// - `session_id` / `surface` / `chat_id`: forwarded into the audit entry + prompt.
-/// - `yolo`: the CLI's effective yolo flag (`ironhermes_cli::resolve_yolo` output).
+/// - the bypass decision is NOT a parameter (Phase 57 D-21): `execute_gated_command` reads
+///   the session's live DEFCON level (`GatePolicy::for_session(&session_id)`) at each call.
 /// - `approvals`: a SINGLE `ApprovalsStore` loaded once by the caller and shared
 ///   for the lifetime of the process (WR-01, Phase 36.3.12 Plan 10) — NOT
 ///   reloaded inside the per-dispatch closure body. `ApprovalsStore::load()`
@@ -213,7 +382,6 @@ pub fn build_gated_terminal_intercept(
     session_id: String,
     surface: &'static str,
     chat_id: String,
-    yolo: bool,
     approvals: std::sync::Arc<ApprovalsStore>,
 ) -> ironhermes_tools::registry::InterceptHandler {
     std::sync::Arc::new(move |args: serde_json::Value| {
@@ -235,7 +403,7 @@ pub fn build_gated_terminal_intercept(
             // WR-01: use the process-lifetime store passed in by the caller — do
             // NOT call `ApprovalsStore::load()` here, which would rebuild an
             // empty `session` set on every dispatch (the exact bug this fixes).
-            let gate = CliApprovalGate::from_shared(approvals, yolo);
+            let gate = CliApprovalGate::from_shared(approvals);
             let is_remote_backend = config.terminal.backend == "ssh";
             let forward_env_nonempty = !config.terminal.forward_env.is_empty();
 
@@ -248,7 +416,9 @@ pub fn build_gated_terminal_intercept(
                 &session_id,
                 surface,
                 &chat_id,
-                yolo,
+                // D-09/D-21: the session's LIVE level and the booted sidecar, read when the call
+                // is decided — never a flag captured when this closure was built.
+                ironhermes_hooks::GatePolicy::for_session(&session_id),
                 is_remote_backend,
                 forward_env_nonempty,
                 || async move {
@@ -269,13 +439,34 @@ pub fn build_gated_terminal_intercept(
 
 /// Build a gated `execute_code` intercept handler for a local (CLI/TUI) surface.
 ///
-/// Mirrors [`build_gated_terminal_intercept`] but per D-11 passes an EMPTY opaque
-/// `classify_arg` (the Python source never reaches `DangerousCommandGuardrail`'s
-/// shell-syntax patterns) and always forwards `is_remote_backend=false` /
-/// `forward_env_nonempty=false` — the Python script still runs on the local
-/// `Sandbox`, never a remote backend, so there is nothing to force approval on
-/// beyond the guardrail's own (always-Allow, for an empty classify_arg) decision.
-/// Every resolution — including `background=true` calls — is still audited (D-08/D-12).
+/// Mirrors [`build_gated_terminal_intercept`] but per D-01 (Phase 54 Finding 1,
+/// **overturning D-11**) passes the caller's REAL Python source as `classify_arg` —
+/// `DangerousCommandGuardrail::check`'s `tool_name == "execute_code"` branch
+/// classifies it against `PYTHON_DANGEROUS_PATTERNS` + the evasion-marker arm,
+/// instead of the previous opaque `""` that made the branch permanently dead.
+/// D-11's premise (shell patterns don't apply to Python) was correct; its
+/// conclusion (classify nothing) was not. Always forwards
+/// `is_remote_backend=false` / `forward_env_nonempty=false` — the Python script
+/// still runs on the local `Sandbox`, never a remote backend. Every resolution —
+/// including `background=true` calls — is still audited (D-08/D-12).
+///
+/// **Operational consequence (state here for `docs/SECURITY.md`, plan 07):** under
+/// `yolo=false` on a surface with no interactive operator, a Python source matching
+/// [`PYTHON_DANGEROUS_PATTERNS`] or containing a [`PYTHON_EVASION_MARKERS`] entry is
+/// now DENIED where it previously ran unclassified. Under `yolo=true` it still runs
+/// (audited, per D-08/D-12) — this mirrors the posture `terminal` has had since
+/// Phase 36.3.12.
+///
+/// The resulting `raw_args = {"command": classify_arg}` (built inside
+/// `execute_gated_command`) carries real Python source into the audit entry, subject
+/// to `AuditConfig`'s existing redaction (`token`/`api_key`/`secret`/... substring
+/// match on JSON KEYS, not values — a `"command"` key is never itself redacted) and
+/// `max_args_bytes` truncation (default 2048 bytes, post-redaction, before the
+/// `…(truncated)` marker). No new redaction logic is added here.
+///
+/// Missing or non-string `code` in the incoming args coerces to an empty
+/// `classify_arg` rather than panicking — `ExecuteCodeTool::execute` already rejects
+/// that case downstream with its own error.
 ///
 /// `approvals`: see [`build_gated_terminal_intercept`]'s doc — a SINGLE
 /// process-lifetime `ApprovalsStore`, loaded once by the caller and shared
@@ -286,7 +477,6 @@ pub fn build_gated_execute_code_intercept(
     session_id: String,
     surface: &'static str,
     chat_id: String,
-    yolo: bool,
     approvals: std::sync::Arc<ApprovalsStore>,
 ) -> ironhermes_tools::registry::InterceptHandler {
     std::sync::Arc::new(move |args: serde_json::Value| {
@@ -301,20 +491,32 @@ pub fn build_gated_execute_code_intercept(
             );
             let audit_log = ironhermes_core::AuditLog::load(config.audit.clone());
             // WR-01: shared process-lifetime store — see build_gated_terminal_intercept.
-            let gate = CliApprovalGate::from_shared(approvals, yolo);
+            let gate = CliApprovalGate::from_shared(approvals);
+
+            // D-01 (overturns D-11): extract the real Python source so
+            // DangerousCommandGuardrail's execute_code branch can classify it.
+            // Missing/non-string `code` coerces to "" rather than panicking — the
+            // tool itself already rejects that case downstream.
+            let classify_arg = args
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
             let outcome = ironhermes_hooks::execute_gated_command(
                 "execute_code",
-                "", // D-11: opaque — Python source is not shell syntax
+                &classify_arg,
                 &guard,
                 Some(&gate),
                 &audit_log,
                 &session_id,
                 surface,
                 &chat_id,
-                yolo,
-                false, // D-11: execute_code never routes to a remote backend
-                false, // D-11: execute_code never forwards credentials cross-boundary
+                // D-09/D-21: the session's LIVE level and the booted sidecar, read when the call
+                // is decided — never a flag captured when this closure was built.
+                ironhermes_hooks::GatePolicy::for_session(&session_id),
+                false, // execute_code never routes to a remote backend
+                false, // execute_code never forwards credentials cross-boundary
                 || async move {
                     match tool {
                         Some(t) => t.execute(args).await,

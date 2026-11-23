@@ -66,7 +66,10 @@ fn tui_queue_pause_unpause() {
     install_pending_turn(&mut app);
     app.queue_paused.store(true, Ordering::SeqCst);
     clear_pending(&mut app);
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     assert_eq!(
         app.queue.len(&app.queue_key),
         2,
@@ -79,7 +82,10 @@ fn tui_queue_pause_unpause() {
 
     // Unpause + Finished cycle → drain pops one item.
     app.queue_paused.store(false, Ordering::SeqCst);
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     assert_eq!(
         app.queue.len(&app.queue_key),
         1,

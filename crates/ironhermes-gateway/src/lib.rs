@@ -21,6 +21,8 @@ pub mod multimodal;
 // receiver-end integration tests only (see `tests/notifier_spawn_gating.rs`).
 pub mod notifier_gating;
 pub mod pid;
+/// Phase 54.8 Plan 07 — D-04/D-05/D-06: supervised, self-healing Telegram poll loop.
+pub mod poll_supervisor;
 pub mod rate_limiter;
 pub mod runner;
 pub mod session;
@@ -28,6 +30,8 @@ pub mod session_queue; // Phase 36.17.1 — per-session FIFO queue (Python parit
 pub mod slack; // Phase 34 — D-11
 pub mod stream_consumer;
 pub mod telegram;
+pub mod tier2_loops; // Phase 58.2 D-15 — gateway-hosted Tier 2 memory schedulers
+pub mod turn_slot; // Phase 54.8 D-07 — runner-owned permit path with an absolute ceiling
 pub mod user_queue;
 
 /// RC-1 / REQ-37.2-01 / REQ-37.2-02: turn-end fallback delivery for live (gateway) turns.

@@ -21,6 +21,7 @@ use crate::context_compressor::{ContextCompressor, estimate_messages_tokens};
 use crate::context_engine::{ContextEngine, ContextStats};
 use crate::error_classifier::{
     FallbackRootCause, ProviderError, classify_llm_error_typed, describe_provider_chain_failure,
+    parse_context_overflow,
 };
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
@@ -250,12 +251,44 @@ pub struct AgentLoop {
     pressure_tracker: Option<Arc<PressureTracker>>,
     /// Session id for routing pressure + pre_compress events.
     session_id: Option<String>,
+    /// Phase 57 CR-02: the session whose live DEFCON level the security screen judges this
+    /// loop's tool calls at, when that differs from `session_id`. A delegate child sets it to
+    /// the delegating chat's session; every other loop leaves it `None`.
+    security_session_id: Option<String>,
     /// Phase 45: optional approval gate for MCP mutation guardrail async approval.
     /// None by default (fail-closed). Injected via `with_approval_gate` when the
     /// gateway wires the approval coordinator (plan 04).
     approval_gate: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>>,
     /// Total context window size (used for ratio = estimated / context_length).
     context_length: usize,
+    /// Phase 58.3.1 D-21: how much of the server's real token count our estimator
+    /// produces, in (0, 1]. Lowered after a context_length_exceeded rejection
+    /// proves the estimator low; reset to 1.0 at the start of each run.
+    estimate_scale: f32,
+    /// Phase 58.3.1 D-02: `agent.compact_profile` (auto | on | off).
+    compact_mode: ironhermes_core::config::CompactProfileMode,
+    /// Phase 58.3.1 D-02: this run sends the compact tool set and system prompt.
+    /// Re-decided at the start of every run; plan 08 reads it for D-05 / D-23.
+    compact_active: bool,
+    /// Phase 58.3.1 D-04: compact twin of `messages[0]`, substituted in the OUTGOING
+    /// request only (stored history keeps the full system message).
+    compact_system: Option<Arc<str>>,
+    /// Phase 58.3.1 D-23: reply budget sent as `max_tokens` on small windows / compact
+    /// runs; None (no key sent) on large windows. Recomputed whenever the window changes.
+    send_max_tokens: Option<usize>,
+    /// Phase 58.3.1 D-08: true while the single learn-compress-retry for a
+    /// rejected request is in flight; a second rejection then stops the turn.
+    context_retry_pending: bool,
+    /// Phase 58.3.1 D-07/D-22: the endpoint this loop's client talks to. When set,
+    /// the window is read through its tier evaluation (observed windows, per-model
+    /// override, global pin) instead of the fixed value from `with_context_length`.
+    window_endpoint: Option<ironhermes_core::provider::ResolvedEndpoint>,
+    /// Phase 58.3.1 D-12: the fallback client's endpoint; becomes `window_endpoint`
+    /// when the fallback activates.
+    fallback_window_endpoint: Option<ironhermes_core::provider::ResolvedEndpoint>,
+    /// Phase 58.3.1 D-08: the window the server last stated in a rejection, so the
+    /// "retry rejected" error names the number the server gave.
+    reported_window: Option<usize>,
     /// Runtime compression count passed into ContextStats (D-24 runaway guard).
     compression_count: usize,
     /// Plan 20-02: optional MemoryManager handle for post-turn prefetch warming.
@@ -425,8 +458,18 @@ impl AgentLoop {
             context_engine: None,
             pressure_tracker: None,
             session_id: None,
+            security_session_id: None,
             approval_gate: None,
             context_length: 128_000,
+            estimate_scale: 1.0,
+            compact_mode: Default::default(),
+            compact_active: false,
+            compact_system: None,
+            send_max_tokens: None,
+            context_retry_pending: false,
+            window_endpoint: None,
+            fallback_window_endpoint: None,
+            reported_window: None,
             compression_count: 0,
             memory_manager: None,
             memory_provider_tool_names: std::collections::HashSet::new(),
@@ -526,6 +569,13 @@ impl AgentLoop {
         self
     }
 
+    /// Phase 58.3.1: set the model window the pre-send fit guard sizes requests
+    /// against. Works on a loop with no context engine or compressor attached.
+    pub fn with_context_length(mut self, context_length: usize) -> Self {
+        self.context_length = context_length;
+        self
+    }
+
     /// Phase 18 Plan 06: attach a pressure tracker for transient message drain.
     pub fn with_pressure_tracker(mut self, tracker: Arc<PressureTracker>) -> Self {
         self.pressure_tracker = Some(tracker);
@@ -535,6 +585,18 @@ impl AgentLoop {
     /// Phase 18 Plan 06: session id for transient drain + pre_compress routing.
     pub fn with_session_id(mut self, sid: impl Into<String>) -> Self {
         self.session_id = Some(sid.into());
+        self
+    }
+
+    /// Phase 57 CR-02 (D-09 / D-15): the session whose live DEFCON level the security screen
+    /// judges this loop's tool calls at, and whose id its audit rows carry.
+    ///
+    /// A delegate child sets this to the delegating chat's session, so a chat's `/yolo <N>`
+    /// governs its children even when the child's own [`Self::with_session_id`] is a shared
+    /// runtime's transcript label (`gateway`, `web-ui`). Every other loop leaves it unset and
+    /// is judged under its own session id.
+    pub fn with_security_session_id(mut self, sid: impl Into<String>) -> Self {
+        self.security_session_id = Some(sid.into());
         self
     }
 
@@ -624,6 +686,71 @@ impl AgentLoop {
             Some(s) => s.to_string(),
             None => format!("__no_session__{}", self.bb_run_id),
         }
+    }
+
+    /// Phase 57 CR-02: the session id the security screen reads its DEFCON level from and
+    /// attributes audit rows to. `security_session_id` when a delegate child was given one,
+    /// else [`Self::resolved_session_id`], so a parent loop's screening is unchanged.
+    ///
+    /// Only the LEVEL lookup and audit attribution use this. The dispatch id
+    /// (`resolved_session_id`) still keys intercepts and the approval bucket.
+    fn screen_session_id(&self) -> String {
+        match self.security_session_id.as_deref() {
+            Some(s) => s.to_string(),
+            None => self.resolved_session_id(),
+        }
+    }
+
+    /// Phase 57 Plan 09 (D-07 / D-21): resolve a security-screen `Warn` for one call.
+    ///
+    /// Returns `None` when the call may run and `Some(text)` (the tool result to hand the
+    /// model) when it must not. At a bypass-active level (DEFCON 4-5, read live for this
+    /// session) a bypassable Warn runs as an audited bypass; otherwise the turn's approval
+    /// gate is asked, and with no gate wired the call fails closed. Either way the outcome is
+    /// recorded through the screen. A Block never reaches this function: it is matched
+    /// before, in its own arm.
+    async fn resolve_screen_warn(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        reason: &str,
+        bypassable: bool,
+    ) -> Option<String> {
+        // The approval bucket stays on the dispatch id; the level read and the audit rows use
+        // the screen session (the delegating chat for a delegate child, CR-02).
+        let sid = self.resolved_session_id();
+        let screen_sid = self.screen_session_id();
+        let gate = self.approval_gate.as_deref();
+        if bypassable && ironhermes_hooks::screen::session_level(&screen_sid).yolo_bypass_active() {
+            self.registry
+                .read()
+                .await
+                .record_screen_resolution(
+                    name,
+                    args,
+                    &screen_sid,
+                    gate,
+                    "allowed",
+                    "bypass",
+                    reason,
+                )
+                .await;
+            return None;
+        }
+        let outcome = match self.approval_gate.as_ref() {
+            Some(g) => g.request_approval(&sid, name, reason, args).await,
+            None => ironhermes_core::ApprovalOutcome::GateUnavailable,
+        };
+        let (decision, resolution) = approval_resolution(&outcome);
+        self.registry
+            .read()
+            .await
+            .record_screen_resolution(name, args, &screen_sid, gate, decision, resolution, reason)
+            .await;
+        // Approved -> None. Every other outcome (Denied, TimedOut, AlreadyPending,
+        // GateUnavailable) fails closed with text saying who refused and forbidding a
+        // workaround (G-1).
+        ironhermes_hooks::refusal::approval_refusal_text(name, &outcome)
     }
     pub fn context_engine_threshold(&self) -> Option<f32> {
         self.context_engine.as_ref().map(|e| e.threshold())
@@ -929,6 +1056,76 @@ impl AgentLoop {
         self.fallback_client = Some(client);
         self.fallback_provider_name = Some(provider_name.into());
         self
+    }
+
+    /// Phase 58.3.1 D-07/D-09/D-22: attach the endpoint this loop's client talks to.
+    /// The window is then read through the endpoint's tier evaluation, so an observed
+    /// (probed/learned) window and the per-model/global-pin precedence apply.
+    pub fn with_window_endpoint(mut self, ep: ironhermes_core::provider::ResolvedEndpoint) -> Self {
+        self.context_length = ep.context_length();
+        self.window_endpoint = Some(ep);
+        self
+    }
+
+    /// Phase 58.3.1 D-12: the endpoint of the fallback client; its window replaces the
+    /// primary's (and the request is re-fitted) when the fallback activates.
+    pub fn with_fallback_window_endpoint(
+        mut self,
+        ep: ironhermes_core::provider::ResolvedEndpoint,
+    ) -> Self {
+        self.fallback_window_endpoint = Some(ep);
+        self
+    }
+
+    /// Phase 58.3.1 D-02: the `agent.compact_profile` force switch (default `auto`).
+    pub fn with_compact_profile_mode(
+        mut self,
+        mode: ironhermes_core::config::CompactProfileMode,
+    ) -> Self {
+        self.compact_mode = mode;
+        self
+    }
+
+    /// Phase 58.3.1 D-04: the messages as sent. With the compact profile active the
+    /// leading system message is swapped for its compact twin; otherwise borrowed as is.
+    fn outgoing<'a>(&self, messages: &'a [ChatMessage]) -> std::borrow::Cow<'a, [ChatMessage]> {
+        match (&self.compact_system, messages.first()) {
+            (Some(compact), Some(first)) if first.role == ironhermes_core::Role::System => {
+                let mut v = messages.to_vec();
+                v[0] = ChatMessage::system(compact.to_string());
+                std::borrow::Cow::Owned(v)
+            }
+            _ => std::borrow::Cow::Borrowed(messages),
+        }
+    }
+
+    /// Re-read the window from the attached endpoint's tier evaluation. No-op without one.
+    fn refresh_context_window(&mut self) {
+        if let Some(ep) = self.window_endpoint.as_ref() {
+            let (window, source) = ep.context_length_with_source();
+            self.context_length = window;
+            debug!(window, source = source.label(), "context window resolved");
+        }
+        self.update_send_max_tokens();
+    }
+
+    /// G-58.3.1-8: true when the model server itself reported the current window
+    /// (a parsed rejection, a probe, or a learned value), so a refusal must point at
+    /// the server rather than at an ironhermes override.
+    fn window_from_server(&self) -> bool {
+        use ironhermes_core::provider::ContextLengthSource::{Learned, Probed};
+        self.reported_window.is_some()
+            || self
+                .window_endpoint
+                .as_ref()
+                .is_some_and(|ep| matches!(ep.context_length_with_source().1, Probed | Learned))
+    }
+
+    /// Phase 58.3.1 D-23: small-window / compact runs send the reserved reply size.
+    fn update_send_max_tokens(&mut self) {
+        self.send_max_tokens = (self.compact_active
+            || self.context_length <= crate::fit::SMALL_WINDOW_TOKENS)
+            .then(|| crate::fit::reply_reserve(self.context_length));
     }
 
     /// Phase 22.4 — minimal test-only constructor for tui_rata snapshot tests.
@@ -1492,6 +1689,91 @@ impl AgentLoop {
         }
     }
 
+    /// Phase 58.3.1 D-14/D-16/D-01: make the request fit the model window or refuse.
+    ///
+    /// Counts messages + tool schemas + reply reserve + margin with the single
+    /// estimator. When it does not fit: refuse if even the fixed floor (system
+    /// prompt + tools) cannot fit, otherwise run up to 3 forced compaction passes
+    /// (each through `LocalPruningEngine`, which shifts tool pairs and rolls back
+    /// on an orphan). Never depends on `self.context_engine` / `self.compressor`
+    /// (D-09: cron and subagent loops attach neither). Guard passes do not touch
+    /// `compression_count`, which belongs to the per-session engine cap.
+    async fn fit_request_to_window(
+        &mut self,
+        messages: &mut Vec<ChatMessage>,
+        tool_tokens: usize,
+    ) -> Result<(), crate::fit::ContextWindowError> {
+        use crate::fit::{self, ContextWindowError};
+
+        let window = self.context_length;
+        let scale = self.estimate_scale;
+        // Every count is over what is really sent (compact system text when active).
+        let before = fit::prompt_tokens(&self.outgoing(messages), tool_tokens);
+        if fit::fits(before, window, scale) {
+            return Ok(());
+        }
+
+        let prefix = ContextCompressor::system_prefix_len(messages);
+        let floor_prompt =
+            estimate_messages_tokens(&self.outgoing(messages)[..prefix]) + tool_tokens;
+        if !fit::fits(floor_prompt, window, scale) {
+            let floor = fit::floor_tokens(floor_prompt, window);
+            warn!(
+                window,
+                floor, "request refused: fixed prompt floor exceeds the window"
+            );
+            return Err(ContextWindowError::PromptFloorTooLarge {
+                window,
+                floor,
+                reserve: fit::reply_reserve(window),
+                from_server: self.window_from_server(),
+            });
+        }
+
+        for pass in 1..=fit::MAX_COMPACTION_PASSES_PER_REQUEST {
+            // Never protect less than the last message: it carries the user's turn.
+            let last_tokens = messages
+                .last()
+                .map(crate::context_compressor::estimate_message_tokens)
+                .unwrap_or(0);
+            let protect_last = fit::guard_protect_last(window, tool_tokens, pass).max(last_tokens);
+            let engine = crate::context_engine::LocalPruningEngine::new(window, 0.0)
+                .with_protect(3, protect_last);
+            let stats = ContextStats {
+                context_length: window,
+                estimated_tokens: estimate_messages_tokens(messages),
+                protect_first_n: 3,
+                protect_last_tokens: protect_last,
+                compression_count: self.compression_count,
+                prior_summary: None,
+            };
+            let pass_before = fit::prompt_tokens(&self.outgoing(messages), tool_tokens);
+            if let Err(e) = engine.compress(messages, stats).await {
+                // compress rolled `messages` back; the next pass protects less.
+                warn!(error = ?e, window, pass, "fit guard: compaction pass failed");
+            }
+            let pass_after = fit::prompt_tokens(&self.outgoing(messages), tool_tokens);
+            info!(
+                window,
+                pass, pass_before, pass_after, "fit guard: compaction pass"
+            );
+            if fit::fits(pass_after, window, scale) {
+                return Ok(());
+            }
+        }
+
+        let request = fit::prompt_tokens(&self.outgoing(messages), tool_tokens);
+        warn!(
+            window,
+            request, "request refused: does not fit after compaction passes"
+        );
+        Err(ContextWindowError::RequestTooLarge {
+            window,
+            request,
+            from_server: self.window_from_server(),
+        })
+    }
+
     /// Fire a hook event fire-and-forget. No-op if no hook registry is configured.
     fn fire_hook(&self, kind: HookEventKind) {
         if let Some(ref registry) = self.hook_registry {
@@ -1506,7 +1788,18 @@ impl AgentLoop {
     /// - The LLM produces a response with no tool calls (natural completion)
     /// - Max iterations are reached
     /// - An unrecoverable error occurs
-    pub async fn run(&mut self, mut messages: Vec<ChatMessage>) -> Result<AgentResult> {
+    ///
+    /// Phase 57 CR-02: the whole run is scoped with this loop's screen session as the
+    /// delegating session, so every `delegate_task` child the run starts judges its tool
+    /// calls at this loop's live DEFCON level. See
+    /// `ironhermes_hooks::screen::delegating_session`.
+    pub async fn run(&mut self, messages: Vec<ChatMessage>) -> Result<AgentResult> {
+        let screen_sid = self.screen_session_id();
+        ironhermes_hooks::screen::with_delegating_session(screen_sid, self.run_inner(messages))
+            .await
+    }
+
+    async fn run_inner(&mut self, mut messages: Vec<ChatMessage>) -> Result<AgentResult> {
         let mut tool_schemas = self.registry.read().await.get_definitions(None);
         // Phase 25 D-14: session_search schema flows through registry.get_definitions()
         // because register_intercepted("session_search", ...) was called in with_intercepts().
@@ -1522,11 +1815,61 @@ impl AgentLoop {
             }
             tool_schemas.extend(schemas);
         }
+        self.estimate_scale = 1.0;
+        self.context_retry_pending = false;
+        self.reported_window = None;
+        // D-10/D-12: idempotent per key (run_turn already probed); covers cron and subagent loops.
+        if let Some(ep) = self.window_endpoint.clone() {
+            ironhermes_core::observed_windows::probe_once(&ep).await;
+        }
+        // Picks up anything observed (probed/learned) since construction.
+        self.refresh_context_window();
+
+        // Phase 58.3.1 D-02/D-03/D-04: the compact profile switches on when the FULL
+        // floor (system prompt + every tool schema, one D-16 estimator) exceeds half
+        // the window. Decided once per run, after the window is final.
+        self.compact_active = false;
+        self.compact_system = None;
+        let system_prefix = ContextCompressor::system_prefix_len(&messages);
+        let full_floor = estimate_messages_tokens(&messages[..system_prefix])
+            + crate::fit::tool_schema_tokens(&tool_schemas);
+        if crate::fit::compact_profile_wanted(full_floor, self.context_length, self.compact_mode) {
+            self.compact_active = true;
+            // D-03: built-in `memory` stays; memory-provider extras are dropped.
+            tool_schemas = self
+                .registry
+                .read()
+                .await
+                .get_definitions(Some(&crate::fit::compact_tool_allowlist()));
+            self.compact_system = messages
+                .first()
+                .filter(|m| m.role == ironhermes_core::Role::System)
+                .and_then(|m| m.content_text())
+                .and_then(crate::prompt_builder::compact_prompt_for);
+            if self.compact_system.is_none() {
+                // The compact tool set stays: falling back would re-add every tool at a
+                // window the D-02 trigger already judged too small.
+                warn!(
+                    window = self.context_length,
+                    "compact profile: no compact twin for this system prompt, sending it in full with the compact tool set"
+                );
+            }
+            info!(
+                window = self.context_length,
+                full_floor,
+                compact_tools = tool_schemas.len(),
+                "compact profile on"
+            );
+        }
+        self.update_send_max_tokens();
         let tools_option = if tool_schemas.is_empty() {
             None
         } else {
             Some(tool_schemas)
         };
+        // Phase 58.3.1 D-16: tool schemas count against the window; sized once per run,
+        // from the schemas actually sent.
+        let tool_tokens = crate::fit::tool_schema_tokens(tools_option.as_deref().unwrap_or(&[]));
 
         let mut turns_used = 0;
         let mut total_usage = AggregatedUsage::default();
@@ -1780,6 +2123,14 @@ impl AgentLoop {
                 messages.push(ChatMessage::system(advisory));
             }
 
+            // Phase 58.3.1 D-14/D-16: size the request to the window (or refuse)
+            // after every message mutation of this iteration. Err surfaces through
+            // each surface's existing agent-error path.
+            self.context_retry_pending = false;
+            self.fit_request_to_window(&mut messages, tool_tokens)
+                .await
+                .map_err(anyhow::Error::new)?;
+
             // Phase 32.1 Plan 02 Task 2: bump activity tracker before every LLM API call.
             // Placed here (outside the retry loop) so the tracker updates on the initial
             // attempt and each retry — any of which may be the last visible activity before
@@ -1800,9 +2151,9 @@ impl AgentLoop {
                     tokio::select! {
                         result = async {
                             if self.streaming {
-                                self.call_llm_streaming(&messages, tools_option.as_deref()).await
+                                self.call_llm_streaming(&self.outgoing(&messages), tools_option.as_deref()).await
                             } else {
-                                self.call_llm(&messages, tools_option.as_deref()).await
+                                self.call_llm(&self.outgoing(&messages), tools_option.as_deref()).await
                             }
                         } => result,
                         _ = token.cancelled() => {
@@ -1821,10 +2172,11 @@ impl AgentLoop {
                         }
                     }
                 } else if self.streaming {
-                    self.call_llm_streaming(&messages, tools_option.as_deref())
+                    self.call_llm_streaming(&self.outgoing(&messages), tools_option.as_deref())
                         .await
                 } else {
-                    self.call_llm(&messages, tools_option.as_deref()).await
+                    self.call_llm(&self.outgoing(&messages), tools_option.as_deref())
+                        .await
                 };
 
                 match llm_result {
@@ -1838,6 +2190,7 @@ impl AgentLoop {
                         // channel), and update the context_compressor's
                         // full-fidelity per-turn counters.
                         self.write_usage_success(&result.1);
+                        self.context_retry_pending = false;
                         break result;
                     }
                     Err(err) => {
@@ -1858,6 +2211,70 @@ impl AgentLoop {
                         // design: write failure is logged but never aborts
                         // the turn.
                         self.write_usage_failure(&provider_error);
+
+                        // Phase 58.3.1 D-06/D-08/D-21: a context_length_exceeded
+                        // rejection is a window problem, not a provider problem. It is
+                        // handled BEFORE the fallback branch (never fails over to a
+                        // possibly paid provider, Pitfall 9) and retried exactly once:
+                        // learn the window from the error text, compress to fit, resend.
+                        if matches!(provider_error, ProviderError::ContextLength) {
+                            if self.context_retry_pending {
+                                return Err(anyhow::Error::new(
+                                    crate::fit::ContextWindowError::RetryRejected {
+                                        window: self.reported_window.unwrap_or(self.context_length),
+                                        from_server: self.window_from_server(),
+                                    },
+                                ));
+                            }
+                            let overflow = parse_context_overflow(&format!("{err:#}"));
+                            let rejected_prompt =
+                                crate::fit::prompt_tokens(&self.outgoing(&messages), tool_tokens);
+                            let previous_window = self.context_length;
+                            self.reported_window = overflow.window;
+                            // D-07/D-22: persist a smaller learned window against the
+                            // endpoint that rejected, then let the tier order decide
+                            // (a per-model override still resolves; the pin is a ceiling).
+                            if let (Some(ep), Some(w)) =
+                                (self.window_endpoint.as_ref(), overflow.window)
+                                && w < previous_window
+                            {
+                                ironhermes_core::observed_windows::record(
+                                    &ep.base_url,
+                                    &ep.default_model,
+                                    w,
+                                    ironhermes_core::observed_windows::ObservedWindowSource::Learned,
+                                );
+                                self.refresh_context_window();
+                                if self.context_length > w {
+                                    warn!(
+                                        provider = %self.provider_name,
+                                        model = %self.window_endpoint.as_ref().map(|e| e.default_model.as_str()).unwrap_or(""),
+                                        configured = self.context_length,
+                                        server_reported = w,
+                                        "providers.<provider>.models.<model>.context_length exceeds the server-reported window"
+                                    );
+                                }
+                            }
+                            // D-06: this one retry is sized for the server-reported window
+                            // even when an override resolves larger.
+                            self.context_length = self
+                                .context_length
+                                .min(crate::fit::retry_window(previous_window, overflow));
+                            self.estimate_scale = self
+                                .estimate_scale
+                                .min(crate::fit::estimate_scale_from(rejected_prompt, overflow));
+                            warn!(
+                                window = self.context_length,
+                                requested = ?overflow.requested,
+                                estimate_scale = self.estimate_scale,
+                                "context_length_exceeded: learned window, compressing and retrying once"
+                            );
+                            self.fit_request_to_window(&mut messages, tool_tokens)
+                                .await
+                                .map_err(anyhow::Error::new)?;
+                            self.context_retry_pending = true;
+                            continue;
+                        }
 
                         // Try fallback if available and not already activated (PROV-07, D-11)
                         if should_fallback
@@ -1891,6 +2308,21 @@ impl AgentLoop {
                                 self.provider_name = name;
                             }
                             self.fallback_activated = true;
+                            // Phase 58.3.1 D-12: the fallback has its own window; re-clamp
+                            // the request to it before it is ever sent there.
+                            if let Some(ep) = self.fallback_window_endpoint.take() {
+                                self.window_endpoint = Some(ep);
+                                self.refresh_context_window();
+                                self.estimate_scale = 1.0;
+                                self.reported_window = None;
+                                info!(
+                                    window = self.context_length,
+                                    "fallback activated: re-fitting request to the fallback window"
+                                );
+                                self.fit_request_to_window(&mut messages, tool_tokens)
+                                    .await
+                                    .map_err(anyhow::Error::new)?;
+                            }
                             // Quick task 260819-rkz (RKZ-A), CORRECTED premise 11:
                             // the fallback branch is evaluated BEFORE the retry
                             // branch, so retry_count is already 0 on a turn's
@@ -2068,13 +2500,35 @@ impl AgentLoop {
         // TUI / gateway / web UI) render them on the same out-of-band channel
         // Phase 34b shipped. The drain is per-session (keyed by session_id)
         // so concurrent AgentLoops on different sessions never cross-pollute.
-        let cache_break_warnings: Vec<String> = if let (Some(tracker), Some(sid)) =
+        let mut cache_break_warnings: Vec<String> = if let (Some(tracker), Some(sid)) =
             (self.pressure_tracker.as_ref(), self.session_id.as_deref())
         {
             tracker.drain_cache_break_warnings(sid)
         } else {
             Vec::new()
         };
+        // Phase 58.3.1 D-05: tell the user once per session that the compact profile
+        // is on. Single-run loops (no tracker / session id, e.g. cron) always show it.
+        if self.compact_active
+            && match (self.pressure_tracker.as_ref(), self.session_id.as_deref()) {
+                (Some(tracker), Some(sid)) => tracker.mark_compact_notice(sid),
+                _ => true,
+            }
+        {
+            let notice = if self.compact_system.is_some() {
+                format!(
+                    "Small context window ({} tokens): this session uses the compact profile — the skills index and every tool except terminal, read_file, write_file, patch, memory, web_search and web_read are dropped, and context files are shortened.",
+                    self.context_length
+                )
+            } else {
+                format!(
+                    "Small context window ({} tokens): this session uses the compact profile — every tool except terminal, read_file, write_file, patch, memory, web_search and web_read is dropped; the system prompt is sent in full because this surface did not build a compact version.",
+                    self.context_length
+                )
+            };
+            info!(window = self.context_length, "compact profile notice shown");
+            cache_break_warnings.insert(0, notice);
+        }
         Ok(AgentResult {
             messages,
             appended,
@@ -2115,7 +2569,7 @@ impl AgentLoop {
                 messages,
                 tools,
                 None,
-                None,
+                self.send_max_tokens,
                 None,
                 self.resolved_extras.clone(),
             )
@@ -2188,7 +2642,7 @@ impl AgentLoop {
                 messages,
                 tools,
                 None,
-                None,
+                self.send_max_tokens,
                 None,
                 self.resolved_extras.clone(),
             )
@@ -2613,7 +3067,53 @@ impl AgentLoop {
         }
 
         // D-05 Step 1: check guardrails WITHOUT executing the tool.
-        let decision = self.registry.read().await.check_guardrails(name, &args);
+        let guard_decision = self.registry.read().await.check_guardrails(name, &args);
+
+        // Phase 57 Plan 09 (SC-1 / D-15): the async security screen, right after the sync
+        // guardrail chain. A call the guardrails already Block is not screened again. The
+        // screen skips `terminal` / `execute_code` when a gated intercept owns them for this
+        // session, so every call is screened exactly once.
+        let screened = if matches!(guard_decision, GuardrailDecision::Block { .. }) {
+            ironhermes_hooks::ScreenDecision::Skip
+        } else {
+            // CR-02: the intercept-presence key is the dispatch id; the level key is the
+            // screen session (the delegating chat, for a delegate child).
+            let sid = self.resolved_session_id();
+            let screen_sid = self.screen_session_id();
+            self.registry
+                .read()
+                .await
+                .screen_call_for(
+                    name,
+                    &args,
+                    &sid,
+                    &screen_sid,
+                    self.approval_gate.as_deref(),
+                )
+                .await
+        };
+        // Fold, strictest first: Block > NeedsApproval > Warn > Allow. A screen Block is a
+        // Block, whatever the guardrails said.
+        let mut blocked_by_screen = false;
+        // A screen Warn the guardrails did not already park: `(reason, bypassable)`.
+        let mut screen_warn: Option<(String, bool)> = None;
+        let decision = match (guard_decision, screened) {
+            (blocked @ GuardrailDecision::Block { .. }, _) => blocked,
+            (_, ironhermes_hooks::ScreenDecision::Block { reason, .. }) => {
+                blocked_by_screen = true;
+                GuardrailDecision::Block { reason }
+            }
+            (
+                other,
+                ironhermes_hooks::ScreenDecision::Warn {
+                    reason, bypassable, ..
+                },
+            ) => {
+                screen_warn = Some((reason, bypassable));
+                other
+            }
+            (other, _) => other,
+        };
 
         match decision {
             GuardrailDecision::Block { reason } => {
@@ -2622,10 +3122,15 @@ impl AgentLoop {
                 // block error respects ErrorDetailLevel and looks identical to the
                 // pre-07.4 tool_result string that the LLM sees.
                 let err_detail = self.registry.read().await.guardrail_error_detail().clone();
+                let block_source = if blocked_by_screen {
+                    "security-screen"
+                } else {
+                    "guardrail"
+                };
                 let err_msg = ironhermes_hooks::format_guardrail_error(
                     name,
                     &reason,
-                    "guardrail",
+                    block_source,
                     &err_detail,
                 );
                 warn!(tool = %name, "Tool blocked by guardrail: {}", err_msg);
@@ -2652,7 +3157,7 @@ impl AgentLoop {
                             "tool_name": name,
                             "call_id": &tool_call.id,
                             "success": false,
-                            "blocked_by": "guardrail",
+                            "blocked_by": if blocked_by_screen { "security_screen" } else { "guardrail" },
                             "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
                         }),
                     ));
@@ -2677,6 +3182,24 @@ impl AgentLoop {
                 } else {
                     ironhermes_core::ApprovalOutcome::GateUnavailable
                 };
+                // Phase 57 Plan 09: a screen Warn that rode along with this approval is
+                // resolved by the same answer, and recorded (D-07 / D-21).
+                if let Some((warn_reason, _)) = screen_warn.as_ref() {
+                    let (decision, resolution) = approval_resolution(&outcome);
+                    self.registry
+                        .read()
+                        .await
+                        .record_screen_resolution(
+                            name,
+                            &args,
+                            &self.screen_session_id(),
+                            self.approval_gate.as_deref(),
+                            decision,
+                            resolution,
+                            warn_reason,
+                        )
+                        .await;
+                }
                 match outcome {
                     ironhermes_core::ApprovalOutcome::Approved => {
                         // HI-02 / F3 fix: fire ToolCalled, then execute via the shared
@@ -2695,18 +3218,29 @@ impl AgentLoop {
                         self.execute_allowed_tool(name, args.clone(), &tool_call.id, bb_tool_start)
                             .await
                     }
-                    ironhermes_core::ApprovalOutcome::AlreadyPending => {
-                        "An approval is already pending for this session — resolve it \
-                         before issuing additional tool calls."
-                            .to_string()
-                    }
-                    _ => {
-                        // Denied | TimedOut | GateUnavailable — fail-closed (D-11, T-45-05)
-                        "Tool was not approved and did not execute.".to_string()
+                    other => {
+                        // Denied | TimedOut | AlreadyPending | GateUnavailable — fail-closed
+                        // (D-11, T-45-05). The text names who refused and forbids a
+                        // workaround (G-1). Approved is matched above, so this is always
+                        // Some; the default only avoids a panic path.
+                        ironhermes_hooks::refusal::approval_refusal_text(name, &other)
+                            .unwrap_or_default()
                     }
                 }
             }
             GuardrailDecision::Allow | GuardrailDecision::Warn { .. } => {
+                // Phase 57 Plan 09 (D-07 / D-21): a screen Warn runs only as an audited
+                // bypass at DEFCON 4-5, otherwise it needs the operator's approval; with no
+                // gate wired it fails closed. A call that is not allowed to run returns here,
+                // before ToolCalled fires, like the NeedsApproval arm's refusals.
+                if let Some((warn_reason, may_bypass)) = screen_warn.as_ref()
+                    && let Some(refusal) = self
+                        .resolve_screen_warn(name, &args, warn_reason, *may_bypass)
+                        .await
+                {
+                    return refusal;
+                }
+
                 // D-05 Step 3: fire ToolCalled FIRST (this is the post-fix ordering).
                 // D-08: Warn counts as Allow for event firing — do not skip ToolCalled.
                 self.fire_hook(HookEventKind::ToolCalled {
@@ -2959,6 +3493,19 @@ impl AgentLoop {
                     .await
             }
         }
+    }
+}
+
+/// Phase 57 Plan 09: the `(decision, resolution)` words an approval outcome is recorded as,
+/// the same vocabulary `execute_gated_command` writes for a gated call.
+fn approval_resolution(outcome: &ironhermes_core::ApprovalOutcome) -> (&'static str, &'static str) {
+    use ironhermes_core::ApprovalOutcome;
+    match outcome {
+        ApprovalOutcome::Approved => ("approved", "operator"),
+        ApprovalOutcome::Denied => ("denied", "operator"),
+        ApprovalOutcome::TimedOut => ("denied", "timeout"),
+        ApprovalOutcome::AlreadyPending => ("denied", "already_pending"),
+        ApprovalOutcome::GateUnavailable => ("denied", "gate_unavailable"),
     }
 }
 

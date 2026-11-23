@@ -228,8 +228,101 @@ async fn exa_answer_captures_grounding_and_cost() {
         .await
         .expect("exa answer must succeed");
 
-    assert_eq!(outcome.citations, vec!["https://rust-lang.org/".to_string()]);
+    assert_eq!(
+        outcome.citations,
+        vec!["https://rust-lang.org/".to_string()]
+    );
     assert_eq!(outcome.cost_dollars, Some(0.01));
+}
+
+/// Debug session web-extract-hangs-60s (round 2): production `web_answer` logged
+/// `exa failed: Exa answer response carried no output` for every query.
+///
+/// Exa's published OpenAPI contract (`POST /search`, exa.ai/docs/reference/search):
+///   * the top-level `output` object is returned ONLY when the request supplies
+///     `outputSchema` (or uses a `deep*` search type) — a plain `type:"auto"` +
+///     `contents.summary` request gets `results[]` and NO `output`;
+///   * `output.grounding[].citations[]` are `{url, title}` OBJECTS, not strings.
+///
+/// The earlier fixtures (above) were derived from the plan, not the live API, and
+/// encoded both wrong assumptions, so the suite stayed green while prod failed.
+/// This mock models the real server: it only synthesizes `output` when the request
+/// asks for it, and it answers with the documented object-shaped citations.
+#[tokio::test]
+async fn exa_answer_requests_synthesized_text_output_and_parses_documented_citations() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    // Synthesis only when the request carries `outputSchema: {type: "text"}`.
+    Mock::given(method("POST"))
+        .and(body_partial_json(
+            json!({"outputSchema": {"type": "text"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"requestId":"r1","results":[{"title":"Example","url":"https://example.com/a"}],"output":{"content":"Rust is a systems programming language.","grounding":[{"field":"content","citations":[{"url":"https://rust-lang.org/","title":"Rust"},{"url":"https://example.com/a","title":"Example"}],"confidence":"high"}]},"costDollars":{"total":0.012}}"#,
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    // Anything else (no outputSchema) gets what real Exa returns: results, no `output`.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"requestId":"r2","results":[{"title":"Example","url":"https://example.com/a","summary":"s"}],"costDollars":{"total":0.007}}"#,
+        ))
+        .with_priority(5)
+        .mount(&server)
+        .await;
+
+    let _ee = EnvGuard::set("EXA_ANSWER_ENDPOINT_OVERRIDE", &server.uri());
+
+    let api_key = SecretString::from("exa-answer-contract-key".to_string());
+    let outcome = exa::answer("what is rust", &api_key).await.expect(
+        "exa answer must request a synthesized text output and decode the documented \
+         object-shaped citations (production failure: `Exa answer response carried no output`)",
+    );
+
+    assert_eq!(outcome.text, "Rust is a systems programming language.");
+    assert_eq!(
+        outcome.citations,
+        vec![
+            "https://rust-lang.org/".to_string(),
+            "https://example.com/a".to_string()
+        ],
+        "citation URLs must be flattened from the documented {{url,title}} objects"
+    );
+    assert_eq!(outcome.cost_dollars, Some(0.012));
+}
+
+/// Boundary neighbour: a citation entry of an unrecognised shape must not sink an
+/// otherwise-good answer (the answer text is the product; citations are decoration).
+#[tokio::test]
+async fn exa_answer_tolerates_unrecognised_citation_entries() {
+    let _g = env_lock().lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"output":{"content":"Still an answer.","grounding":[{"citations":["https://a.example/",{"url":"https://b.example/","title":"B"},42,{"title":"no url"}]}]}}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let _ee = EnvGuard::set("EXA_ANSWER_ENDPOINT_OVERRIDE", &server.uri());
+
+    let api_key = SecretString::from("exa-answer-tolerance-key".to_string());
+    let outcome = exa::answer("q", &api_key)
+        .await
+        .expect("an odd citation entry must not fail the whole answer");
+
+    assert_eq!(outcome.text, "Still an answer.");
+    assert_eq!(
+        outcome.citations,
+        vec![
+            "https://a.example/".to_string(),
+            "https://b.example/".to_string()
+        ],
+        "string and {{url}} object entries are kept; unrecognised entries are skipped"
+    );
 }
 
 /// Asserts the Brave-specific `X-Subscription-Token` header is present AND
@@ -326,16 +419,20 @@ async fn chain_falls_through_from_an_erroring_provider_to_the_next() {
 
     let exa_server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            r#"{"output":{"content":"Exa Fallback Answer.","grounding":[]}}"#,
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"output":{"content":"Exa Fallback Answer.","grounding":[]}}"#),
+        )
         .expect(1)
         .mount(&exa_server)
         .await;
 
     let _pe = EnvGuard::set("PERPLEXITY_ENDPOINT_OVERRIDE", &perplexity_server.uri());
     let _ee = EnvGuard::set("EXA_ANSWER_ENDPOINT_OVERRIDE", &exa_server.uri());
-    let _pk = EnvGuard::set("PERPLEXITY_API_KEY", "plan08-chain-fallthrough-perplexity-key");
+    let _pk = EnvGuard::set(
+        "PERPLEXITY_API_KEY",
+        "plan08-chain-fallthrough-perplexity-key",
+    );
     let _ek = EnvGuard::set("EXA_API_KEY", "plan08-chain-fallthrough-exa-key");
 
     let (_cfg_tmp, _home) = write_web_answer_config(&["perplexity", "exa"], &[]);
@@ -406,9 +503,10 @@ async fn an_unconfigured_provider_receives_no_request() {
 
     let exa_server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            r#"{"output":{"content":"Exa Only Answer.","grounding":[]}}"#,
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"output":{"content":"Exa Only Answer.","grounding":[]}}"#),
+        )
         .expect(1)
         .mount(&exa_server)
         .await;
@@ -466,5 +564,8 @@ async fn a_provider_configured_only_in_the_config_tier_is_called() {
         .execute(json!({ "query": "rust" }))
         .await
         .expect("web_answer must succeed using the config-tier-only credential");
-    assert!(result.contains("Config Tier Perplexity Answer."), "got: {result}");
+    assert!(
+        result.contains("Config Tier Perplexity Answer."),
+        "got: {result}"
+    );
 }

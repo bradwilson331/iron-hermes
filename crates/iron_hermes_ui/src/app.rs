@@ -15,6 +15,18 @@ const SITE_CSS: Asset = asset!("/assets/site.css");
 const WHEEL_CSS: Asset = asset!("/assets/wheel.css");
 const SCREENS_CSS: Asset = asset!("/assets/screens.css");
 const COMPONENTS_CSS: Asset = asset!("/assets/components.css");
+// Phase 54.10 Plan 06 (D-13): Dashboard canvas, item chrome, notes, notices. Loaded
+// unconditionally beside SCREENS_CSS (not `dashboard.css`: that name is the app shell).
+const CANVAS_CSS: Asset = asset!("/assets/canvas.css");
+// Phase 54.4 Plan 01 (D-04): persistent-header styles. Loaded unconditionally
+// (Pitfall 18) — the header is mounted outside every screen, so a per-screen
+// stylesheet link could never style it. Linked after screens.css so later
+// plans' id-scoped overrides win by order.
+const DASHBOARD_CSS: Asset = asset!("/assets/dashboard.css");
+// Phase 54.4 Plan 07 (D-08): Logs screen styles. Loaded unconditionally
+// (Pitfall 18) — plan 11's Chat Logs mini-panel reuses these row styles, so
+// the sheet must not be tied to ScreenLogs being the mounted screen.
+const LOGS_CSS: Asset = asset!("/assets/logs.css");
 // Phase 36.17.8 Plan 06 (D-14): mic button states, pulse animation,
 // inline status, and sr-only live region. Loaded unconditionally per
 // project memory rule (CSS tokens must load unconditionally).
@@ -233,7 +245,11 @@ pub fn App() -> Element {
         document::Link { rel: "stylesheet", href: SITE_CSS }
         document::Link { rel: "stylesheet", href: WHEEL_CSS }
         document::Link { rel: "stylesheet", href: SCREENS_CSS }
+        // Phase 54.10 Plan 06: canvas sheet, unconditional (never tied to the mounted screen).
+        document::Link { rel: "stylesheet", href: CANVAS_CSS }
         document::Link { rel: "stylesheet", href: COMPONENTS_CSS }
+        document::Link { rel: "stylesheet", href: DASHBOARD_CSS }
+        document::Link { rel: "stylesheet", href: LOGS_CSS }
         // Shared `.kn-modal-*` / `.kn-drawer-*` dialog shell — see KANBAN_CSS.
         // Every screen's modals depend on it, so it must not be tied to whether
         // ScreenKanban happens to be the mounted screen.

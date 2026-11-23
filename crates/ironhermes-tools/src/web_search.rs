@@ -155,8 +155,7 @@ impl WebSearchTool {
                         "web_search: unknown provider '{}' in tools.web_search.chain — skipping",
                         unknown
                     );
-                    skip_or_fail_reasons
-                        .push(format!("{unknown}: unrecognised provider, skipped"));
+                    skip_or_fail_reasons.push(format!("{unknown}: unrecognised provider, skipped"));
                 }
             }
         }
@@ -250,7 +249,10 @@ impl Tool for WebSearchTool {
     fn description(&self) -> &str {
         "Search the web and return relevant results (title, URL, snippet). Walks a \
          config-ordered chain of providers (Exa, Brave, Tavily, DuckDuckGo by default) and \
-         is available even with no API key configured — DuckDuckGo needs none."
+         is available even with no API key configured — DuckDuckGo needs none. For current \
+         events, news, or \"latest headlines\" requests, set category to \"news\" and \
+         freshness to \"day\" (or \"week\"); a general search for headlines returns \
+         news-site homepages instead of the articles themselves."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -283,6 +285,11 @@ impl Tool for WebSearchTool {
                         "type": "string",
                         "enum": ["day", "week", "month", "year"],
                         "description": "Restrict results to content published within this recency window, where the selected provider supports it."
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["general", "news"],
+                        "description": "Result vertical. \"news\" searches news articles (Exa news category, Brave News, Tavily news topic) instead of general web pages; pair it with freshness for current events and headlines. Omit, or use \"general\", for everything else. Ignored by providers with no news vertical (DuckDuckGo)."
                     }
                 },
                 "required": ["query"]
@@ -342,6 +349,7 @@ impl Tool for WebSearchTool {
             include_domains: json_string_array(&args["include_domains"]),
             exclude_domains: json_string_array(&args["exclude_domains"]),
             freshness: args["freshness"].as_str().map(String::from),
+            category: args["category"].as_str().map(String::from),
         };
 
         // D-08: read the chain at call time — never cached at construction —
@@ -532,5 +540,32 @@ mod tests {
 
         // SAFETY: env_lock held.
         unsafe { std::env::remove_var("BRAVE_SEARCH_ENDPOINT_OVERRIDE") };
+    }
+
+    /// Quick 261015-tcs: the schema exposes an optional `category` enum and
+    /// `required` is still exactly `["query"]`.
+    #[test]
+    fn schema_exposes_optional_category_enum() {
+        let schema = WebSearchTool::default().schema();
+        let params = &schema.function.parameters;
+        assert_eq!(params["properties"]["category"]["type"], "string");
+        assert_eq!(
+            params["properties"]["category"]["enum"],
+            serde_json::json!(["general", "news"])
+        );
+        assert_eq!(params["required"], serde_json::json!(["query"]));
+    }
+
+    /// Quick 261015-tcs: the description coaches the model to use
+    /// category "news" + freshness "day" for current events.
+    #[test]
+    fn description_coaches_news_category_with_day_freshness() {
+        let tool = WebSearchTool::default();
+        let d = tool.description();
+        assert!(d.contains("category"), "description = {d}");
+        assert!(d.contains("news"), "description = {d}");
+        assert!(d.contains("freshness"), "description = {d}");
+        assert!(d.contains("\"day\""), "description = {d}");
+        assert_eq!(tool.schema().function.description, d);
     }
 }

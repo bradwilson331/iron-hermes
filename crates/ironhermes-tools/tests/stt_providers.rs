@@ -211,3 +211,169 @@ fn test_groq_model_env_override() {
         None => unsafe { std::env::remove_var("STT_GROQ_MODEL") },
     }
 }
+
+// ─── Phase 54.7 Plan 04: deterministic auto order incl. openai_compatible ────
+
+/// Restores GROQ_API_KEY / VOICE_TOOLS_OPENAI_KEY when dropped.
+struct KeyRestore {
+    groq: Option<String>,
+    openai: Option<String>,
+}
+
+impl KeyRestore {
+    fn capture() -> Self {
+        Self {
+            groq: std::env::var("GROQ_API_KEY").ok(),
+            openai: std::env::var("VOICE_TOOLS_OPENAI_KEY").ok(),
+        }
+    }
+}
+
+impl Drop for KeyRestore {
+    fn drop(&mut self) {
+        // SAFETY: callers hold env_lock() for the whole test.
+        unsafe {
+            match &self.groq {
+                Some(v) => std::env::set_var("GROQ_API_KEY", v),
+                None => std::env::remove_var("GROQ_API_KEY"),
+            }
+            match &self.openai {
+                Some(v) => std::env::set_var("VOICE_TOOLS_OPENAI_KEY", v),
+                None => std::env::remove_var("VOICE_TOOLS_OPENAI_KEY"),
+            }
+        }
+    }
+}
+
+fn set_keys(groq: bool, openai: bool) {
+    // SAFETY: callers hold env_lock().
+    unsafe {
+        if groq {
+            std::env::set_var("GROQ_API_KEY", "g-key");
+        } else {
+            std::env::remove_var("GROQ_API_KEY");
+        }
+        if openai {
+            std::env::set_var("VOICE_TOOLS_OPENAI_KEY", "o-key");
+        } else {
+            std::env::remove_var("VOICE_TOOLS_OPENAI_KEY");
+        }
+    }
+}
+
+fn auto_config(base_url: &str) -> SttConfig {
+    let mut cfg = SttConfig::default(); // provider = "auto"
+    cfg.openai_compatible.base_url = base_url.to_string();
+    cfg
+}
+
+/// Documented STT auto order (WR-09): openai_compatible (non-empty base_url) > groq
+/// (GROQ_API_KEY) > openai (VOICE_TOOLS_OPENAI_KEY) > none; explicit provider always
+/// wins. A configured local server is never bypassed by a cloud key in the env.
+#[test]
+fn auto_order_openai_compatible_then_groq_then_openai() {
+    use ironhermes_tools::stt::select_stt_provider;
+    let _guard = env_lock().lock().unwrap();
+    let _restore = KeyRestore::capture();
+
+    set_keys(false, false);
+    assert_eq!(select_stt_provider(&auto_config("")), None);
+    assert_eq!(
+        select_stt_provider(&auto_config("http://stt.lan:8178")).as_deref(),
+        Some("openai_compatible")
+    );
+    assert_eq!(
+        select_stt_provider(&auto_config("   ")),
+        None,
+        "a whitespace-only base_url is not a configured server"
+    );
+
+    // Cloud keys alone still select their provider (groq first).
+    set_keys(false, true);
+    assert_eq!(
+        select_stt_provider(&auto_config("")).as_deref(),
+        Some("openai")
+    );
+    set_keys(true, true);
+    assert_eq!(
+        select_stt_provider(&auto_config("")).as_deref(),
+        Some("groq")
+    );
+
+    // WR-09: a configured server wins over BOTH cloud keys, so mic audio is not
+    // silently sent to Groq/OpenAI.
+    set_keys(false, true);
+    assert_eq!(
+        select_stt_provider(&auto_config("http://stt.lan:8178")).as_deref(),
+        Some("openai_compatible")
+    );
+    set_keys(true, true);
+    assert_eq!(
+        select_stt_provider(&auto_config("http://stt.lan:8178")).as_deref(),
+        Some("openai_compatible")
+    );
+
+    // An explicit provider wins regardless of keys and base_url.
+    let explicit = SttConfig {
+        provider: "groq".to_string(),
+        ..auto_config("http://stt.lan:8178")
+    };
+    assert_eq!(select_stt_provider(&explicit).as_deref(), Some("groq"));
+    let explicit = SttConfig {
+        provider: "openai_compatible".to_string(),
+        ..auto_config("")
+    };
+    assert_eq!(
+        select_stt_provider(&explicit).as_deref(),
+        Some("openai_compatible")
+    );
+}
+
+/// WR-09: an empty `GROQ_API_KEY=` placeholder is unset, not a selected provider.
+#[test]
+fn auto_treats_empty_key_placeholder_as_unset() {
+    use ironhermes_tools::stt::select_stt_provider;
+    let _guard = env_lock().lock().unwrap();
+    let _restore = KeyRestore::capture();
+
+    set_keys(false, false);
+    unsafe {
+        std::env::set_var("GROQ_API_KEY", "");
+        std::env::set_var("VOICE_TOOLS_OPENAI_KEY", "  ");
+    }
+    assert_eq!(select_stt_provider(&auto_config("")), None);
+    assert_eq!(
+        select_stt_provider(&auto_config("http://stt.lan:8178")).as_deref(),
+        Some("openai_compatible")
+    );
+}
+
+/// The core selection and the tools re-export return the same value, so the
+/// core `/voice status` mirror cannot drift from the real selection.
+#[test]
+fn core_select_matches_tools_reexport() {
+    let _guard = env_lock().lock().unwrap();
+    let _restore = KeyRestore::capture();
+
+    let fixtures: [(bool, bool, &str); 4] = [
+        (false, false, ""),
+        (false, false, "http://stt.lan:8178"),
+        (false, true, "http://stt.lan:8178"),
+        (true, true, "http://stt.lan:8178"),
+    ];
+    for (groq, openai, base_url) in fixtures {
+        set_keys(groq, openai);
+        let cfg = auto_config(base_url);
+        assert_eq!(
+            ironhermes_core::stt::select_stt_provider(&cfg),
+            ironhermes_tools::stt::select_stt_provider(&cfg),
+            "groq={groq} openai={openai} base_url={base_url:?}"
+        );
+    }
+    // Pin the expected values so a drift in both implementations still fails.
+    set_keys(false, false);
+    assert_eq!(
+        ironhermes_core::stt::select_stt_provider(&auto_config("http://stt.lan:8178")).as_deref(),
+        Some("openai_compatible")
+    );
+}

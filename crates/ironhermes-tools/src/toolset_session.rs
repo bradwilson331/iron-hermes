@@ -63,7 +63,7 @@ impl RegistryToolsetSession {
                 "grep_files",
             ],
         );
-        m.insert("memory", &["memory"]);
+        m.insert("memory", crate::tier2_tools::MEMORY_TOOLSET_MEMBERS);
         m.insert("agent", &["delegate_task", "cronjob"]);
         m.insert("skills", &["skills"]);
         m.insert("session", &["session_search"]);
@@ -85,6 +85,9 @@ impl RegistryToolsetSession {
                 "browser_vision",
             ],
         );
+        // Phase 49.8 D-07: ros2 toolset — kept in sync with
+        // toolset_cmd.rs::toolset_members_map (same doc comment there).
+        m.insert("ros2", &["ros2", "rospider"]);
         m
     }
 

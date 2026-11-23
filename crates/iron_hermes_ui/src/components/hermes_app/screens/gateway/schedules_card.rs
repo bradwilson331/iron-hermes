@@ -243,10 +243,9 @@ pub fn GatewaySchedulesCard(scope: ReadSignal<ConfigScope>, refresh_tick: Signal
 
     rsx! {
         div {
-            // `--full` spans every column of the Gateway screen's
-            // `.grid.wide`, placing this card as one banner across the top
-            // of the card scroll (operator request, 2026-09-01).
-            class: "plat-card plat-card--full",
+            // The banner span comes from the `gw-card-slot--banner` wrapper
+            // while this card is first in the saved order (D-18).
+            class: "plat-card",
             role: "button",
             tabindex: "0",
             "aria-label": "Open the Schedules screen",

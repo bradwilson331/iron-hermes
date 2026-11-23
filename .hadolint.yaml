@@ -1,0 +1,16 @@
+# Hadolint config (Phase 54.11, D-04 #10). Run by scripts/container-lint.sh.
+# Warnings fail the gate (info-level style hints such as DL3059 do not).
+# Every rule ignored below carries its reason.
+failure-threshold: warning
+ignored:
+  # DL3008: apt version pinning. Debian trixie rotates package versions in place
+  # (old versions are removed from the archive), so an `=version` pin breaks the
+  # build within weeks. Reproducibility comes from the digest-pinned base image
+  # and the Gate 11 pins check instead.
+  - DL3008
+  # DL3006: "tag the image version". Fires on `FROM ${NODE_IMAGE}` and
+  # `FROM ${BASE_IMAGE}` in docker/dev-tools.Dockerfile because hadolint cannot
+  # see through ARGs. NODE_IMAGE defaults to a digest pin; BASE_IMAGE
+  # deliberately has no default (the build fails if it is missing). Gate 11
+  # (container-lint.sh, pins check) enforces both.
+  - DL3006

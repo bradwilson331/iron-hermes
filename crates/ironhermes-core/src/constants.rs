@@ -25,6 +25,12 @@ pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 /// zero-denominator compaction ratio and an implausibly large window from a
 /// hostile or misbehaving provider response).
 pub const MAX_PLAUSIBLE_CONTEXT_LENGTH: usize = 10_000_000;
+/// Phase 58.3.1 (D-11): window assumed for an unknown model on a loopback/LAN
+/// endpoint, where a small default context is the common reality.
+pub const SMALL_LOCAL_CONTEXT_LENGTH: usize = 8_192;
+/// Phase 58.3.1: floor for any probed/learned window; a smaller persisted value
+/// would make every turn refuse.
+pub const MIN_PLAUSIBLE_OBSERVED_CONTEXT_LENGTH: usize = 1_024;
 pub const DEFAULT_TOOL_DELAY_SECS: f64 = 1.0;
 
 pub const VALID_REASONING_EFFORTS: &[&str] = &["xhigh", "high", "medium", "low", "minimal"];
@@ -48,9 +54,13 @@ pub const PROFILES_SUBDIR: &str = "profiles";
 /// the prerequisite check runs.
 /// "learning" (Phase 33): autonomous skill creation via skill_manage. No external prereqs
 /// — writes only to IRONHERMES_HOME/skills/. Same risk profile as "memory" (T-33-03-A).
+/// "ros2" (Phase 49.8 D-07): toolset is enabled by default so Ros2Tool/RospiderTool reach
+/// `is_available()`, which then gates on `ros2.bridge_url`/`IRONHERMES_ROS2_BRIDGE_URL` per
+/// D-14. Without this entry, even a perfectly-configured robot would have the tool filtered
+/// out before the prerequisite check runs — same reasoning as "robotics" above.
 /// web and code are disabled by default (require API keys / high blast radius).
 pub const DEFAULT_TOOLSETS: &[&str] = &[
-    "memory", "session", "agent", "skills", "robotics", "learning",
+    "memory", "session", "agent", "skills", "robotics", "learning", "ros2",
 ];
 
 /// D-20 (Phase 27.1.1-gap-02): canonical exhaustive list of all known toolset names.
@@ -77,6 +87,7 @@ pub const ALL_TOOLSETS: &[&str] = &[
     "browser",
     "voice",     // Phase 36.17.5 D-15
     "artifacts", // Phase 46.6 D-01
+    "ros2",      // Phase 49.8 D-07
 ];
 
 /// Filename of the OAuth token store (D-06, D-08).

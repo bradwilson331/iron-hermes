@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use ironhermes_core::config::Config;
 use ironhermes_core::{SkillRegistry, SummarizationClientHandle, ToolSchema};
 use serde_json::json;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{Instrument, debug, info_span, warn};
 
 use crate::registry::Tool;
@@ -232,7 +232,24 @@ impl Tool for WebExtractTool {
             let span = info_span!("web_extract.dispatch", url = %url, idx);
             handles.push(tokio::spawn(
                 async move {
-                    let _permit = sem_c
+                    // This permit bounds the FETCH fan-out only. It is MOVED into
+                    // `process_one_url`, which drops it the moment the backend
+                    // fetch returns — BEFORE tiered summarization acquires its
+                    // own permits from this same semaphore (D-15 single budget).
+                    //
+                    // It must never be held across `route_tiers`: tier 2
+                    // (`sem.acquire()`), tier 3's per-chunk `acquire_owned()` and
+                    // its synthesis `acquire()` each take a further permit, so a
+                    // task that kept this one while summarizing would wait on a
+                    // permit held by a sibling that is itself waiting on one of
+                    // ours. With N >= max_parallel_summaries URLs reaching
+                    // summarization together (default 4 news homepages) every
+                    // permit is held by a waiter and nothing runs until the 60s
+                    // per-URL deadline turns the whole batch into
+                    // `extraction_timeout`; with max_parallel_summaries = 1 even a
+                    // single URL starved itself. (Debug session
+                    // web-extract-hangs-60s.)
+                    let fetch_permit = sem_c
                         .clone()
                         .acquire_owned()
                         .await
@@ -243,6 +260,9 @@ impl Tool for WebExtractTool {
                     // must not be charged for queue time it did not spend fetching.
                     // No batch-level deadline is added (rejected option — three
                     // interacting deadlines); this bounds only this one URL's task.
+                    // (Moving the permit into the future is cancellation-safe: if
+                    // the deadline fires the future is dropped and the permit with
+                    // it.)
                     let per_url_secs = cfg_c.extract.per_url_timeout_secs;
                     let result = match tokio::time::timeout(
                         Duration::from_secs(per_url_secs),
@@ -255,6 +275,7 @@ impl Tool for WebExtractTool {
                             &client_c,
                             &registry_c,
                             sem_c.clone(), // share sem so chunked summarization shares budget (D-15)
+                            fetch_permit,
                         ),
                     )
                     .await
@@ -308,6 +329,11 @@ impl Tool for WebExtractTool {
 }
 
 /// Per-URL pipeline (D-19 → D-03 → backends → D-08 sanitize → D-11 tier → min_length).
+///
+/// `fetch_permit` is the caller's fetch-fan-out permit from `sem`. It is held for
+/// the backend fetch only and dropped before tiered summarization starts: the
+/// summarization tiers acquire their own permits from `sem` (D-15 single budget),
+/// so holding this one across them is a hold-and-wait deadlock (see `execute`).
 #[allow(clippy::too_many_arguments)]
 async fn process_one_url(
     url: &str,
@@ -318,6 +344,7 @@ async fn process_one_url(
     client: &Arc<dyn SummarizationClientHandle>,
     registry: &Arc<SkillRegistry>,
     sem: Arc<Semaphore>,
+    fetch_permit: OwnedSemaphorePermit,
 ) -> ExtractionResult {
     // Step 1: D-19 secret-URL check BEFORE any network call. When secrets are
     // detected, echo the REDACTED URL in the error envelope so the model never
@@ -350,6 +377,11 @@ async fn process_one_url(
             return ExtractionResult::error(url, format!("extraction_failed: {}", msg));
         }
     };
+
+    // The fetch is done: give the permit back BEFORE summarization, which acquires
+    // its own permits from `sem`. Every early `return` above already dropped it
+    // via normal scope exit; this makes the success path release it too.
+    drop(fetch_permit);
 
     // Step 3: D-08 strip base64 images BEFORE tier classification (uses cleaned size).
     extraction.content = strip_base64_images(&extraction.content);

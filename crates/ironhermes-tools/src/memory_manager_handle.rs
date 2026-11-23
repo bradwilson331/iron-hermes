@@ -28,4 +28,10 @@ pub trait MemoryManagerHandle: Send {
     /// Returns the JSON envelope from the primary provider unchanged —
     /// MemoryTool formats success/error shapes for the LLM.
     async fn handle_tool_call(&self, name: &str, args: serde_json::Value) -> MemoryResult;
+
+    /// The Tier 2 handle attached at boot, if any (58.2 D-10/D-12). Defaulted so mocks keep
+    /// compiling; `register_memory_tool` reads it to register the Tier 2 tools.
+    fn tier2(&self) -> Option<std::sync::Arc<dyn ironhermes_core::tier2::Tier2Handle>> {
+        None
+    }
 }

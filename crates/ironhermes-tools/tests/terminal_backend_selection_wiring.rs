@@ -84,7 +84,10 @@ timeout: 30
     let registry = registry_with_terminal(&terminal_config);
 
     let result = registry
-        .dispatch("terminal", serde_json::json!({"command": "echo wiring-probe"}))
+        .dispatch(
+            "terminal",
+            serde_json::json!({"command": "echo wiring-probe"}),
+        )
         .await;
 
     let err = result.expect_err(
@@ -145,7 +148,10 @@ async fn default_local_backend_still_executes_normally() {
     let registry = registry_with_terminal(&terminal_config);
 
     let result = registry
-        .dispatch("terminal", serde_json::json!({"command": "echo wiring-probe"}))
+        .dispatch(
+            "terminal",
+            serde_json::json!({"command": "echo wiring-probe"}),
+        )
         .await
         .expect("backend: local must succeed through the registered tool");
 
@@ -170,7 +176,10 @@ async fn configured_docker_backend_reaches_the_factory() {
     let registry = registry_with_terminal(&terminal_config);
 
     let result = registry
-        .dispatch("terminal", serde_json::json!({"command": "echo wiring-probe"}))
+        .dispatch(
+            "terminal",
+            serde_json::json!({"command": "echo wiring-probe"}),
+        )
         .await;
 
     let err = result.expect_err(

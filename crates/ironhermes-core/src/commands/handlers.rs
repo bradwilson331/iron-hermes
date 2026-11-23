@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::commands::context::{BlueprintSaveRequest, CommandContext, CronJobSpec, RawJobSpec};
+use crate::commands::context::{
+    BlueprintSaveRequest, CommandContext, CronJobSpec, DefconAuthFacts, RawJobSpec,
+};
 use crate::commands::typo::suggest_typo;
 use crate::commands::{CommandDef, CommandResult, CommandRouter};
 
@@ -51,7 +53,7 @@ pub fn dispatch(
         "fast" => cmd_fast(ctx),
         "config" => cmd_config(ctx),
         "profile" => cmd_profile(ctx),
-        "yolo" => cmd_yolo(ctx),
+        "yolo" => cmd_yolo(args, ctx),
         "verbose" => cmd_verbose(ctx),
         "statusbar" => cmd_statusbar(ctx),
         "reasoning" => cmd_reasoning(args, ctx),
@@ -717,9 +719,23 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
 /// Guard pattern (D-05): when `ctx.state_store` is None, returns informational
 /// text rather than panicking (gateway / classic-tui compat).
 fn cmd_usage(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    // D-13: effective window + source word only — never the key or base URL.
+    let window_line = ctx
+        .provider_resolver
+        .as_ref()
+        .and_then(|r| r.context_window())
+        .map(|(n, word)| format!("Context window: {} tokens ({word})", with_thousands(n)));
+    let with_window = |text: String| match &window_line {
+        Some(line) => format!("{text}\n{line}"),
+        None => text,
+    };
     let store = match &ctx.state_store {
         Some(s) => s.clone(),
-        None => return CommandResult::Output("Session storage not configured.".to_string()),
+        None => {
+            return CommandResult::Output(with_window(
+                "Session storage not configured.".to_string(),
+            ));
+        }
     };
 
     let mut session_id: Option<String> = Some(ctx.session_id.clone());
@@ -766,7 +782,20 @@ fn cmd_usage(args: &[&str], ctx: &CommandContext) -> CommandResult {
         model.as_deref(),
         since_seconds,
     );
-    CommandResult::Output(text)
+    CommandResult::Output(with_window(text))
+}
+
+/// `8192` -> `"8,192"`.
+fn with_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Parse a `--since` argument like `"7d"` / `"24h"` / `"30m"` into seconds.
@@ -1075,10 +1104,177 @@ fn cmd_profile(_ctx: &CommandContext) -> CommandResult {
     CommandResult::Output(format!("Profile: default\nHome: {}", home))
 }
 
-fn cmd_yolo(_ctx: &CommandContext) -> CommandResult {
-    CommandResult::Output(
-        "YOLO mode toggled. (Session-level toggle requires caller wiring)".to_string(),
-    )
+/// Decide whether a `/yolo <N>` level change is authorized (D-22). Pure: the
+/// caller supplies the surface's facts and the resolved config flag.
+///
+/// - `Local` (TUI/CLI): always allowed.
+/// - `Webhook` and `ApiServer`: never, even with the flag and every fact true
+///   (their text is untrusted payload, not an operator typing).
+/// - everything else needs `security.defcon_remote_change_enabled`, and then:
+///   `Web` needs an authenticated session; every other (chat) platform needs a
+///   direct message from an allowlisted sender.
+///
+/// The `Err` text says what is missing and never echoes user input. A caller
+/// that could not load the config must pass `false` (a load failure is a
+/// refusal, never a permission).
+pub fn authorize_defcon_change(
+    platform: &crate::types::Platform,
+    facts: &DefconAuthFacts,
+    remote_change_enabled: bool,
+) -> Result<(), String> {
+    use crate::types::Platform;
+    match platform {
+        Platform::Local => Ok(()),
+        Platform::Webhook | Platform::ApiServer => {
+            Err("DEFCON cannot be changed from this surface.".to_string())
+        }
+        _ if !remote_change_enabled => Err(
+            "changing the DEFCON level from this surface is disabled; an operator must set \
+             security.defcon_remote_change_enabled: true in config.yaml (the local CLI/TUI is \
+             unaffected)."
+                .to_string(),
+        ),
+        Platform::Web => {
+            if facts.web_authenticated {
+                Ok(())
+            } else {
+                Err(
+                    "changing the DEFCON level from the web requires an authenticated session."
+                        .to_string(),
+                )
+            }
+        }
+        _ => {
+            if !facts.direct_message {
+                Err("the DEFCON level can only be changed from a direct message.".to_string())
+            } else if !facts.sender_whitelisted {
+                Err("the DEFCON level can only be changed by an allowlisted sender.".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+const YOLO_USAGE: &str = "Usage: /yolo <1-5>  (1 = strictest, 5 = least strict; 4-5 bypass warn-class approvals, audited)";
+
+/// Phase 57 (D-09 / D-10): `/yolo <N>` is the session DEFCON dial.
+///
+/// `/yolo` with no argument reports the session's current level and the usage
+/// line; it toggles nothing. `/yolo <N>` (N = 1-5) sets THIS session's level
+/// through the process-wide session registry, so every holder of the
+/// session's `DefconHandle` sees it on its next read and no other session is
+/// affected. Nothing is written to `config.yaml`. Every accepted change
+/// writes one `defcon_change` audit row.
+///
+/// Authorization: see [`authorize_defcon_change`] (D-22). Every refused
+/// attempt writes one `defcon_change` row with decision `refused`.
+fn cmd_yolo(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    use crate::config::DefconLevel;
+    use crate::defcon::{record_defcon_change, session_defcon};
+
+    let handle = session_defcon().handle_for(&ctx.session_id);
+
+    let Some(raw) = args.first().copied() else {
+        let current = handle.get();
+        return CommandResult::Output(format!(
+            "DEFCON for this session: {}. Warn-class approvals are {} at this level.\n{YOLO_USAGE}",
+            current.level(),
+            bypass_phrase(current),
+        ));
+    };
+
+    let requested = match raw
+        .parse::<u8>()
+        .map_err(|_| ())
+        .and_then(|n| DefconLevel::try_from(n).map_err(|_| ()))
+    {
+        Ok(level) => level,
+        Err(()) => {
+            return CommandResult::Error(format!(
+                "DEFCON level must be a whole number from 1 to 5.\n{YOLO_USAGE}"
+            ));
+        }
+    };
+
+    let cfg = crate::Config::load();
+    let audit_cfg = cfg.as_ref().map(|c| c.audit.clone()).unwrap_or_default();
+    let audit = crate::audit::AuditLog::load(audit_cfg);
+    let surface = ctx.platform.to_string();
+    let chat_id = ctx.chat_id.clone().unwrap_or_else(|| "n/a".to_string());
+    let actor = if ctx.defcon_auth.actor.is_empty() {
+        "unknown".to_string()
+    } else {
+        ctx.defcon_auth.actor.clone()
+    };
+    let actor = actor.as_str();
+
+    let remote_change_enabled = cfg
+        .as_ref()
+        .map(|c| c.security.defcon_remote_change_enabled)
+        .unwrap_or(false);
+    if let Err(reason) =
+        authorize_defcon_change(&ctx.platform, &ctx.defcon_auth, remote_change_enabled)
+    {
+        if let Err(e) = record_defcon_change(
+            &audit,
+            &ctx.session_id,
+            &surface,
+            &chat_id,
+            actor,
+            Some(handle.get()),
+            Some(requested),
+            "refused",
+            &reason,
+        ) {
+            tracing::error!(error = %e, "failed to write defcon_change audit row");
+        }
+        return CommandResult::Error(format!("/yolo: {reason}"));
+    }
+
+    // Audit BEFORE the change (D-10: no silent level change). If the row
+    // cannot be written, a change that loosens the gates (a higher number) is
+    // refused; tightening still proceeds, since refusing it would only make
+    // the session less safe.
+    let before = handle.get();
+    if let Err(e) = record_defcon_change(
+        &audit,
+        &ctx.session_id,
+        &surface,
+        &chat_id,
+        actor,
+        Some(before),
+        Some(requested),
+        "changed",
+        "operator changed the session DEFCON level",
+    ) {
+        tracing::error!(error = %e, "failed to write defcon_change audit row");
+        if requested > before {
+            return CommandResult::Error(
+                "/yolo: could not write the audit record, so the level was not loosened."
+                    .to_string(),
+            );
+        }
+    }
+    let old = session_defcon().set_session_level(&ctx.session_id, requested);
+
+    CommandResult::Output(format!(
+        "DEFCON for this session: {} -> {}. Warn-class approvals are {} at this level. \
+         Applies until changed or the session ends; config.yaml is not modified.",
+        old.level(),
+        requested.level(),
+        bypass_phrase(requested),
+    ))
+}
+
+/// "bypassed (audited)" at DEFCON 4-5, else "required". Shared with the
+/// agent prompt's per-turn security-level line.
+pub fn bypass_phrase(level: crate::config::DefconLevel) -> &'static str {
+    if level.yolo_bypass_active() {
+        "bypassed (audited)"
+    } else {
+        "required"
+    }
 }
 
 fn cmd_verbose(_ctx: &CommandContext) -> CommandResult {
@@ -2370,10 +2566,14 @@ fn cmd_models_refresh() -> CommandResult {
 
     // Load-merge-save (D-08's named trap): a whole-file overwrite here would
     // erase a harvest another surface (e.g. the web UI) already wrote.
-    let mut cache = crate::models_cache::ModelsCache::load();
-    cache.merge_entries(entries);
-    match cache.save() {
-        Ok(()) => lines.push(format!(
+    // `persist_fetch_to` also stores each probe's served ids for the picker
+    // (G-58.3.1-12).
+    match crate::models_cache::ModelsCache::persist_fetch_to(
+        &crate::models_cache::ModelsCache::cache_path(),
+        entries,
+        &fetch_result.provider_probes,
+    ) {
+        Ok(cache) => lines.push(format!(
             "Fetch complete. {} entries saved to cache.",
             cache.entries.len()
         )),
@@ -2704,19 +2904,13 @@ fn cmd_voice(args: &[&str], _ctx: &CommandContext) -> CommandResult {
             // Report the currently configured provider name and record key.
             // Config is loaded from env/disk so this reflects the live config.
             let config = crate::Config::load().unwrap_or_default();
-            let provider_name = match config.stt.provider.as_str() {
-                "auto" => {
-                    // Mirror select_stt_provider logic inline so ironhermes-core
-                    // doesn't need to depend on ironhermes-tools for status.
-                    if std::env::var("GROQ_API_KEY").is_ok() {
-                        "groq (auto-selected)".to_string()
-                    } else if std::env::var("VOICE_TOOLS_OPENAI_KEY").is_ok() {
-                        "openai (auto-selected)".to_string()
-                    } else {
-                        "none (no API key configured)".to_string()
-                    }
-                }
-                name => name.to_string(),
+            // Phase 54.7 (D-19, T-54.7-41): the one selection function, owned by
+            // ironhermes-core (`ironhermes_tools::stt::select_stt_provider` re-exports
+            // it), so this status line cannot drift from the provider actually used.
+            let provider_name = match crate::stt::select_stt_provider(&config.stt) {
+                Some(name) if config.stt.provider == "auto" => format!("{name} (auto-selected)"),
+                Some(name) => name,
+                None => "none (no STT provider configured)".to_string(),
             };
             let record_key = &config.voice.record_key;
             let msg = format!(
@@ -4152,6 +4346,85 @@ mod cmd_agents_tree_tests {
 // Phase 49.5 Plan 05: /blueprint slash command tests
 // =============================================================================
 
+/// Phase 54.7 Plan 09 (D-19, T-54.7-41): `/voice status` reports the provider chosen by
+/// `ironhermes_core::stt::select_stt_provider`, not an inline copy of the selection.
+#[cfg(test)]
+mod cmd_voice_status_tests {
+    use super::*;
+
+    /// Serialises the env-mutating tests of this module (`IRONHERMES_HOME`, STT key variables).
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Sets/clears variables for one test and restores the previous values on drop.
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn new(names: &[&'static str]) -> Self {
+            Self(names.iter().map(|n| (*n, std::env::var_os(n))).collect())
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (n, v) in self.0.drain(..) {
+                // SAFETY: serialised by `env_lock`.
+                unsafe {
+                    match v {
+                        Some(v) => std::env::set_var(n, v),
+                        None => std::env::remove_var(n),
+                    }
+                }
+            }
+        }
+    }
+
+    fn status_with_config(yaml: &str) -> String {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join("config.yaml"), yaml).expect("write config");
+        // SAFETY: serialised by `env_lock`; restored by the caller's `EnvRestore`.
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("VOICE_TOOLS_OPENAI_KEY");
+        }
+        let ctx = CommandContext::new(crate::types::Platform::Local, "voice-status".to_string());
+        match cmd_voice(&["status"], &ctx) {
+            CommandResult::Output(s) => s,
+            other => panic!("expected Output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cmd_voice_status_uses_core_selection() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvRestore::new(&["IRONHERMES_HOME", "GROQ_API_KEY", "VOICE_TOOLS_OPENAI_KEY"]);
+
+        let only_compatible = status_with_config(
+            "stt:\n  provider: auto\n  openai_compatible:\n    base_url: http://localhost:8178\n",
+        );
+        assert!(
+            only_compatible.contains("openai_compatible (auto-selected)"),
+            "auto + only an openai_compatible base_url must report it: {only_compatible}"
+        );
+
+        let nothing = status_with_config("stt:\n  provider: auto\n");
+        assert!(
+            nothing.contains("none (no STT provider configured)"),
+            "auto with nothing configured must say so: {nothing}"
+        );
+
+        let explicit = status_with_config("stt:\n  provider: groq\n");
+        assert!(
+            explicit.contains("provider: groq"),
+            "an explicit provider is reported as named: {explicit}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod cmd_blueprint_tests {
     use super::*;
@@ -4510,7 +4783,7 @@ mod cmd_loop_tests {
     /// Process-wide lock for the WR-02 gate tests below, which mutate
     /// `IRONHERMES_HOME`. Module-local, mirroring the sibling test module's
     /// `env_lock` pattern.
-    fn loop_env_lock() -> &'static std::sync::Mutex<()> {
+    pub(super) fn loop_env_lock() -> &'static std::sync::Mutex<()> {
         use std::sync::OnceLock;
         static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -4518,7 +4791,7 @@ mod cmd_loop_tests {
 
     /// Runs `body` with `IRONHERMES_HOME` pointed at a fresh temp dir whose
     /// `config.yaml` is exactly `yaml` (or absent when `yaml` is `None`).
-    fn with_home_config<T>(yaml: Option<&str>, body: impl FnOnce() -> T) -> T {
+    pub(super) fn with_home_config<T>(yaml: Option<&str>, body: impl FnOnce() -> T) -> T {
         let _guard = loop_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tempdir");
         if let Some(y) = yaml {
@@ -5071,5 +5344,338 @@ mod cmd_goal_tests {
         assert_eq!(body.matches(".await").count(), 0, "cmd_goal must do no async work: {body}");
         assert_eq!(body.matches("tokio::spawn").count(), 0, "cmd_goal must spawn nothing: {body}");
         assert_eq!(body.matches("std::fs::").count(), 0, "cmd_goal must do no filesystem I/O: {body}");
+    }
+}
+
+// =============================================================================
+// Phase 57 Plan 04: /yolo <N> session DEFCON dial (D-09 / D-10 / D-22)
+// =============================================================================
+
+#[cfg(test)]
+mod cmd_yolo_tests {
+    use super::cmd_loop_tests::with_home_config;
+    use super::*;
+    use crate::audit::AuditEntry;
+    use crate::defcon::session_defcon;
+    use crate::types::Platform;
+
+    fn local_ctx(session: &str) -> CommandContext {
+        CommandContext::new(Platform::Local, session.to_string())
+    }
+
+    fn audit_rows() -> Vec<AuditEntry> {
+        let path = crate::constants::get_hermes_home()
+            .join("logs")
+            .join("audit.jsonl");
+        match std::fs::read_to_string(path) {
+            Ok(text) => text
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("audit row parses"))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn level_of(session: &str) -> u8 {
+        session_defcon().handle_for(session).get().level()
+    }
+
+    #[test]
+    fn yolo_local_sets_live_level_and_audits() {
+        let session = "s-yolo-1";
+        let ctx = local_ctx(session);
+        let (result, rows) = with_home_config(None, || {
+            let r = cmd_yolo(&["1"], &ctx);
+            (r, audit_rows())
+        });
+        let CommandResult::Output(text) = &result else {
+            panic!("expected Output, got {result:?}");
+        };
+        assert!(
+            text.contains('3') && text.contains('1'),
+            "names old and new: {text}"
+        );
+        assert_eq!(level_of(session), 1);
+        assert_eq!(rows.len(), 1, "exactly one audit row: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.kind, "defcon_change");
+        assert_eq!(row.session, session);
+        assert_eq!(row.surface, "local");
+        assert_eq!(row.decision, "changed");
+        assert_eq!(row.resolution, "operator");
+        let args: serde_json::Value = serde_json::from_str(&row.args).expect("args is json");
+        assert_eq!(args["old"], 3);
+        assert_eq!(args["new"], 1);
+        session_defcon().forget(session);
+    }
+
+    #[test]
+    fn yolo_change_is_session_scoped() {
+        let session = "s-yolo-scoped";
+        let other = "s-yolo-other";
+        let ctx = local_ctx(session);
+        with_home_config(None, || cmd_yolo(&["1"], &ctx));
+        assert_eq!(level_of(session), 1);
+        assert_eq!(
+            level_of(other),
+            session_defcon().process_default().level(),
+            "another session still reads the process default"
+        );
+        session_defcon().forget(session);
+        session_defcon().forget(other);
+    }
+
+    #[test]
+    fn yolo_without_args_reports_level() {
+        let session = "s-yolo-report";
+        let ctx = local_ctx(session);
+        let (result, rows) = with_home_config(None, || {
+            let r = cmd_yolo(&[], &ctx);
+            (r, audit_rows())
+        });
+        let CommandResult::Output(text) = &result else {
+            panic!("expected Output, got {result:?}");
+        };
+        assert!(text.contains("/yolo <1-5>"), "usage line present: {text}");
+        assert!(
+            text.contains(&level_of(session).to_string()),
+            "level present: {text}"
+        );
+        assert_eq!(level_of(session), 3, "no-arg form changes nothing");
+        assert!(rows.is_empty(), "no audit row for a read: {rows:?}");
+        session_defcon().forget(session);
+    }
+
+    #[test]
+    fn yolo_out_of_range_is_error() {
+        let session = "s-yolo-range";
+        let ctx = local_ctx(session);
+        let (results, rows) = with_home_config(None, || {
+            let rs: Vec<CommandResult> = ["0", "6", "high"]
+                .iter()
+                .map(|a| cmd_yolo(&[a], &ctx))
+                .collect();
+            (rs, audit_rows())
+        });
+        for r in &results {
+            assert!(
+                matches!(r, CommandResult::Error(_)),
+                "expected Error, got {r:?}"
+            );
+        }
+        assert_eq!(level_of(session), 3, "level unchanged");
+        assert!(
+            rows.iter().all(|r| r.decision != "changed"),
+            "no changed row: {rows:?}"
+        );
+        session_defcon().forget(session);
+    }
+
+    // ---- Task 2: D-22 authorization matrix ----
+
+    const FLAG_ON: &str = "security:\n  defcon_remote_change_enabled: true\n";
+
+    fn facts(dm: bool, whitelisted: bool, web: bool) -> DefconAuthFacts {
+        DefconAuthFacts {
+            direct_message: dm,
+            sender_whitelisted: whitelisted,
+            web_authenticated: web,
+            actor: "tester".to_string(),
+        }
+    }
+
+    fn remote_ctx(platform: Platform, session: &str, f: DefconAuthFacts) -> CommandContext {
+        CommandContext::new(platform, session.to_string())
+            .with_chat_origin("chat-1", None::<String>)
+            .with_defcon_auth(f)
+    }
+
+    /// Run `/yolo 2` for `ctx` under a temp home with `yaml`, returning the
+    /// result, the audit rows, and the session's level afterwards.
+    fn run_yolo_2(
+        ctx: &CommandContext,
+        yaml: Option<&str>,
+    ) -> (CommandResult, Vec<AuditEntry>, u8) {
+        let (result, rows) = with_home_config(yaml, || {
+            let r = cmd_yolo(&["2"], ctx);
+            (r, audit_rows())
+        });
+        let level = level_of(&ctx.session_id);
+        session_defcon().forget(&ctx.session_id);
+        (result, rows, level)
+    }
+
+    fn assert_refused(result: &CommandResult, rows: &[AuditEntry], level: u8) {
+        assert!(
+            matches!(result, CommandResult::Error(_)),
+            "expected Error, got {result:?}"
+        );
+        assert_eq!(level, 3, "level must be unchanged");
+        assert_eq!(rows.len(), 1, "exactly one audit row: {rows:?}");
+        assert_eq!(rows[0].kind, "defcon_change");
+        assert_eq!(rows[0].decision, "refused");
+        let args: serde_json::Value = serde_json::from_str(&rows[0].args).expect("args json");
+        assert_eq!(args["old"], 3);
+        assert_eq!(args["new"], 2);
+    }
+
+    fn assert_changed(result: &CommandResult, rows: &[AuditEntry], level: u8) {
+        assert!(
+            matches!(result, CommandResult::Output(_)),
+            "expected Output, got {result:?}"
+        );
+        assert_eq!(level, 2, "level must be changed");
+        assert_eq!(rows.len(), 1, "exactly one audit row: {rows:?}");
+        assert_eq!(rows[0].decision, "changed");
+    }
+
+    #[test]
+    fn local_change_needs_no_flag() {
+        let ctx = local_ctx("s-d22-local");
+        let (result, rows, level) = run_yolo_2(&ctx, None);
+        assert_changed(&result, &rows, level);
+    }
+
+    #[test]
+    fn remote_change_refused_when_flag_off() {
+        let ctx = remote_ctx(Platform::Telegram, "s-d22-flagoff", facts(true, true, true));
+        let (result, rows, level) = run_yolo_2(&ctx, None);
+        assert_refused(&result, &rows, level);
+        let CommandResult::Error(text) = &result else {
+            unreachable!()
+        };
+        assert!(
+            text.contains("security.defcon_remote_change_enabled"),
+            "error names the key: {text}"
+        );
+        assert_eq!(rows[0].surface, "telegram");
+        assert_eq!(rows[0].chat_id, "chat-1");
+        let args: serde_json::Value = serde_json::from_str(&rows[0].args).expect("args json");
+        assert_eq!(args["actor"], "tester");
+    }
+
+    #[test]
+    fn chat_requires_dm() {
+        let ctx = remote_ctx(Platform::Telegram, "s-d22-nodm", facts(false, true, false));
+        let (result, rows, level) = run_yolo_2(&ctx, Some(FLAG_ON));
+        assert_refused(&result, &rows, level);
+    }
+
+    #[test]
+    fn chat_requires_whitelisted_sender() {
+        let ctx = remote_ctx(Platform::Discord, "s-d22-nowl", facts(true, false, false));
+        let (result, rows, level) = run_yolo_2(&ctx, Some(FLAG_ON));
+        assert_refused(&result, &rows, level);
+    }
+
+    #[test]
+    fn chat_dm_whitelisted_flag_on_succeeds() {
+        let ctx = remote_ctx(Platform::Slack, "s-d22-ok", facts(true, true, false));
+        let (result, rows, level) = run_yolo_2(&ctx, Some(FLAG_ON));
+        assert_changed(&result, &rows, level);
+    }
+
+    #[test]
+    fn web_requires_authenticated_session() {
+        let denied = remote_ctx(Platform::Web, "s-d22-web-no", facts(false, false, false));
+        let (result, rows, level) = run_yolo_2(&denied, Some(FLAG_ON));
+        assert_refused(&result, &rows, level);
+
+        let allowed = remote_ctx(Platform::Web, "s-d22-web-yes", facts(false, false, true));
+        let (result, rows, level) = run_yolo_2(&allowed, Some(FLAG_ON));
+        assert_changed(&result, &rows, level);
+    }
+
+    #[test]
+    fn webhook_and_api_server_always_refused() {
+        for (platform, session) in [
+            (Platform::Webhook, "s-d22-webhook"),
+            (Platform::ApiServer, "s-d22-api"),
+        ] {
+            let ctx = remote_ctx(platform, session, facts(true, true, true));
+            let (result, rows, level) = run_yolo_2(&ctx, Some(FLAG_ON));
+            assert_refused(&result, &rows, level);
+        }
+    }
+
+    #[test]
+    fn config_load_failure_refuses_remote() {
+        let ctx = remote_ctx(Platform::Telegram, "s-d22-badcfg", facts(true, true, true));
+        let broken = "security:\n  defcon_remote_change_enabled: true\n  : : [unclosed\n";
+        let (result, rows, level) = run_yolo_2(&ctx, Some(broken));
+        assert_refused(&result, &rows, level);
+    }
+
+    #[test]
+    fn authorize_defcon_change_matrix() {
+        let bools = [false, true];
+        // Local: always allowed, whatever the flag or facts.
+        for flag in bools {
+            assert!(
+                authorize_defcon_change(&Platform::Local, &facts(false, false, false), flag)
+                    .is_ok()
+            );
+        }
+        // Webhook / ApiServer: never, even with the flag and every fact.
+        for p in [Platform::Webhook, Platform::ApiServer] {
+            for flag in bools {
+                assert!(authorize_defcon_change(&p, &facts(true, true, true), flag).is_err());
+            }
+        }
+        // Flag off refuses every remote platform whatever the facts.
+        for p in [
+            Platform::Telegram,
+            Platform::Discord,
+            Platform::Slack,
+            Platform::Buzz,
+            Platform::Web,
+        ] {
+            assert!(authorize_defcon_change(&p, &facts(true, true, true), false).is_err());
+        }
+        // Chat platforms (every non-Local, non-Web, non-Webhook, non-ApiServer
+        // platform): flag + DM + whitelisted, nothing less.
+        for p in [
+            Platform::Telegram,
+            Platform::Discord,
+            Platform::Whatsapp,
+            Platform::Slack,
+            Platform::Signal,
+            Platform::Matrix,
+            Platform::Mattermost,
+            Platform::Email,
+            Platform::Sms,
+            Platform::Dingtalk,
+            Platform::Feishu,
+            Platform::Wecom,
+            Platform::HomeAssistant,
+            Platform::Buzz,
+        ] {
+            for dm in bools {
+                for wl in bools {
+                    for web in bools {
+                        let r = authorize_defcon_change(&p, &facts(dm, wl, web), true);
+                        assert_eq!(r.is_ok(), dm && wl, "{p} dm={dm} wl={wl} web={web}: {r:?}");
+                    }
+                }
+            }
+        }
+        // Web: flag + authenticated session; DM/whitelist facts are irrelevant.
+        for dm in bools {
+            for wl in bools {
+                for web in bools {
+                    let r = authorize_defcon_change(&Platform::Web, &facts(dm, wl, web), true);
+                    assert_eq!(r.is_ok(), web, "web dm={dm} wl={wl} web={web}: {r:?}");
+                }
+            }
+        }
+        // The default facts refuse every remote platform even with the flag on.
+        let d = DefconAuthFacts::default();
+        for p in [Platform::Telegram, Platform::Web, Platform::Slack] {
+            assert!(authorize_defcon_change(&p, &d, true).is_err());
+        }
+        // Refusal text never echoes the platform's user input and names the key when the flag is off.
+        let e = authorize_defcon_change(&Platform::Telegram, &facts(true, true, true), false)
+            .expect_err("flag off refuses");
+        assert!(e.contains("security.defcon_remote_change_enabled"), "{e}");
     }
 }

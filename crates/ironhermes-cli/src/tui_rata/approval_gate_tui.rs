@@ -25,49 +25,31 @@
 //! process-lifetime [`ApprovalsStore`](ironhermes_core::ApprovalsStore) the headless
 //! flow uses, with the SAME `normalize_command` cache-key scope — no parallel store.
 //!
-//! # DD-01: live `/yolo` Arc, not a snapshot bool
+//! # D-21: this gate never decides a bypass
 //!
-//! `yolo` is `Arc<AtomicBool>` — the SAME `Arc` [`App.yolo_enabled`] owns and
-//! [`handle_toggle`](crate::tui_rata::commands) flips — read live inside
-//! `request_approval` with `Ordering::SeqCst`, never captured as a per-turn
-//! snapshot. Phase 39.1 Plan 04 (R39.1-06 / D-06) removed the mid-turn
-//! slash-command gate, so the operator can type `/yolo` while a turn is in
-//! flight; a snapshot would silently ignore that toggle for the rest of the
-//! turn. This is a deliberate divergence from
-//! [`CliApprovalGate`](crate::approval_gate::CliApprovalGate), which stores a
-//! snapshot `bool` — correct there because the headless CLI has no mid-turn
-//! toggle surface (`resolve_yolo` fixes the value for the process at
-//! startup). Do NOT "harmonize" the two types by converting this field to a
-//! plain `bool` — that reintroduces the toggle-goes-stale bug this module
-//! exists to fix. `build_tui_gated_terminal_intercept` /
-//! `build_tui_gated_execute_code_intercept` intentionally keep taking the
-//! turn-start `yolo_now` snapshot (out of scope here), so the gate is never
-//! MORE permissive than the intercepts — only ever stricter, since it also
-//! observes the operator turning yolo back OFF mid-turn.
+//! Phase 57 retired the old shared-atomic yolo field and its first-statement
+//! short-circuit. `request_approval` now ALWAYS either answers from the
+//! `[s]ession` cache or surfaces a prompt on its channel: it returns `Approved`
+//! only for an operator answer or a session grant, never because a level or a
+//! flag says so. A Warn at DEFCON 4-5 is bypassed UPSTREAM, by
+//! `execute_gated_command` (and the registry screen), which read the session's
+//! live level at the decision and write the `resolution="bypass"` audit row,
+//! the per-turn ledger entry and the operator notice. A live `/yolo <N>` is the
+//! audited core command (`cmd_yolo`) and changes that level; this gate holds no
+//! copy of it, so there is nothing for it to go stale on (closes the folded todo
+//! `2026-10-07-tui-live-yolo-toggle-silent-bypass`).
 //!
-//! # DD-02: the yolo short-circuit runs first
-//!
-//! The yolo load is the FIRST statement of `request_approval`, ahead of
-//! command extraction and ahead of the `is_session_approved` cache check —
-//! mirroring `CliApprovalGate`'s `prompt_for_approval_with_reader`, whose
-//! yolo check is likewise its first statement, ahead of both the non-TTY
-//! check and the session cache. The ordering cannot change any observable
-//! outcome (a cache hit and a yolo bypass both resolve to `Approved`); it
-//! only skips a pointless `.await` on the shared `ApprovalsStore` lock when
-//! the answer is already known.
-//!
-//! This bypass fires ONLY on the `NeedsApproval` branch consulted by
-//! `request_approval`; it cannot reach a Tier-2 `GuardrailDecision::Block`,
-//! which returns upstream in `agent_loop.rs` without ever consulting a gate.
+//! The intercept builders below take no yolo flag either: each reads
+//! `GatePolicy::for_session(&session_id)` when the call is decided, so a
+//! `/yolo` typed mid-turn is observed by the very next gated call.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use ironhermes_core::{ApprovalGate, ApprovalOutcome, ApprovalsStore};
+use ironhermes_core::{ApprovalGate, ApprovalOutcome, ApprovalsStore, YoloBypassSummary};
 
 use crate::tui_rata::overlay::OverlayKind;
 
@@ -122,29 +104,50 @@ impl ApprovalRequest {
 
 /// Channel-based [`ApprovalGate`] for `tui_rata`. Holds the sender half of the
 /// request channel plus the shared [`ApprovalsStore`] for the D-04 session-tier
-/// short-circuit.
+/// short-circuit. It carries no DEFCON or yolo state: bypass is decided upstream.
 pub struct TuiApprovalGate {
     tx: UnboundedSender<ApprovalRequest>,
     approvals: Arc<ApprovalsStore>,
-    /// The SAME `Arc<AtomicBool>` that `App.yolo_enabled` owns and
-    /// `handle_toggle` flips. Read live (never snapshotted) per DD-01, so a
-    /// mid-turn `/yolo` toggle is observed for the rest of the turn.
-    yolo: Arc<AtomicBool>,
+    /// D-04 (Phase 54 Finding 1): optional sender for yolo-bypass notices,
+    /// drained by `recv_yolo_notice` in `run_app_inner`'s `select!` and pushed
+    /// into the ratatui transcript as a `Role::System` line via
+    /// `App::surface_yolo_notice`. `None` on every existing construction site
+    /// (via [`new`](Self::new)) and every test in this module — they keep
+    /// compiling unchanged; only the production `event_loop.rs` call site
+    /// supplies `Some` via [`new_with_notice_tx`](Self::new_with_notice_tx).
+    notice_tx: Option<UnboundedSender<String>>,
 }
 
 impl TuiApprovalGate {
     /// `tx`: the sender half wired to `App.approval_rx` (drained by
     /// `recv_approval_request` in `run_app_inner`'s `select!`). `approvals`: the
     /// SAME process-lifetime store every `spawn_turn` gating closure shares (WR-01)
-    /// so a `[s]ession` grant persists exactly as it does headless. `yolo`: the
-    /// live `/yolo` toggle Arc (DD-01) — pass `app.yolo_enabled.clone()`, not a
-    /// fresh Arc, so this gate observes the operator's actual toggle state.
-    pub fn new(
+    /// so a `[s]ession` grant persists exactly as it does headless.
+    ///
+    /// The yolo-bypass notice sender is `None` from this constructor — use
+    /// [`new_with_notice_tx`](Self::new_with_notice_tx) to wire D-04 notification.
+    pub fn new(tx: UnboundedSender<ApprovalRequest>, approvals: Arc<ApprovalsStore>) -> Self {
+        Self {
+            tx,
+            approvals,
+            notice_tx: None,
+        }
+    }
+
+    /// Same as [`new`](Self::new), but also wires the yolo-bypass notice channel
+    /// (D-04, Phase 54 Finding 1) — `notice_tx` is the sender half of
+    /// `App.yolo_notice_rx`, cloned in `spawn_turn`. Pass `None` to get the
+    /// exact behavior of [`new`](Self::new) (default no-op notifier).
+    pub fn new_with_notice_tx(
         tx: UnboundedSender<ApprovalRequest>,
         approvals: Arc<ApprovalsStore>,
-        yolo: Arc<AtomicBool>,
+        notice_tx: Option<UnboundedSender<String>>,
     ) -> Self {
-        Self { tx, approvals, yolo }
+        Self {
+            tx,
+            approvals,
+            notice_tx,
+        }
     }
 }
 
@@ -157,16 +160,6 @@ impl ApprovalGate for TuiApprovalGate {
         reason: &str,
         args: &serde_json::Value,
     ) -> ApprovalOutcome {
-        // DD-02: yolo short-circuit FIRST, ahead of command extraction and the
-        // is_session_approved cache check — mirrors CliApprovalGate's
-        // prompt_for_approval_with_reader precedent. DD-01: live Arc read, not
-        // a snapshot, so a mid-turn /yolo toggle is observed for the rest of
-        // this turn. Ordering::SeqCst matches handle_toggle (commands.rs) and
-        // the existing load at the per-turn construction site.
-        if self.yolo.load(Ordering::SeqCst) {
-            return ApprovalOutcome::Approved;
-        }
-
         // Same command extraction + cache-key normalization CliApprovalGate uses,
         // so the [s]ession short-circuit shares the headless cache-key scope (D-04).
         let command = args
@@ -209,6 +202,45 @@ impl ApprovalGate for TuiApprovalGate {
     async fn resolve(&self, _session_id: &str, _approved: bool) -> bool {
         false
     }
+
+    /// D-04 (Phase 54 Finding 1): push a yolo-bypass notice onto the SAME
+    /// channel shape this gate already uses to reach the ratatui transcript
+    /// (mirrors `App.approval_tx`/`approval_rx`) — never `println!`/`eprintln!`,
+    /// which would corrupt the frame under crossterm raw mode. Best-effort: a
+    /// missing sender (constructed via [`new`](Self::new), or the receiver
+    /// already dropped) is a silent no-op, not a panic.
+    ///
+    /// Phase 54.3: this is the PER-CALL unscoped fallback, reached only when a
+    /// bypass happens outside any `YOLO_LEDGER` turn scope. The per-turn path is
+    /// [`notify_yolo_bypass_turn`](ApprovalGate::notify_yolo_bypass_turn).
+    async fn notify_yolo_bypass(&self, _session_id: &str, tool_name: &str, reason: &str) {
+        if let Some(tx) = &self.notice_tx {
+            let _ = tx.send(format!(
+                "[YOLO BYPASS] `{tool_name}` ran without approval — reason: {reason}"
+            ));
+        }
+    }
+
+    /// Phase 54.3 D-03/D-08: ONE short message per bypassing turn on the existing
+    /// notice channel, which `recv_yolo_notice` drains into exactly one collapsed
+    /// `Role::System` transcript row via `App::surface_yolo_notice`.
+    ///
+    /// The text is `YoloBypassSummary::short_line()` — the same shared formatter
+    /// every other surface uses — so it is newline-free and length-capped.
+    ///
+    /// Never `println!`/`eprintln!`: writing to stdout or stderr here corrupts
+    /// the ratatui frame under crossterm raw mode (G-41.1-1); the channel is the
+    /// only legal delivery path. Best-effort: a missing sender is a silent no-op.
+    ///
+    /// D-08: the signal deliberately stays in the TRANSCRIPT as a compact row. It
+    /// was offered a home in the TUI status line and rejected; that is a
+    /// deliberate divergence from the web surface's header placement (D-06) and
+    /// must not be "fixed" for consistency.
+    async fn notify_yolo_bypass_turn(&self, summary: &YoloBypassSummary) {
+        if let Some(tx) = &self.notice_tx {
+            let _ = tx.send(summary.short_line());
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,7 +265,6 @@ pub fn build_tui_gated_terminal_intercept(
     session_id: String,
     surface: &'static str,
     chat_id: String,
-    yolo: bool,
     gate: Arc<dyn ApprovalGate>,
 ) -> ironhermes_tools::registry::InterceptHandler {
     Arc::new(move |args: serde_json::Value| {
@@ -264,7 +295,9 @@ pub fn build_tui_gated_terminal_intercept(
                 &session_id,
                 surface,
                 &chat_id,
-                yolo,
+                // D-09/D-21: the session's LIVE level and the booted sidecar, read when the
+                // call is decided (never a flag captured when this closure was built).
+                ironhermes_hooks::GatePolicy::for_session(&session_id),
                 is_remote_backend,
                 forward_env_nonempty,
                 || async move {
@@ -282,9 +315,12 @@ pub fn build_tui_gated_terminal_intercept(
 }
 
 /// Build an `execute_code` intercept for the `tui_rata` surface that gates through
-/// the channel-based `gate`. Mirrors `build_tui_gated_terminal_intercept` but passes
-/// an empty opaque `classify_arg` and `is_remote_backend=false` /
-/// `forward_env_nonempty=false` (D-11).
+/// the channel-based `gate`. Mirrors `build_tui_gated_terminal_intercept` but per
+/// D-01 (overturns D-11) passes the caller's REAL Python source as `classify_arg` —
+/// `DangerousCommandGuardrail::check`'s `tool_name == "execute_code"` branch
+/// classifies it — and always forwards `is_remote_backend=false` /
+/// `forward_env_nonempty=false`. Missing or non-string `code` in the incoming args
+/// coerces to an empty `classify_arg` rather than panicking.
 #[allow(clippy::too_many_arguments)]
 pub fn build_tui_gated_execute_code_intercept(
     tool: Option<Arc<dyn ironhermes_tools::Tool>>,
@@ -292,7 +328,6 @@ pub fn build_tui_gated_execute_code_intercept(
     session_id: String,
     surface: &'static str,
     chat_id: String,
-    yolo: bool,
     gate: Arc<dyn ApprovalGate>,
 ) -> ironhermes_tools::registry::InterceptHandler {
     Arc::new(move |args: serde_json::Value| {
@@ -307,18 +342,28 @@ pub fn build_tui_gated_execute_code_intercept(
             );
             let audit_log = ironhermes_core::AuditLog::load(config.audit.clone());
 
+            // D-01 (overturns D-11): extract the real Python source so
+            // DangerousCommandGuardrail's execute_code branch can classify it.
+            let classify_arg = args
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
             let outcome = ironhermes_hooks::execute_gated_command(
                 "execute_code",
-                "", // D-11: opaque — Python source is not shell syntax
+                &classify_arg,
                 &guard,
                 Some(gate.as_ref()),
                 &audit_log,
                 &session_id,
                 surface,
                 &chat_id,
-                yolo,
-                false, // D-11: execute_code never routes to a remote backend
-                false, // D-11: execute_code never forwards credentials cross-boundary
+                // D-09/D-21: the session's LIVE level and the booted sidecar, read when the
+                // call is decided (never a flag captured when this closure was built).
+                ironhermes_hooks::GatePolicy::for_session(&session_id),
+                false, // D-01: execute_code never routes to a remote backend
+                false, // D-01: execute_code never forwards credentials cross-boundary
                 || async move {
                     match tool {
                         Some(t) => t.execute(args).await,
@@ -347,7 +392,7 @@ mod tests {
         let approvals = Arc::new(ApprovalsStore::with_path(
             std::env::temp_dir().join("gsd_tui_gate_roundtrip.json"),
         ));
-        let gate = TuiApprovalGate::new(tx, approvals, Arc::new(AtomicBool::new(false)));
+        let gate = TuiApprovalGate::new(tx, approvals);
 
         let req_task = tokio::spawn(async move {
             gate.request_approval(
@@ -374,7 +419,7 @@ mod tests {
         let approvals = Arc::new(ApprovalsStore::with_path(
             std::env::temp_dir().join("gsd_tui_gate_drop.json"),
         ));
-        let gate = TuiApprovalGate::new(tx, approvals, Arc::new(AtomicBool::new(false)));
+        let gate = TuiApprovalGate::new(tx, approvals);
 
         let req_task = tokio::spawn(async move {
             gate.request_approval(
@@ -408,7 +453,7 @@ mod tests {
         ));
         // Pre-approve the SAME normalized cache key on the SAME store.
         approvals.approve_session("echo hi").await;
-        let gate = TuiApprovalGate::new(tx, approvals, Arc::new(AtomicBool::new(false)));
+        let gate = TuiApprovalGate::new(tx, approvals);
 
         let outcome = gate
             .request_approval(
@@ -426,49 +471,78 @@ mod tests {
         );
     }
 
-    /// Quick task 260823-qyp Test A: yolo ON + dropped receiver still resolves
-    /// `Approved`. The dead receiver is the assertion's teeth — if the
-    /// short-circuit did not fire, `self.tx.send` would fail closed and this
-    /// would return `Denied` instead. `Approved` with no live receiver is only
-    /// reachable via the DD-01/DD-02 bypass.
+    /// D-21 (Phase 57 plan 13): the old yolo short-circuit is gone. The gate sends a
+    /// prompt on its channel and returns the OPERATOR's answer; with a dead receiver it
+    /// fails closed. Nothing about the session's DEFCON level — even 5, the highest
+    /// bypass level — makes `request_approval` return `Approved` on its own.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tui_gate_yolo_on_bypasses_with_dead_receiver() {
+    async fn tui_gate_never_auto_approves() {
+        // The bypass level is set on the very session the request names, so a gate that
+        // still consulted the level would have an excuse to approve.
+        ironhermes_core::defcon::session_defcon().set_session_level(
+            "sess-never-auto",
+            ironhermes_core::config::DefconLevel::FIVE,
+        );
+
+        // (a) dead receiver: fail closed, never Approved.
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
         drop(rx);
         let approvals = Arc::new(ApprovalsStore::with_path(
-            std::env::temp_dir().join("gsd_tui_gate_yolo_on.json"),
+            std::env::temp_dir().join("gsd_tui_gate_never_auto_dead.json"),
         ));
-        let yolo = Arc::new(AtomicBool::new(true));
-        let gate = TuiApprovalGate::new(tx, approvals, yolo);
-
+        let gate = TuiApprovalGate::new(tx, approvals);
         let outcome = gate
             .request_approval(
-                "sess",
+                "sess-never-auto",
                 "terminal",
                 "reason",
-                &serde_json::json!({ "command": "rm -rf /" }),
+                &serde_json::json!({ "command": "rm -rf /tmp/x" }),
             )
             .await;
-
         assert_eq!(
             outcome,
-            ApprovalOutcome::Approved,
-            "yolo=true must short-circuit to Approved even with no live receiver — \
-             a dead channel proves nothing was sent, so this is only reachable via the bypass"
+            ApprovalOutcome::Denied,
+            "a dead channel must fail closed at DEFCON 5 too, never auto-approve"
         );
-    }
 
-    /// Quick task 260823-qyp Test B: yolo OFF still surfaces a real
-    /// `ApprovalRequest` on the channel and still honors the operator's
-    /// `Denied` answer — proves the overlay path is untouched when yolo is off.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tui_gate_yolo_off_still_surfaces_overlay() {
+        // (b) live receiver: a prompt is sent and the operator's Denied answer wins.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
         let approvals = Arc::new(ApprovalsStore::with_path(
-            std::env::temp_dir().join("gsd_tui_gate_yolo_off.json"),
+            std::env::temp_dir().join("gsd_tui_gate_never_auto_live.json"),
         ));
-        let yolo = Arc::new(AtomicBool::new(false));
-        let gate = TuiApprovalGate::new(tx, approvals, yolo);
+        let gate = TuiApprovalGate::new(tx, approvals);
+        let req_task = tokio::spawn(async move {
+            gate.request_approval(
+                "sess-never-auto",
+                "terminal",
+                "reason",
+                &serde_json::json!({ "command": "echo hi" }),
+            )
+            .await
+        });
+        let req = rx
+            .recv()
+            .await
+            .expect("the gate must surface a prompt at every level");
+        let _ = req.resolve.send(ApprovalOutcome::Denied);
+        assert_eq!(
+            req_task.await.unwrap(),
+            ApprovalOutcome::Denied,
+            "the operator's answer must win"
+        );
+
+        ironhermes_core::defcon::session_defcon().forget("sess-never-auto");
+    }
+
+    /// The overlay path: a request is surfaced and an operator `Approved` answer is
+    /// honoured (the only way this gate returns Approved besides a session grant).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_gate_surfaces_overlay_and_honours_answer() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        let approvals = Arc::new(ApprovalsStore::with_path(
+            std::env::temp_dir().join("gsd_tui_gate_surfaces.json"),
+        ));
+        let gate = TuiApprovalGate::new(tx, approvals);
 
         let req_task = tokio::spawn(async move {
             gate.request_approval(
@@ -483,60 +557,126 @@ mod tests {
         let req = rx
             .recv()
             .await
-            .expect("yolo=false must still emit an ApprovalRequest on the channel");
-        let _ = req.resolve.send(ApprovalOutcome::Denied);
+            .expect("an ApprovalRequest must be emitted on the channel");
+        let _ = req.resolve.send(ApprovalOutcome::Approved);
 
-        let outcome = req_task.await.unwrap();
-        assert_eq!(
-            outcome,
-            ApprovalOutcome::Denied,
-            "the operator's Denied answer must still win when yolo is off"
-        );
+        assert_eq!(req_task.await.unwrap(), ApprovalOutcome::Approved);
     }
 
-    /// Quick task 260823-qyp Test C (DD-01 regression lock): a mid-turn flip on
-    /// the SAME gate instance changes the outcome. This is the test that fails
-    /// if anyone downgrades `TuiApprovalGate.yolo` from `Arc<AtomicBool>` to a
-    /// snapshot `bool` — a snapshot would return `Denied` on the second call too.
+    // ---------------------------------------------------------------------------
+    // Task 3 (D-04): notify_yolo_bypass override — fails if the override is
+    // deleted (defaults back to the trait's no-op and the channel never fires).
+    // ---------------------------------------------------------------------------
+
+    /// A gate constructed via `new_with_notice_tx(Some(tx))` delivers a
+    /// `notify_yolo_bypass` call's message onto that channel — proven by
+    /// draining it, not merely asserting the method compiles. If the override
+    /// were deleted (falling back to the trait's default no-op), `rx.recv()`
+    /// would hang forever instead of returning `Some(..)`.
+    ///
+    /// Phase 54.3: covers the PER-CALL unscoped fallback, retained unchanged;
+    /// the per-turn contract is `tui_gate_notify_turn_sends_one_short_row_for_n_bypasses`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tui_gate_midturn_yolo_flip_is_observed() {
+    async fn tui_gate_notify_yolo_bypass_reaches_notice_channel() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
         drop(rx);
         let approvals = Arc::new(ApprovalsStore::with_path(
-            std::env::temp_dir().join("gsd_tui_gate_midturn_flip.json"),
+            std::env::temp_dir().join("gsd_tui_gate_notify.json"),
         ));
-        let yolo = Arc::new(AtomicBool::new(false));
-        let gate = TuiApprovalGate::new(tx, approvals, yolo.clone());
+        let (notice_tx, mut notice_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let gate = TuiApprovalGate::new_with_notice_tx(tx, approvals, Some(notice_tx));
 
-        let first = gate
-            .request_approval(
-                "sess",
-                "terminal",
-                "reason",
-                &serde_json::json!({ "command": "echo hi" }),
-            )
+        gate.notify_yolo_bypass("sess", "execute_code", "dangerous pattern matched")
             .await;
-        assert_eq!(
-            first,
-            ApprovalOutcome::Denied,
-            "yolo=false + dead receiver must fail closed to Denied before the flip"
-        );
 
-        yolo.store(true, Ordering::SeqCst);
-
-        let second = gate
-            .request_approval(
-                "sess",
-                "terminal",
-                "reason",
-                &serde_json::json!({ "command": "echo hi" }),
-            )
-            .await;
-        assert_eq!(
-            second,
-            ApprovalOutcome::Approved,
-            "DD-01 guard: the SAME gate instance must observe the live toggle flip — \
-             a snapshot bool would still return Denied here"
+        let notice = tokio::time::timeout(std::time::Duration::from_secs(2), notice_rx.recv())
+            .await
+            .expect("notice channel must receive within timeout — the override must not hang")
+            .expect("channel must yield Some(..), not None (sender dropped)");
+        assert!(
+            notice.contains("execute_code"),
+            "notice must name the tool: {notice}"
         );
+        assert!(
+            notice.contains("dangerous pattern matched"),
+            "notice must contain the guardrail reason: {notice}"
+        );
+    }
+
+    /// `new()` (no notice sender wired) must be a silent no-op — never a panic
+    /// — when `notify_yolo_bypass` is called. Exercises the default-constructed
+    /// path every existing production/test call site still uses.
+    ///
+    /// Phase 54.3: covers the PER-CALL unscoped fallback; the per-turn twin is
+    /// `tui_gate_notify_turn_without_tx_does_not_panic`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_gate_notify_yolo_bypass_without_notice_tx_does_not_panic() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        drop(rx);
+        let approvals = Arc::new(ApprovalsStore::with_path(
+            std::env::temp_dir().join("gsd_tui_gate_notify_none.json"),
+        ));
+        let gate = TuiApprovalGate::new(tx, approvals);
+
+        // Must not panic.
+        gate.notify_yolo_bypass("sess", "terminal", "reason").await;
+    }
+
+    /// Phase 54.3 D-03/D-08: N bypasses in one turn reach the transcript as
+    /// exactly ONE short message on the existing notice channel — a second
+    /// `try_recv` must find the channel empty, and the row must be a single
+    /// line of at most 120 chars so it renders as one transcript row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_gate_notify_turn_sends_one_short_row_for_n_bypasses() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        drop(rx);
+        let approvals = Arc::new(ApprovalsStore::with_path(
+            std::env::temp_dir().join("gsd_tui_gate_notify_turn.json"),
+        ));
+        let (notice_tx, mut notice_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let gate = TuiApprovalGate::new_with_notice_tx(tx, approvals, Some(notice_tx));
+        let reason = "command contains shell metacharacters — string-level matching cannot verify safety; approval required (D-09)";
+        let mut summary =
+            ironhermes_core::YoloBypassSummary::single("sess", "tui", "chat", "terminal", reason);
+        summary.items.push(ironhermes_core::YoloBypass {
+            tool: "terminal".to_string(),
+            reason: reason.to_string(),
+        });
+
+        gate.notify_yolo_bypass_turn(&summary).await;
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), notice_rx.recv())
+            .await
+            .expect("notice channel must receive within timeout — the override must not hang")
+            .expect("channel must yield Some(..), not None (sender dropped)");
+        assert!(
+            notice_rx.try_recv().is_err(),
+            "exactly ONE message per turn — a second per-call row must not arrive (D-08)"
+        );
+        assert!(msg.contains('2'), "must carry the aggregate count: {msg}");
+        assert!(msg.contains("terminal"), "must name the tool: {msg}");
+        assert!(!msg.contains('\n'), "must be a single row: {msg:?}");
+        assert!(
+            msg.chars().count() <= 120,
+            "must be a short row (<= 120 chars), got {}: {msg}",
+            msg.chars().count()
+        );
+    }
+
+    /// Per-turn twin of the no-tx test: with no notice sender wired,
+    /// `notify_yolo_bypass_turn` must be a silent no-op — never a panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_gate_notify_turn_without_tx_does_not_panic() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        drop(rx);
+        let approvals = Arc::new(ApprovalsStore::with_path(
+            std::env::temp_dir().join("gsd_tui_gate_notify_turn_none.json"),
+        ));
+        let gate = TuiApprovalGate::new(tx, approvals);
+        let summary =
+            ironhermes_core::YoloBypassSummary::single("sess", "tui", "chat", "terminal", "reason");
+
+        // Must not panic.
+        gate.notify_yolo_bypass_turn(&summary).await;
     }
 }

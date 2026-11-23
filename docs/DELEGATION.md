@@ -292,6 +292,8 @@ delegate_task(
 
 The timer resets on every tool call or API call — only genuinely idle children trigger a kill.
 
+A child that blocks past its deadline is aborted by the parent, and the call returns `Subagent timed out after Ns (aborted by parent deadline)`. A call that waits for a free delegate slot gives up at the same deadline with `Subagent timed out after Ns waiting for a delegate slot`, so the parent turn always gets a reply. `timeout_seconds` is not clamped to `child_timeout_seconds`.
+
 ---
 
 ## Subagent Identity and Transcripts

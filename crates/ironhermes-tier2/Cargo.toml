@@ -1,0 +1,40 @@
+[package]
+name = "ironhermes-tier2"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Tier 2 long-term memory (ADR-0008): SQLite claim store + search service"
+
+[features]
+# D-05: the built-in fastembed (ONNX) embedder is on by default; `--no-default-features` compiles
+# it out and leaves only the HTTP embedder.
+default = ["builtin-embedder"]
+builtin-embedder = ["dep:fastembed"]
+test-support = []
+
+[dependencies]
+ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-state = { path = "../ironhermes-state" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+usearch = "2.26.6"
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+# default-features = false: the default set pulls native-tls and the image models; the two
+# rustls features keep the TLS stack aligned with the rest of the workspace.
+fastembed = { version = "7.6.1", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+wiremock = { workspace = true }

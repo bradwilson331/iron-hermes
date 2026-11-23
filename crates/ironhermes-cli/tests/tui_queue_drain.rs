@@ -91,7 +91,10 @@ fn tui_queue_drain_fifo() {
     // maybe_drain_queue which (after the guard cleared) pops "alpha" and
     // installs a fresh pending channel for the drained turn.
     clear_pending(&mut app);
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     assert_eq!(
         app.queue.len(&app.queue_key),
         4,
@@ -106,7 +109,10 @@ fn tui_queue_drain_fifo() {
     // by 1 each cycle until the queue is empty.
     for expected_remaining in [3usize, 2, 1, 0] {
         clear_pending(&mut app);
-        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+        app.handle_stream_event(StreamEvent::Finished {
+            total_tokens: 0,
+            context_warnings: Vec::new(),
+        });
         assert_eq!(
             app.queue.len(&app.queue_key),
             expected_remaining,
@@ -117,7 +123,10 @@ fn tui_queue_drain_fifo() {
     // After the queue is empty AND the last drained turn finishes, no new
     // pending channel is installed (nothing left to drain).
     clear_pending(&mut app);
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     assert!(
         app.pending_tx.is_none(),
         "no fresh pending channel after empty drain"
@@ -161,12 +170,18 @@ fn tui_queue_regression_d11() {
     // After each Finished, simulate the agent loop having drained the pending
     // channel by clearing it before the NEXT Finished arrives.
     clear_pending(&mut app);
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     // alpha drain installed a fresh pending channel — depth dropped to 4.
     assert_eq!(app.queue.len(&app.queue_key), 4);
     for _ in 0..5 {
         clear_pending(&mut app);
-        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+        app.handle_stream_event(StreamEvent::Finished {
+            total_tokens: 0,
+            context_warnings: Vec::new(),
+        });
     }
     assert_eq!(app.queue.len(&app.queue_key), 0, "all 5 drained");
 
@@ -201,7 +216,10 @@ fn tui_queue_regression_d11() {
 
     // Step 6: turn completes with paused=true — drain MUST be skipped.
     clear_pending(&mut app);
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     assert_eq!(
         app.queue.len(&app.queue_key),
         2,
@@ -218,7 +236,10 @@ fn tui_queue_regression_d11() {
     // a no-op Finished. The Finished arm calls maybe_drain_queue (Resolution 4
     // also re-pauses on Error, but Finished does not). Since pending_tx is
     // already None and paused is now false, the drain pops foxtrot.
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     assert_eq!(app.queue.len(&app.queue_key), 1, "foxtrot drained first");
     let users_after_foxtrot = user_history_texts(&app);
     assert_eq!(
@@ -229,7 +250,10 @@ fn tui_queue_regression_d11() {
 
     // Next Finished cycle drains golf.
     clear_pending(&mut app);
-    app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+    app.handle_stream_event(StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    });
     assert_eq!(app.queue.len(&app.queue_key), 0, "golf drained second");
     let users_after_golf = user_history_texts(&app);
     assert_eq!(

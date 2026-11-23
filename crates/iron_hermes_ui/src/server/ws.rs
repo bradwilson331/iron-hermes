@@ -15,6 +15,64 @@ use tracing::{info, warn};
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
+/// Phase 54.9 Plan 10 (D-09): true only when the request is an OpenUI turn AND asked for the
+/// opt-in Thesys hosted Gateway. A bare `openui_gateway` never reaches the Gateway.
+#[cfg(feature = "server")]
+pub(crate) const OPENUI_GATEWAY_DISABLED: &str =
+    "The Thesys Gateway is disabled. Set ui.openui_gateway_enabled: true in config.yaml to use it.";
+
+#[cfg(feature = "server")]
+pub(crate) fn openui_gateway_requested(req: &ChatRequest) -> bool {
+    req.openui && req.openui_gateway
+}
+
+/// Phase 54.9 Plan 09 (D-09, T-54.9-24): the one-shot skill overlay an OpenUI turn carries.
+/// `Some(("openui", body))` only when the client set `openui: true`; the body is the server's
+/// compiled-in prompt plus the host restrictions, never client text.
+#[cfg(feature = "server")]
+pub(crate) fn openui_overlay_for(req: &ChatRequest) -> Option<(String, String)> {
+    req.openui.then(|| {
+        (
+            "openui".to_string(),
+            super::openui_route::openui_overlay_body(),
+        )
+    })
+}
+
+/// CR-02 / RR-04: an OpenUI turn that is NOT the operator's own typed prompt (a generated
+/// button's action; the text is model-controlled) must never reach the slash-command router.
+#[cfg(feature = "server")]
+pub(crate) fn openui_action_slash_blocked(req: &ChatRequest) -> bool {
+    req.openui && !req.openui_prompt && req.message.trim_start().starts_with('/')
+}
+
+/// RR-02: the web queue is a shared `String` FIFO, so an OpenUI turn that has to wait carries
+/// this marker in front of its text. The drain strips it and applies the overlay after the
+/// inbound gate, exactly like a live turn (WR-01 ordering). Control chars are not typeable into
+/// the chat input; a hand-crafted `/queue` argument that includes the marker can only add the
+/// same one-shot OpenUI overlay to its own session's turn.
+#[cfg(feature = "server")]
+const OPENUI_QUEUE_TAG: &str = "\u{1}ih-openui\u{1}";
+
+/// The text to push onto the web queue for `message`.
+#[cfg(feature = "server")]
+pub(crate) fn tag_queued_message(message: &str, openui: bool) -> String {
+    if openui {
+        format!("{OPENUI_QUEUE_TAG}{message}")
+    } else {
+        message.to_string()
+    }
+}
+
+/// Inverse of [`tag_queued_message`]: the text to run and whether to apply the OpenUI overlay.
+#[cfg(feature = "server")]
+pub(crate) fn split_queued_message(raw: String) -> (String, bool) {
+    match raw.strip_prefix(OPENUI_QUEUE_TAG) {
+        Some(rest) => (rest.to_string(), true),
+        None => (raw, false),
+    }
+}
+
 // Phase 36.1 D-04/D-05/D-07: slash interception imports.
 // Phase 39.1: is_bypass removed (slash commands never rejected mid-turn per D-06).
 #[cfg(feature = "server")]
@@ -119,11 +177,22 @@ fn build_voice_status(
     // process restart. Cost: one YAML parse per connect — acceptable for a local app.
     // Precedent: toggle_skill (api.rs:412) uses Config::load() fresh.
     // T-36.17.10-03-02 mitigation: fall back to startup snapshot on parse error.
-    let cfg =
-        ironhermes_core::config::Config::load().unwrap_or_else(|_| (*app_state.config()).clone());
+    voice_status_from(&fresh_voice_config(&app_state.config()))
+}
 
+/// Pure builder behind [`build_voice_status`]: the VoiceStatus snapshot for `cfg`.
+#[cfg(feature = "server")]
+fn voice_status_from(cfg: &ironhermes_core::config::Config) -> crate::protocol::ChatStreamEvent {
     let stt_provider = select_stt_provider(&cfg.stt);
-    let stt_available = stt_provider.is_some();
+    // Pitfall 15: "selected" is not "usable". Available only when the selected
+    // provider is registered AND reports itself available (an openai_compatible
+    // STT with an empty base_url is not). Availability needs no key, so no vault
+    // access is needed here.
+    let stt_available = stt_provider.as_deref().is_some_and(|name| {
+        ironhermes_tools::stt::build_stt_registry_with_vault(&cfg.stt, None)
+            .get(name)
+            .is_some_and(|p| p.is_available())
+    });
     let tts_available = cfg.tts.provider != "none";
     let tts_provider = if tts_available {
         Some(cfg.tts.provider.clone())
@@ -135,10 +204,12 @@ fn build_voice_status(
     let stt_model: Option<String> = match cfg.stt.provider.as_str() {
         "groq" => Some(cfg.stt.groq.model.clone()),
         "openai" => Some(cfg.stt.openai.model.clone()),
+        "openai_compatible" => Some(cfg.stt.openai_compatible.model.clone()),
         // "auto": select_stt_provider picks the available provider; derive model from it.
         _ => stt_provider.as_deref().map(|p| match p {
             "groq" => cfg.stt.groq.model.clone(),
             "openai" => cfg.stt.openai.model.clone(),
+            "openai_compatible" => cfg.stt.openai_compatible.model.clone(),
             _ => String::new(),
         }),
     };
@@ -155,6 +226,107 @@ fn build_voice_status(
         web_silence_threshold_rms: Some(cfg.voice.web_silence_threshold_rms),
         speech_confirm_ms: Some(500u32), // hardcoded per RESEARCH Open Q4
         auto_tts: Some(cfg.voice.auto_tts),
+    }
+}
+
+/// Phase 54.7 (D-18): the voice config a turn should run on.
+///
+/// Re-reads `config.yaml` so a web save applies to the next turn without a
+/// restart, and falls back to the boot `snapshot` only when the file fails to
+/// load (T-54.7-43). Same precedent as [`build_voice_status`]. Callers read it
+/// ONCE at the start of a turn and hold the value, so an in-flight turn
+/// finishes on the settings it started with. Deliberately does NOT call
+/// `AppState::apply_config_now` (it rebuilds the main LLM client and would
+/// publish unrelated unsaved edits).
+#[cfg(feature = "server")]
+pub(crate) fn fresh_voice_config(
+    snapshot: &ironhermes_core::config::Config,
+) -> ironhermes_core::config::Config {
+    ironhermes_core::config::Config::load().unwrap_or_else(|_| snapshot.clone())
+}
+
+/// IN-05: [`fresh_voice_config`] for async callers. `Config::load()` is blocking
+/// disk + YAML work, and the per-clip paths run it on the async executor (once per
+/// clip, including every wake-word probe), so it is moved to the blocking pool. A
+/// failed join falls back to the boot snapshot, like a failed load.
+#[cfg(feature = "server")]
+pub(crate) async fn fresh_voice_config_async(
+    snapshot: &ironhermes_core::config::Config,
+) -> ironhermes_core::config::Config {
+    let owned = snapshot.clone();
+    tokio::task::spawn_blocking(move || fresh_voice_config(&owned))
+        .await
+        .unwrap_or_else(|_| snapshot.clone())
+}
+
+/// Phase 54.7 (D-18/D-19): transcribe one full-turn clip with `cfg`'s STT
+/// settings and apply the hallucination filter.
+///
+/// `None` means "send nothing": no provider, a provider failure (logged with
+/// the category only, T-54.7-45) or a transcript the filter rejected.
+#[cfg(feature = "server")]
+pub(crate) async fn transcribe_turn_audio(
+    cfg: &ironhermes_core::config::Config,
+    bytes: &[u8],
+    mime: &str,
+    cache_dir: &std::path::Path,
+) -> Option<String> {
+    use ironhermes_tools::hallucination_filter::HallucinationFilter;
+
+    let vault = ironhermes_core::voice_http::voice_vault_config(cfg);
+    let raw = match ironhermes_tools::stt::clip::transcribe_clip(
+        bytes,
+        mime,
+        &cfg.stt,
+        vault.as_ref(),
+        cache_dir,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            // ClipError's Display carries the category / provider name only.
+            warn!(reason = %e, "audio-in: STT transcription failed; dropping");
+            return None;
+        }
+    };
+
+    // D-12: HallucinationFilter.
+    match HallucinationFilter::filter(&raw) {
+        Some(t) => Some(t.to_string()),
+        None => {
+            info!("audio-in: transcript rejected by hallucination filter; no message sent");
+            None
+        }
+    }
+}
+
+/// Phase 54.7 (D-18/D-19): transcribe one short wake-word clip with `cfg`'s STT
+/// settings. Returns the raw transcript (the phrase match is the gate, so no
+/// hallucination filter); `None` on any failure, which the caller reports as
+/// "no match". Logs the category / provider name only (T-54.7-45).
+#[cfg(feature = "server")]
+pub(crate) async fn wake_word_transcript(
+    cfg: &ironhermes_core::config::Config,
+    bytes: &[u8],
+    mime: &str,
+    cache_dir: &std::path::Path,
+) -> Option<String> {
+    let vault = ironhermes_core::voice_http::voice_vault_config(cfg);
+    match ironhermes_tools::stt::clip::transcribe_clip(
+        bytes,
+        mime,
+        &cfg.stt,
+        vault.as_ref(),
+        cache_dir,
+    )
+    .await
+    {
+        Ok(t) => Some(t),
+        Err(e) => {
+            warn!(reason = %e, "wake-word-check: STT failed; emitting no-match");
+            None
+        }
     }
 }
 
@@ -387,6 +559,305 @@ fn goal_loop_not_available_on_web(objective: &str, budget: Option<u32>) -> Strin
         .to_string()
 }
 
+/// Phase 57 D-14: map one [`WebGateEvent`] onto the wire event for the turn `turn_id`.
+///
+/// `Security` events return `None` here: they map to several wire events (a dot severity
+/// and at most one critical row), so [`web_notice_sink`] sends them through
+/// [`security_event_to_stream`] instead. Neither approval event carries the raw arguments
+/// (the gate never forwards them), only the tool name and the redacted reason.
+#[cfg(feature = "server")]
+pub(crate) fn web_gate_event_to_stream_event(
+    turn_id: uuid::Uuid,
+    event: &crate::server::web_approval_gate::WebGateEvent,
+) -> Option<ChatStreamEvent> {
+    use crate::server::web_approval_gate::WebGateEvent;
+    match event {
+        WebGateEvent::YoloBypass(s) => Some(ChatStreamEvent::YoloBypassNotice {
+            turn_id,
+            session_id: s.session_id.clone(),
+            count: s.count(),
+            tools: s.by_tool(),
+            reasons: s.reasons_capped(20),
+        }),
+        WebGateEvent::ApprovalRequested {
+            session_id,
+            approval_id,
+            tool,
+            reason,
+        } => Some(ChatStreamEvent::ApprovalRequested {
+            turn_id,
+            session_id: session_id.clone(),
+            approval_id: approval_id.clone(),
+            tool: tool.clone(),
+            reason: reason.clone(),
+        }),
+        WebGateEvent::ApprovalResolved {
+            session_id,
+            approval_id,
+            tool,
+            outcome,
+        } => Some(ChatStreamEvent::ApprovalResolved {
+            turn_id,
+            session_id: session_id.clone(),
+            approval_id: approval_id.clone(),
+            tool: tool.clone(),
+            outcome: outcome.clone(),
+        }),
+        WebGateEvent::Security(event) => {
+            // One-to-many: handled by `web_notice_sink` via `security_event_to_stream`.
+            tracing::debug!(
+                target: "ironhermes::security::web_gate",
+                kind = ?event.kind,
+                tool = %event.tool,
+                level = event.level,
+                "security event delivered to the web gate"
+            );
+            None
+        }
+    }
+}
+
+/// The typed notice sink for one turn, built from the turn's own event sender. Used
+/// by all three `run_web_turn` call sites (typed message, STT transcript, queue drain).
+/// Never routed through the assistant-token `StreamCallback` (Phase 54.3 D-01).
+#[cfg(feature = "server")]
+fn web_notice_sink(
+    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+    turn_id: uuid::Uuid,
+    session_id: String,
+) -> crate::server::web_approval_gate::NoticeSink {
+    std::sync::Arc::new(
+        move |event: &crate::server::web_approval_gate::WebGateEvent| {
+            // Phase 57 D-16/D-17: a security event becomes the turn's dot severity and, for
+            // the C2 kinds, one critical transcript row (see `security_event_to_stream`).
+            if let crate::server::web_approval_gate::WebGateEvent::Security(ev) = event {
+                for out in security_event_to_stream(turn_id, &session_id, ev) {
+                    let _ = tx.send(out);
+                }
+                return;
+            }
+            if let Some(ev) = web_gate_event_to_stream_event(turn_id, event) {
+                let _ = tx.send(ev);
+            }
+        },
+    )
+}
+
+/// Phase 57 D-17: the severity event sent next to a failed `ToolCallEnd`, so the client
+/// turns that turn's dot red without inferring it. `None` for a successful call.
+#[cfg(feature = "server")]
+fn tool_failure_severity(
+    turn_id: uuid::Uuid,
+    session_id: &str,
+    success: bool,
+) -> Option<ChatStreamEvent> {
+    (!success).then(|| ChatStreamEvent::TurnSeverity {
+        turn_id,
+        session_id: session_id.to_string(),
+        worst: crate::protocol::TurnWorst::Red,
+    })
+}
+
+/// Phase 57 UI-SPEC R9c: the events to push after a slash command ran, given the
+/// session's level `before` and `after` it. Empty when nothing changed (a refused or
+/// same-level `/yolo`), else one `DefconLevel` carrying the server-computed `bypass`.
+#[cfg(feature = "server")]
+pub(crate) fn web_level_change_events(
+    session_id: &str,
+    before: ironhermes_core::config::DefconLevel,
+    after: ironhermes_core::config::DefconLevel,
+) -> Vec<ChatStreamEvent> {
+    if before == after {
+        return Vec::new();
+    }
+    vec![ChatStreamEvent::DefconLevel {
+        session_id: session_id.to_string(),
+        level: after.level(),
+        bypass: after.yolo_bypass_active(),
+    }]
+}
+
+/// The surface name a web level change is attributed to in its `defcon_changed` row.
+#[cfg(feature = "server")]
+const WEB_DEFCON_SURFACE: &str = "web";
+
+/// Phase 57 D-22: the per-message facts the web surface supplies to `/yolo <N>`.
+/// `auth_enabled` is whether the auth layer is on; the WebSocket upgrade only completes
+/// after `require_auth` validated the session, so with auth on every message here comes
+/// from an authenticated operator, and with it off no message can claim to.
+#[cfg(feature = "server")]
+pub(crate) fn web_defcon_auth_facts(
+    auth_enabled: bool,
+) -> ironhermes_core::commands::context::DefconAuthFacts {
+    ironhermes_core::commands::context::DefconAuthFacts {
+        web_authenticated: auth_enabled,
+        actor: "web".to_string(),
+        ..Default::default()
+    }
+}
+
+/// The level a session's inbound text is screened at: its live level, or the process
+/// default for an id that is not a safe session id (so a hostile id creates no registry
+/// entry).
+#[cfg(feature = "server")]
+fn web_session_level(session_id: &str) -> ironhermes_core::config::DefconLevel {
+    use ironhermes_core::defcon::session_defcon;
+    if ironhermes_core::safe_session_id(session_id).is_some() {
+        session_defcon().handle_for(session_id).get()
+    } else {
+        session_defcon().process_default()
+    }
+}
+
+/// Phase 57 D-04(b): screen one inbound chat message (as pasted text) before the model
+/// sees it. `true` lets the turn proceed. A Block sends one `Error` event naming the rule
+/// ids on `tx`, writes a `security_verdict` row (tool `inbound_message`; rule ids and the
+/// level, never the text) and returns `false`; a Warn writes the row and proceeds.
+///
+/// A Block or Warn that carries `unavailable` is a message that could not be screened
+/// (CR-01). The Error then reads `Message not processed: it could not be screened
+/// (<reason>).` and the row is `sidecar_unavailable` (reason, tool, level, verdict).
+#[cfg(feature = "server")]
+pub(crate) async fn web_inbound_gate_with(
+    tx: &mpsc::UnboundedSender<ChatStreamEvent>,
+    turn_id: uuid::Uuid,
+    session_id: &str,
+    text: &str,
+    level: ironhermes_core::config::DefconLevel,
+    audit: &ironhermes_core::AuditLog,
+) -> bool {
+    use ironhermes_core::content_screen::{ContentKind, ContentScreenRequest, ScreenVerdict};
+
+    // No screen installed means no host booted the sidecar: nothing to ask. (The server
+    // main boots it before serving; the one-time warning lives in `GatePolicy`.)
+    let Some(screen) = ironhermes_core::content_screen::content_screen() else {
+        return true;
+    };
+
+    // The screen is synchronous, so run it off the connection's task. It must not use
+    // `block_in_place` (the per-connection LocalSet forbids it); `spawn_blocking` is fine.
+    let owned = text.to_string();
+    let outcome = tokio::task::spawn_blocking(move || {
+        screen.screen(&ContentScreenRequest {
+            kind: ContentKind::Paste,
+            text: &owned,
+            name: None,
+            level,
+            warn_class: false,
+        })
+    })
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // The screen itself panicked: it cannot vouch for the text, so refuse.
+            tracing::warn!(
+                target: "ironhermes::security::web_inbound",
+                session_id = %session_id,
+                error = %e,
+                "inbound message screen did not complete; refusing the message"
+            );
+            let _ = tx.send(ChatStreamEvent::Error {
+                turn_id,
+                message: "Message not processed: the security screen could not run.".to_string(),
+            });
+            return false;
+        }
+    };
+
+    if outcome.verdict == ScreenVerdict::Allow {
+        return true;
+    }
+    let decision = if outcome.verdict == ScreenVerdict::Block {
+        "blocked"
+    } else {
+        "warn"
+    };
+    let rule_ids: Vec<&str> = outcome.rules.iter().map(String::as_str).collect();
+    // CR-01 / D-12: a Block or Warn that carries `unavailable` is a message the sidecar
+    // could not screen. It is audited as `sidecar_unavailable` with the reason, not as a
+    // reasonless `security_verdict` row.
+    let unscreened = outcome.unscreened_reason();
+    // Rule ids, the reason and the level only: never the text (T-57-27).
+    let (kind, reason, args) = match (&unscreened, outcome.unavailable.as_deref()) {
+        (Some(why), Some(raw)) => (
+            ironhermes_core::context_scanner::SIDECAR_UNAVAILABLE_KIND,
+            format!(
+                "inbound web message {decision} at DEFCON {}: {why}",
+                level.level()
+            ),
+            serde_json::json!({
+                "reason": raw,
+                "tool": "inbound_message",
+                "level": level.level(),
+                "verdict": if outcome.verdict == ScreenVerdict::Block { "block" } else { "warn" },
+            }),
+        ),
+        _ => (
+            ironhermes_core::context_scanner::SECURITY_VERDICT_KIND,
+            format!(
+                "inbound web message {decision} by the security screen at DEFCON {}",
+                level.level()
+            ),
+            serde_json::json!({
+                "rule": rule_ids.join(","),
+                "rules": rule_ids,
+                "level": level.level(),
+            }),
+        ),
+    };
+    let entry = audit.make_entry(
+        kind,
+        "inbound_message",
+        None,
+        session_id,
+        "web",
+        session_id,
+        reason,
+        decision,
+        "verdict",
+        &args,
+    );
+    if let Err(e) = audit.append(&entry).await {
+        tracing::warn!(
+            target: "ironhermes::security::web_inbound",
+            error = %e,
+            "failed to append the inbound-message security_verdict audit row"
+        );
+    }
+
+    if outcome.verdict == ScreenVerdict::Warn {
+        return true;
+    }
+    let message = if let Some(why) = unscreened {
+        format!("Message not processed: it {why}.")
+    } else {
+        let why = if !rule_ids.is_empty() {
+            rule_ids.join(", ")
+        } else {
+            "security policy".to_string()
+        };
+        format!("Message not processed: the security screen flagged it ({why}).")
+    };
+    let _ = tx.send(ChatStreamEvent::Error { turn_id, message });
+    false
+}
+
+/// [`web_inbound_gate_with`] for a running server: the session's live level and the
+/// configured audit log.
+#[cfg(feature = "server")]
+async fn web_inbound_gate(
+    app_state: &crate::server::state::AppState,
+    tx: &mpsc::UnboundedSender<ChatStreamEvent>,
+    turn_id: uuid::Uuid,
+    session_id: &str,
+    text: &str,
+) -> bool {
+    let audit = ironhermes_core::AuditLog::load(app_state.config().audit.clone());
+    let level = web_session_level(session_id);
+    web_inbound_gate_with(tx, turn_id, session_id, text, level, &audit).await
+}
+
 #[get("/api/ws/chat")]
 pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> {
     #[cfg(feature = "server")]
@@ -466,6 +937,14 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                 keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 // Skip first tick so we don't Ping immediately on connect.
                 keepalive.tick().await;
+
+                // Phase 57 D-16: every chat socket subscribes ONCE to core's process-local
+                // security bus. A cron prompt or kanban task blocked in this server process
+                // (plan 11) is published there, outside any turn; the select arm below turns
+                // each `JobBlocked` into a nil-turn `job_blocked` critical row. A closed bus
+                // disables only that arm.
+                let mut security_bus = ironhermes_core::subscribe_security_events();
+                let mut security_bus_open = true;
 
                 loop {
                     tokio::select! {
@@ -580,28 +1059,25 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         let (tx_ww, mut rx_ww) =
                                             tokio::sync::mpsc::unbounded_channel::<crate::protocol::ChatStreamEvent>();
                                         tokio::spawn(async move {
-                                            use ironhermes_tools::stt::{
-                                                build_stt_registry, select_stt_provider,
-                                            };
+                                            // D-18: read config ONCE for this clip and hold it.
+                                            let cfg = fresh_voice_config_async(&ww_app_state.config()).await;
 
-                                            let stt_registry = build_stt_registry(
-                                                &ww_app_state.config().stt,
-                                            );
-                                            let provider_name =
-                                                match select_stt_provider(&ww_app_state.config().stt) {
-                                                    Some(n) => n,
-                                                    None => {
-                                                        warn!("wake-word-check: no STT provider; emitting no-match");
-                                                        let _ = tx_ww.send(
-                                                            crate::protocol::ChatStreamEvent::WakeWordResult { matched: false },
-                                                        );
-                                                        return;
-                                                    }
-                                                };
-                                            let provider = match stt_registry.get(&provider_name) {
-                                                Some(p) => p,
+                                            // D-19: the same shared clip transcriber as the
+                                            // full-turn path (no hallucination filter here: the
+                                            // phrase match is the gate).
+                                            let audio_cache_dir =
+                                                ironhermes_core::constants::get_hermes_home()
+                                                    .join("audio_cache");
+                                            let transcript_raw = match wake_word_transcript(
+                                                &cfg,
+                                                &ww_bytes,
+                                                &ww_mime,
+                                                &audio_cache_dir,
+                                            )
+                                            .await
+                                            {
+                                                Some(t) => t,
                                                 None => {
-                                                    warn!(provider = %provider_name, "wake-word-check: provider not in registry; emitting no-match");
                                                     let _ = tx_ww.send(
                                                         crate::protocol::ChatStreamEvent::WakeWordResult { matched: false },
                                                     );
@@ -609,72 +1085,10 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                 }
                                             };
 
-                                            // Write clip to temp file (mirrors full-turn path).
-                                            let audio_cache_dir =
-                                                ironhermes_core::constants::get_hermes_home()
-                                                    .join("audio_cache");
-                                            let _ = tokio::fs::create_dir_all(&audio_cache_dir).await;
-                                            let file_uuid = uuid::Uuid::new_v4().to_string();
-                                            let input_ext = if ww_mime.contains("mp4") { "mp4" } else { "webm" };
-                                            let input_path = audio_cache_dir
-                                                .join(format!("{file_uuid}-ww-in.{input_ext}"));
-                                            let wav_path = audio_cache_dir
-                                                .join(format!("{file_uuid}-ww.wav"));
-
-                                            if let Err(e) =
-                                                tokio::fs::write(&input_path, &ww_bytes).await
-                                            {
-                                                warn!(reason = %e, "wake-word-check: failed to write temp file; no-match");
-                                                let _ = tx_ww.send(
-                                                    crate::protocol::ChatStreamEvent::WakeWordResult { matched: false },
-                                                );
-                                                return;
-                                            }
-
-                                            // Transcode to WAV when ffmpeg available (same as full-turn path).
-                                            let transcribe_path =
-                                                if ironhermes_tools::tts::ffmpeg_available() {
-                                                    let ffmpeg_status = tokio::process::Command::new("ffmpeg")
-                                                        .args([
-                                                            "-y", "-i",
-                                                            input_path.to_str().unwrap_or(""),
-                                                            "-ar", "16000", "-ac", "1", "-f", "wav",
-                                                            wav_path.to_str().unwrap_or(""),
-                                                        ])
-                                                        .output()
-                                                        .await;
-                                                    match ffmpeg_status {
-                                                        Ok(out) if out.status.success() => wav_path.clone(),
-                                                        _ => input_path.clone(),
-                                                    }
-                                                } else {
-                                                    input_path.clone()
-                                                };
-
-                                            let transcript_raw =
-                                                match provider.transcribe(&transcribe_path).await {
-                                                    Ok(t) => t,
-                                                    Err(e) => {
-                                                        warn!(reason = %e, "wake-word-check: STT failed; emitting no-match");
-                                                        let _ = tokio::fs::remove_file(&input_path).await;
-                                                        let _ = tokio::fs::remove_file(&wav_path).await;
-                                                        let _ = tx_ww.send(
-                                                            crate::protocol::ChatStreamEvent::WakeWordResult { matched: false },
-                                                        );
-                                                        return;
-                                                    }
-                                                };
-
-                                            // Clean up temp files.
-                                            let _ = tokio::fs::remove_file(&input_path).await;
-                                            let _ = tokio::fs::remove_file(&wav_path).await;
-
                                             // D-13: resolve phrase from frame first,
                                             // fall back to server config when not set.
                                             let raw_phrase = ww_phrase_from_frame
-                                                .unwrap_or_else(|| {
-                                                    ww_app_state.config().voice.wake_word.phrase.clone()
-                                                });
+                                                .unwrap_or_else(|| cfg.voice.wake_word.phrase.clone());
                                             // T-36.17.9-04-02: length-guard phrase to 64 chars server-side.
                                             let phrase: String =
                                                 raw_phrase.chars().take(64).collect();
@@ -716,149 +1130,31 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                     // Spawn the STT pipeline so the select! loop remains
                                     // responsive while ffmpeg/STT run.
                                     tokio::spawn(async move {
-                                        use ironhermes_tools::hallucination_filter::HallucinationFilter;
-                                        use ironhermes_tools::stt::{
-                                            build_stt_registry, select_stt_provider,
-                                        };
+                                        // D-18: read config ONCE at the start of the turn and
+                                        // hold it, so an in-flight turn finishes on the settings
+                                        // it started with and a save between turns applies to the
+                                        // next one without a restart.
+                                        let cfg = fresh_voice_config_async(&app_state_stt.config()).await;
 
-                                        // Build a per-call SttRegistry from the server config.
-                                        // This is cheap (two Arc::new) and avoids the need for
-                                        // a separate stt_registry field on AppState.
-                                        let stt_registry = build_stt_registry(
-                                            &app_state_stt.config().stt,
-                                        );
-
-                                        // D-06: select provider (explicit > groq > openai > None).
-                                        let provider_name =
-                                            match select_stt_provider(&app_state_stt.config().stt) {
-                                                Some(n) => n,
-                                                None => {
-                                                    warn!("audio-in: no STT provider configured; dropping frame");
-                                                    return;
-                                                }
-                                            };
-                                        let provider = match stt_registry.get(&provider_name) {
-                                            Some(p) => p,
-                                            None => {
-                                                warn!(
-                                                    provider = %provider_name,
-                                                    "audio-in: STT provider not found in registry; dropping"
-                                                );
-                                                return;
-                                            }
-                                        };
-
-                                        // Build a UUID-named temp file under audio_cache.
-                                        // T-36.17.8-web-path: no client-controlled path.
+                                        // D-19: one shared clip transcriber (provider selection,
+                                        // UUID temp files, ffmpeg, transcribe, cleanup) plus the
+                                        // D-12 HallucinationFilter. No client-controlled path
+                                        // reaches the cache directory (T-36.17.8-web-path).
                                         let audio_cache_dir =
                                             ironhermes_core::constants::get_hermes_home()
                                                 .join("audio_cache");
-                                        let _ = tokio::fs::create_dir_all(&audio_cache_dir).await;
-                                        let file_uuid =
-                                            uuid::Uuid::new_v4().to_string();
-
-                                        // Determine the input extension for ffmpeg from mime.
-                                        let input_ext = if audio_mime.contains("mp4") {
-                                            "mp4"
-                                        } else {
-                                            "webm"
-                                        };
-                                        let input_path = audio_cache_dir
-                                            .join(format!("{file_uuid}-in.{input_ext}"));
-                                        let wav_path = audio_cache_dir
-                                            .join(format!("{file_uuid}.wav"));
-
-                                        // Write the raw captured audio to the input temp file.
-                                        if let Err(e) =
-                                            tokio::fs::write(&input_path, &audio_bytes).await
+                                        let transcript = match transcribe_turn_audio(
+                                            &cfg,
+                                            &audio_bytes,
+                                            &audio_mime,
+                                            &audio_cache_dir,
+                                        )
+                                        .await
                                         {
-                                            warn!(
-                                                reason = %e,
-                                                "audio-in: failed to write input temp file; dropping"
-                                            );
-                                            return;
-                                        }
-
-                                        // Transcode to 16 kHz mono WAV when ffmpeg is available
-                                        // (RESEARCH Pitfall 5: both Groq and OpenAI accept webm
-                                        // directly — pass through when ffmpeg is absent).
-                                        let transcribe_path =
-                                            if ironhermes_tools::tts::ffmpeg_available() {
-                                                // ffmpeg -i <input> -ar 16000 -ac 1 -f wav <output>
-                                                let ffmpeg_status = tokio::process::Command::new(
-                                                    "ffmpeg",
-                                                )
-                                                .args([
-                                                    "-y",
-                                                    "-i",
-                                                    input_path.to_str().unwrap_or(""),
-                                                    "-ar",
-                                                    "16000",
-                                                    "-ac",
-                                                    "1",
-                                                    "-f",
-                                                    "wav",
-                                                    wav_path.to_str().unwrap_or(""),
-                                                ])
-                                                .output()
-                                                .await;
-                                                match ffmpeg_status {
-                                                    Ok(out) if out.status.success() => {
-                                                        wav_path.clone()
-                                                    }
-                                                    Ok(out) => {
-                                                        warn!(
-                                                            stderr = %String::from_utf8_lossy(&out.stderr),
-                                                            "audio-in: ffmpeg transcode failed; falling back to passthrough"
-                                                        );
-                                                        input_path.clone()
-                                                    }
-                                                    Err(e) => {
-                                                        warn!(
-                                                            reason = %e,
-                                                            "audio-in: ffmpeg spawn failed; falling back to passthrough"
-                                                        );
-                                                        input_path.clone()
-                                                    }
-                                                }
-                                            } else {
-                                                // ffmpeg absent — pass webm/mp4 directly.
-                                                // Both Groq and OpenAI Whisper accept these.
-                                                input_path.clone()
-                                            };
-
-                                        // Call SttProvider::transcribe.
-                                        let transcript_raw =
-                                            match provider.transcribe(&transcribe_path).await {
-                                                Ok(t) => t,
-                                                Err(e) => {
-                                                    warn!(
-                                                        reason = %e,
-                                                        "audio-in: STT transcription failed; dropping"
-                                                    );
-                                                    // Clean up temp files before returning.
-                                                    let _ = tokio::fs::remove_file(&input_path).await;
-                                                    let _ = tokio::fs::remove_file(&wav_path).await;
-                                                    return;
-                                                }
-                                            };
-
-                                        // Clean up temp files after successful transcription.
-                                        let _ = tokio::fs::remove_file(&input_path).await;
-                                        let _ = tokio::fs::remove_file(&wav_path).await;
-
-                                        // D-12: apply HallucinationFilter.
-                                        let transcript = match HallucinationFilter::filter(
-                                            &transcript_raw,
-                                        ) {
-                                            Some(t) => t.to_string(),
-                                            None => {
-                                                // Filtered out — no empty bubble per UI-SPEC.
-                                                info!(
-                                                    "audio-in: transcript rejected by hallucination filter; no message sent"
-                                                );
-                                                return;
-                                            }
+                                            Some(t) => t,
+                                            // Failure or filtered out: already logged, and no
+                                            // empty bubble per UI-SPEC.
+                                            None => return,
                                         };
 
                                         // Inject the transcript into the main select loop
@@ -921,8 +1217,50 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 }
                             };
 
+                            // WR-04: the Gateway is off unless `ui.openui_gateway_enabled` is set
+                            // server-side; the client toggle alone never reaches api.thesys.dev.
+                            if openui_gateway_requested(&req)
+                                && !super::openui_gateway::gateway_enabled()
+                            {
+                                let err_event = ChatStreamEvent::Error {
+                                    turn_id: uuid::Uuid::nil(),
+                                    message: OPENUI_GATEWAY_DISABLED.to_string(),
+                                };
+                                let _ = socket
+                                    .send_raw(Message::Text(
+                                        serde_json::to_string(&err_event).unwrap_or_default(),
+                                    ))
+                                    .await;
+                                continue;
+                            }
+
+                            // CR-02: a generated view's action text is model-controlled; it must
+                            // never reach the slash-command router (`/yolo`, `/new`, skills).
+                            // RR-04: the operator's own typed Generate prompt is exempt.
+                            if openui_action_slash_blocked(&req) {
+                                let err_event = ChatStreamEvent::Error {
+                                    turn_id: uuid::Uuid::nil(),
+                                    message: "Generated views cannot run commands.".to_string(),
+                                };
+                                let _ = socket
+                                    .send_raw(Message::Text(
+                                        serde_json::to_string(&err_event).unwrap_or_default(),
+                                    ))
+                                    .await;
+                                continue;
+                            }
+
                             let (tx, rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
                             let app_state = app_state.clone();
+                            // Phase 54.9 Plan 09 (D-09): resolved before `req` is partially moved.
+                            // Phase 54.9 Plan 10 (D-09): the Gateway path sends the prompt itself, so
+                            // it must not leave a one-shot overlay behind for a later normal turn.
+                            let openui_gateway = openui_gateway_requested(&req);
+                            let openui_overlay = if openui_gateway {
+                                None
+                            } else {
+                                openui_overlay_for(&req)
+                            };
                             let session_id = req.session_id;
                             let session_id_for_turn = session_id.clone();
                             let message = req.message;
@@ -960,7 +1298,10 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                     .load(std::sync::atomic::Ordering::SeqCst);
                                 let (tx_q, rx_q) =
                                     mpsc::unbounded_channel::<ChatStreamEvent>();
-                                match app_state.queue.try_push(&key, message.clone()) {
+                                match app_state.queue.try_push(
+                                    &key,
+                                    tag_queued_message(&message, openui_overlay.is_some()),
+                                ) {
                                     Ok(()) => {
                                         let depth = app_state.queue.len(&key) as u32;
                                         let _ = tx_q.send(ChatStreamEvent::Delta { turn_id: uuid::Uuid::nil(),
@@ -1048,6 +1389,22 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                             ctx,
                                             app_state.resolver().clone(),
                                         );
+                                        // Phase 57 D-22: `/yolo <N>` from the web is authorized
+                                        // only when the auth layer is on (this socket's upgrade
+                                        // then passed `require_auth`); with it off the facts
+                                        // refuse, so the web surface cannot change the level.
+                                        let defcon_facts = web_defcon_auth_facts(
+                                            crate::server::state::web_auth_enabled(),
+                                        );
+                                        // The actor the level change is attributed to in the row.
+                                        let defcon_actor = defcon_facts.actor.clone();
+                                        let ctx = ctx.with_defcon_auth(defcon_facts);
+                                        // Phase 57 UI-SPEC R9c / R8: the session's level just
+                                        // before the command runs, to push a `DefconLevel` event
+                                        // and a `defcon_changed` critical row if it changed it.
+                                        let level_before = ironhermes_core::defcon::session_defcon()
+                                            .handle_for(&session_id)
+                                            .get();
 
                                         // Phase 39.1 Plan 02 (R39.1-08 / D-06): /new and /reset
                                         // warn (do not block) if turns are in flight for this
@@ -1084,6 +1441,10 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                     "turn_registry: /stop cancelled in-flight turns"
                                                 );
                                             }
+                                            // Phase 57 D-14: a /stop also denies this session's
+                                            // parked approval now, instead of leaving the cancelled
+                                            // turn waiting out `approvals.timeout_secs`.
+                                            app_state.web_approvals.cancel(&session_id);
                                             app_state
                                                 .get_or_create_paused_flag(&session_id)
                                                 .store(
@@ -1364,6 +1725,27 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         if !text.is_empty() {
                                             let _ = tx.send(ChatStreamEvent::Delta { turn_id: uuid::Uuid::nil(), text });
                                         }
+                                        // Phase 57 UI-SPEC R9c: right after the command's own
+                                        // output, tell the client the level changed. A refused,
+                                        // invalid or same-level `/yolo` pushes nothing.
+                                        let level_after = ironhermes_core::defcon::session_defcon()
+                                            .handle_for(&session_id)
+                                            .get();
+                                        for ev in web_level_change_events(&session_id, level_before, level_after) {
+                                            let _ = tx.send(ev);
+                                        }
+                                        // Phase 57 R8: one `defcon_changed` row next to that push,
+                                        // from the same before/after values; a refused or
+                                        // same-level `/yolo` stays ordinary command output.
+                                        if let Some(row) = defcon_changed_event(
+                                            &session_id,
+                                            level_before,
+                                            level_after,
+                                            WEB_DEFCON_SURFACE,
+                                            &defcon_actor,
+                                        ) {
+                                            let _ = tx.send(row);
+                                        }
                                         let _ =
                                             tx.send(ChatStreamEvent::Finished { turn_id: uuid::Uuid::nil(), total_tokens: 0 });
                                         drop(tx);
@@ -1426,7 +1808,10 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 None => {
                                     // Rare race — fall back to queue same as FIFO trigger.
                                     let key = web_key(&session_id);
-                                    let _ = app_state.queue.try_push(&key, message.clone());
+                                    let _ = app_state.queue.try_push(
+                                        &key,
+                                        tag_queued_message(&message, openui_overlay.is_some()),
+                                    );
                                     let (tx_fb, rx_fb) = mpsc::unbounded_channel::<ChatStreamEvent>();
                                     let _ = tx_fb.send(ChatStreamEvent::Delta { turn_id: uuid::Uuid::nil(),
                                         text: "Capacity full; message queued.\n".to_string(),
@@ -1480,10 +1865,78 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             let turn_id_spawn = turn_id;
                             let cancel_token_spawn = cancel_token.clone();
                             let registry_spawn = app_state.turn_registry.clone();
+                            // Phase 57 D-04(b): the user's own text (never a skill run's
+                            // synthesized trigger text) is what the inbound screen sees.
+                            let inbound_text = message.clone();
                             let handle = tokio::spawn(async move {
                                 // RAII: holds semaphore permits for the lifetime of this task.
                                 let _per = per_permit;
                                 let _global = global_permit;
+
+                                // Phase 57 D-04(b): screen the message before the model sees it.
+                                // A Block sends the Error event and ends the turn here.
+                                if !web_inbound_gate(
+                                    &app_state,
+                                    &tx,
+                                    turn_id_spawn,
+                                    &session_id_for_turn,
+                                    &inbound_text,
+                                )
+                                .await
+                                {
+                                    registry_spawn.deregister(turn_id_spawn).await;
+                                    return;
+                                }
+
+                                // Phase 54.9 Plan 10 (D-09, T-54.9-27/28): the opt-in Thesys Gateway
+                                // runs INSTEAD of run_web_turn (no tools, no session history). The
+                                // key is resolved here, server-side; with the toggle off this block
+                                // is never entered, so nothing contacts api.thesys.dev.
+                                if openui_gateway {
+                                    match crate::server::openui_gateway::resolve_thesys_key().await {
+                                        Some(key) => {
+                                            tokio::select! {
+                                                _ = cancel_token_spawn.cancelled() => {
+                                                    let _ = tx.send(ChatStreamEvent::TurnCancelled {
+                                                        turn_id: turn_id_spawn,
+                                                    });
+                                                }
+                                                usage = crate::server::openui_gateway::stream_gateway_generation(
+                                                    crate::server::openui_gateway::GATEWAY_BASE_URL,
+                                                    &key,
+                                                    &inbound_text,
+                                                    turn_id_spawn,
+                                                    &tx,
+                                                ) => {
+                                                    if let Some(usage) = usage {
+                                                        crate::server::openui_gateway::record_gateway_usage(
+                                                            &app_state.state_store,
+                                                            &session_id_for_turn,
+                                                            usage,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        None => {
+                                            let _ = tx.send(ChatStreamEvent::Error {
+                                                turn_id: turn_id_spawn,
+                                                message: crate::server::openui_gateway::GATEWAY_MISSING_KEY
+                                                    .to_string(),
+                                            });
+                                        }
+                                    }
+                                    registry_spawn.deregister(turn_id_spawn).await;
+                                    return;
+                                }
+
+                                // WR-01: queue the OpenUI overlay only now that this turn passed the
+                                // inbound gate and will run `run_web_turn`, which drains it. Queued at
+                                // receipt, an early exit (queue, slash command, gate block) left it
+                                // behind for the session's next turn.
+                                if let Some((name, body)) = openui_overlay {
+                                    app_state.push_web_skill_overlay(&session_id_for_turn, name, body);
+                                }
 
                                 // Phase 34a MEM-READ-05: scrub <memory-context> fence tags.
                                 let scrubber_ws = std::sync::Arc::new(std::sync::Mutex::new(
@@ -1520,20 +1973,25 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
 
                                 let tx_tool = tx.clone();
                                 let tool_progress_callback: ironhermes_agent::agent_loop::ToolProgressCallback =
-                                    Box::new(move |name: &str, args: &str| {
+                                    // Phase 57 A3: the arguments are never sent to the browser.
+                                    Box::new(move |name: &str, _args: &str| {
                                         let _ = tx_tool.send(ChatStreamEvent::ToolCallStart { turn_id: tid,
                                             name: name.to_string(),
-                                            args: args.to_string(),
                                         });
                                     });
 
                                 let tx_tool_result = tx.clone();
+                                let sid_tool_result = session_id_for_turn.clone();
                                 let tool_result_callback: ironhermes_agent::agent_loop::ToolResultCallback =
                                     Box::new(move |name: &str, success: bool, _output: &str| {
                                         let _ = tx_tool_result.send(ChatStreamEvent::ToolCallEnd { turn_id: tid,
                                             name: name.to_string(),
                                             success,
                                         });
+                                        // Phase 57 D-17: a failed call turns this turn's dot red.
+                                        if let Some(sev) = tool_failure_severity(tid, &sid_tool_result, success) {
+                                            let _ = tx_tool_result.send(sev);
+                                        }
                                     });
 
                                 // Phase 26.7.1 Plan 02 (D-06 / Path A): install this turn's tx into the
@@ -1630,6 +2088,12 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         cancel_token: Some(cancel_token_spawn.clone()),
                                     });
 
+                                // Phase 54.3 (D-07): typed yolo-bypass notice channel for THIS
+                                // turn. Built from the turn's own sender exactly like the tool
+                                // callbacks above; one summary per bypassing turn becomes one
+                                // YoloBypassNotice event. Never routed through `stream_callback`.
+                                let notice_callback = web_notice_sink(tx.clone(), tid, session_id_for_turn.clone());
+
                                 let result = app_state
                                     .run_web_turn(
                                         &session_id_for_turn,
@@ -1648,6 +2112,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         // a live ChatRequest, so it is the only one that ever carries
                                         // non-empty attachment_ids.
                                         attachment_ids,
+                                        Some(notice_callback),
                                     )
                                     .await;
 
@@ -1943,6 +2408,19 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                             let _per = per_permit_s;
                                             let _global = global_permit_s;
                                             let tid_s = turn_id_s;
+                                            // Phase 57 D-04(b): the transcript is user text too.
+                                            if !web_inbound_gate(
+                                                &app_state_s,
+                                                &tx_s,
+                                                tid_s,
+                                                &session_id_for_turn_s,
+                                                &message_s,
+                                            )
+                                            .await
+                                            {
+                                                registry_s.deregister(tid_s).await;
+                                                return;
+                                            }
                                             let scrubber_ws =
                                                 std::sync::Arc::new(std::sync::Mutex::new(
                                                     ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
@@ -1961,15 +2439,16 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                 });
                                             let tx_tool = tx_s.clone();
                                             let tool_progress_callback: ironhermes_agent::agent_loop::ToolProgressCallback =
-                                                Box::new(move |name: &str, args: &str| {
+                                                // Phase 57 A3: the arguments are never sent to the browser.
+                                                Box::new(move |name: &str, _args: &str| {
                                                     let _ = tx_tool.send(
                                                         ChatStreamEvent::ToolCallStart { turn_id: tid_s,
                                                             name: name.to_string(),
-                                                            args: args.to_string(),
                                                         },
                                                     );
                                                 });
                                             let tx_tool_result = tx_s.clone();
+                                            let sid_tool_result = session_id_for_turn_s.clone();
                                             let tool_result_callback: ironhermes_agent::agent_loop::ToolResultCallback =
                                                 Box::new(move |name: &str, success: bool, _output: &str| {
                                                     let _ = tx_tool_result.send(
@@ -1978,6 +2457,10 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                             success,
                                                         },
                                                     );
+                                                    // Phase 57 D-17: a failed call turns this turn's dot red.
+                                                    if let Some(sev) = tool_failure_severity(tid_s, &sid_tool_result, success) {
+                                                        let _ = tx_tool_result.send(sev);
+                                                    }
                                                 });
                                             let tx_subagent = tx_s.clone();
                                             {
@@ -2026,6 +2509,9 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                         .clone(),
                                                     cancel_token: Some(cancel_s_spawn.clone()),
                                                 });
+                                            // Phase 54.3 (D-07): typed yolo-bypass notice channel for
+                                            // this STT turn, built from this site's own sender.
+                                            let notice_callback = web_notice_sink(tx_s.clone(), tid_s, session_id_for_turn_s.clone());
                                             let result = app_state_s
                                                 .run_web_turn(
                                                     &session_id_for_turn_s,
@@ -2040,6 +2526,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                     // Phase 46.7 Plan 04 (D-09): STT-transcript turns never
                                                     // carry attachments (queue stores text only).
                                                     Vec::new(),
+                                                    Some(notice_callback),
                                                 )
                                                 .await;
                                             let tail = scrubber_ws.lock().unwrap().flush();
@@ -2173,7 +2660,8 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                     let (tx_drain, rx_drain) = mpsc::unbounded_channel::<ChatStreamEvent>();
                                                     let app_state_drain = app_state.clone();
                                                     let session_id_spawn = sid.clone();
-                                                    let next_text_owned = next_text;
+                                                    let (next_text_owned, drain_openui) =
+                                                        split_queued_message(next_text);
                                                     let drain_turn_id = TurnId::new_v4();
                                                     let cancel_drain = tokio_util::sync::CancellationToken::new();
                                                     app_state.turn_registry.register(TurnEntry {
@@ -2197,6 +2685,29 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                         let _per = per_drain;
                                                         let _global = global_drain;
                                                         let tid_drain = drain_turn_id;
+                                                        // Phase 57 D-04(b): a queued message (a `/queue`
+                                                        // argument included) is screened when it RUNS.
+                                                        if !web_inbound_gate(
+                                                            &app_state_drain,
+                                                            &tx_drain,
+                                                            tid_drain,
+                                                            &session_id_spawn,
+                                                            &next_text_owned,
+                                                        )
+                                                        .await
+                                                        {
+                                                            registry_drain.deregister(tid_drain).await;
+                                                            return;
+                                                        }
+                                                        // RR-02: a queued OpenUI turn gets its overlay here,
+                                                        // after the gate, like a live one.
+                                                        if drain_openui {
+                                                            app_state_drain.push_web_skill_overlay(
+                                                                &session_id_spawn,
+                                                                "openui".to_string(),
+                                                                super::openui_route::openui_overlay_body(),
+                                                            );
+                                                        }
                                                         let scrubber_ws = std::sync::Arc::new(std::sync::Mutex::new(
                                                             ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
                                                         ));
@@ -2211,13 +2722,19 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                             });
                                                         let tx_tool = tx_drain.clone();
                                                         let tool_progress_callback: ironhermes_agent::agent_loop::ToolProgressCallback =
-                                                            Box::new(move |name: &str, args: &str| {
-                                                                let _ = tx_tool.send(ChatStreamEvent::ToolCallStart { turn_id: tid_drain, name: name.to_string(), args: args.to_string() });
+                                                            // Phase 57 A3: the arguments are never sent to the browser.
+                                                            Box::new(move |name: &str, _args: &str| {
+                                                                let _ = tx_tool.send(ChatStreamEvent::ToolCallStart { turn_id: tid_drain, name: name.to_string() });
                                                             });
                                                         let tx_tool_result = tx_drain.clone();
+                                                        let sid_tool_result = session_id_spawn.clone();
                                                         let tool_result_callback: ironhermes_agent::agent_loop::ToolResultCallback =
                                                             Box::new(move |name: &str, success: bool, _output: &str| {
                                                                 let _ = tx_tool_result.send(ChatStreamEvent::ToolCallEnd { turn_id: tid_drain, name: name.to_string(), success });
+                                                                // Phase 57 D-17: a failed call turns this turn's dot red.
+                                                                if let Some(sev) = tool_failure_severity(tid_drain, &sid_tool_result, success) {
+                                                                    let _ = tx_tool_result.send(sev);
+                                                                }
                                                             });
                                                         let tx_subagent = tx_drain.clone();
                                                         { let mut guard = app_state_drain.subagent_callback_slot.lock().await; *guard = Some(tx_subagent); }
@@ -2245,6 +2762,9 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                                     .clone(),
                                                                 cancel_token: Some(cancel_drain_spawn.clone()),
                                                             });
+                                                        // Phase 54.3 (D-07): typed yolo-bypass notice channel for
+                                                        // this queue-drain turn, built from this site's own sender.
+                                                        let notice_callback = web_notice_sink(tx_drain.clone(), tid_drain, session_id_spawn.clone());
                                                         let result = app_state_drain.run_web_turn(
                                                             &session_id_spawn, &next_text_owned,
                                                             stream_callback, Some(tool_progress_callback), Some(tool_result_callback), tts_wiring_drain,
@@ -2254,6 +2774,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                             // Phase 46.7 Plan 04 (D-09): queue-drain turns never carry
                                                             // attachments (queue stores text only).
                                                             Vec::new(),
+                                                            Some(notice_callback),
                                                         ).await;
                                                         let tail = scrubber_ws.lock().unwrap().flush();
                                                         if !tail.is_empty() {
@@ -2294,6 +2815,30 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             }
                         }
 
+                        // ── Process-local security bus (Phase 57 D-16 JobBlocked) ──
+                        // Cancel-safe `recv`. Only `JobBlocked` maps to a row; every other
+                        // kind is dropped here because in-turn kinds arrive through the
+                        // turn's own gate (forwarding them would show them twice).
+                        bus_event = security_bus.recv(), if security_bus_open => {
+                            match bus_event {
+                                Ok(sec) => {
+                                    if let Some(out) = process_event_to_stream(&sec) {
+                                        let json = serde_json::to_string(&out).unwrap_or_default();
+                                        let _ = socket.send_raw(Message::Text(json)).await;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                    warn!(
+                                        skipped,
+                                        "security bus receiver lagged; some blocked-job rows were skipped"
+                                    );
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    security_bus_open = false;
+                                }
+                            }
+                        }
+
                         // ── Keepalive Ping ────────────────────────────────────────
                         _ = keepalive.tick() => {
                             if let Err(err) = socket
@@ -2326,6 +2871,19 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             }
                         }
                     }
+                }
+
+                // 49.8-08 (D-10/D-16): every break path above (Close frame,
+                // recv error, keepalive failure) falls through to here, so a
+                // closed browser tab or dropped connection is a real session
+                // boundary — stop the robot and cancel any goals. Awaited,
+                // and bounded by end_session_stop's own session-end timeout
+                // (see ironhermes_tools::ros2::session), so an unreachable
+                // bridge can never wedge the socket's own teardown.
+                let ros2_report =
+                    ironhermes_tools::ros2::end_session_stop(app_state.runtime.registry()).await;
+                if ros2_report != "nothing to stop" {
+                    info!(report = %ros2_report, "web chat ws teardown: ros2 session-end stop");
                 }
                 }
 
@@ -2432,6 +2990,80 @@ fn undelivered_tool_result_media(
     out
 }
 
+/// Phase 54.7 (D-09/D-18/D-19): synthesize `text` with `cfg`'s TTS settings into
+/// `audio_dir` and return the written path.
+///
+/// The file extension comes from [`ironhermes_tools::tts::audio_format::extension_for`]
+/// (what the provider actually returns), so the dispatcher can serve a matching
+/// MIME. `active_identity` is validated against the known presets before it can
+/// influence provider selection (T-54.7-46); an unknown slug uses the global
+/// config. `None` on any failure; failures log the category only (T-54.7-45).
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+pub(crate) async fn synthesize_reply_audio(
+    cfg: &ironhermes_core::config::Config,
+    text: &str,
+    active_identity: Option<&str>,
+    audio_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    use ironhermes_core::voice_http::{VoiceErrorCategory, VoiceHttpError};
+    use ironhermes_tools::tts::{audio_format, build_tts_registry_with_vault};
+
+    // Phase 40.5 Plan 08 (T-40.5-08-01): validate the wire-supplied slug server-side.
+    // A crafted/unknown slug must not reach provider selection — apply the same
+    // is_known_identity gate used on the client write path (defense in depth).
+    let validated_identity = active_identity
+        .filter(|slug| crate::components::hermes_app::avatar_logic::is_known_identity(slug));
+
+    // Phase 40.5 Plan 08 (D-11): resolve per-identity TTS config; falls back to
+    // the global TTS config when the identity is None or unknown.
+    let effective = cfg.effective_tts_config_for_identity(validated_identity);
+
+    let registry = build_tts_registry_with_vault(
+        &effective,
+        ironhermes_core::voice_http::voice_vault_config(cfg),
+    );
+    let provider = match registry.get(&effective.provider) {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                provider = %effective.provider,
+                "auto_speak_reply: TTS provider not registered; skipping Mode B synthesis"
+            );
+            return None;
+        }
+    };
+
+    if let Err(e) = std::fs::create_dir_all(audio_dir) {
+        tracing::warn!(
+            error = %e,
+            "auto_speak_reply: failed to create audio_cache dir; skipping synthesis"
+        );
+        return None;
+    }
+    let output_path = audio_dir.join(format!(
+        "{}.{}",
+        uuid::Uuid::new_v4(),
+        audio_format::extension_for(&effective)
+    ));
+
+    // Synthesize. Errors (network failure, provider unavailable) are non-fatal;
+    // only the category is logged (a provider error text may carry a body).
+    match provider.synthesize(text, &output_path).await {
+        Ok(p) => Some(p),
+        Err(e) => {
+            let category = e
+                .downcast_ref::<VoiceHttpError>()
+                .map(|v| v.category)
+                .unwrap_or(VoiceErrorCategory::UnexpectedResponse);
+            tracing::warn!(
+                category = category.as_str(),
+                "auto_speak_reply: TTS synthesis failed; skipping Mode B AudioOut"
+            );
+            None
+        }
+    }
+}
+
 /// Phase 36.17.10 Plan 05 (VOICE-02): synthesize `text` and dispatch AudioOut.
 ///
 /// Uses the current on-disk config to select the TTS provider (hot-reload:
@@ -2469,57 +3101,11 @@ async fn auto_speak_reply(
         }
     };
 
-    // Phase 40.5 Plan 08 (T-40.5-08-01): validate wire-supplied slug server-side.
-    // A crafted/unknown slug must not reach provider selection — apply the same
-    // is_known_identity gate used on the client write path (defense in depth).
-    let validated_identity = active_identity
-        .filter(|slug| crate::components::hermes_app::avatar_logic::is_known_identity(slug));
-
-    // Phase 40.5 Plan 08 (D-11): resolve per-identity TTS config.
-    // Falls back to global TTS config when active_identity is None or unknown.
-    let effective_tts = config.effective_tts_config_for_identity(validated_identity);
-
-    // Build TTS registry from effective config (same factory used by the TTS tool).
-    let tts_registry = ironhermes_tools::tts::build_tts_registry(&effective_tts);
-    let provider = match tts_registry.get(&effective_tts.provider) {
-        Some(p) => p,
-        None => {
-            tracing::debug!(
-                provider = %effective_tts.provider,
-                "auto_speak_reply: TTS provider not registered; skipping Mode B synthesis"
-            );
-            return;
-        }
-    };
-
-    // Resolve output path inside audio_cache/ (same directory as TTS tool).
     let audio_dir = get_hermes_home().join("audio_cache");
-    if let Err(e) = std::fs::create_dir_all(&audio_dir) {
-        tracing::warn!(
-            error = %e,
-            "auto_speak_reply: failed to create audio_cache dir; skipping synthesis"
-        );
+    let Some(written_path) =
+        synthesize_reply_audio(&config, text, active_identity, &audio_dir).await
+    else {
         return;
-    }
-    let ext = if effective_tts.provider == "elevenlabs"
-        && effective_tts.elevenlabs.output_format == "opus"
-    {
-        "opus"
-    } else {
-        "mp3"
-    };
-    let output_path = audio_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
-
-    // Synthesize. Errors (e.g. network failure, provider unavailable) are non-fatal.
-    let written_path = match provider.synthesize(text, &output_path).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "auto_speak_reply: TTS synthesis failed; skipping Mode B AudioOut"
-            );
-            return;
-        }
     };
 
     // Dispatch as AudioOut WS frame via the already-constructed WebAudioDispatcher.
@@ -2609,6 +3195,280 @@ pub(crate) fn plan_web_skill_run(
         skill_name: inv.name,
         skill_body: inv.body,
         meta_chip,
+    })
+}
+
+/// Phase 57 UI-SPEC C2: what a scanner outage did to the call it affected, stated in the
+/// `sidecar_unavailable` row so the operator reads what actually happened.
+#[cfg(feature = "server")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidecarOutcome {
+    /// The call was blocked (levels 1-3 for a Warn-class call, or a floor Critical at any
+    /// level, D-07).
+    Blocked,
+    /// The call was parked for operator approval.
+    HeldForApproval,
+    /// The call ran without approval at a bypass-active level (4-5), audited.
+    AuditedBypass,
+    /// The outage changed nothing for this tool class; only the built-in rules applied.
+    BuiltInRulesOnly,
+}
+
+#[cfg(feature = "server")]
+impl SidecarOutcome {
+    /// The clause that follows the tool name in the row summary.
+    pub(crate) fn phrase(self) -> &'static str {
+        match self {
+            Self::Blocked => "was blocked",
+            Self::HeldForApproval => "was held for approval",
+            Self::AuditedBypass => "ran without approval (audited bypass)",
+            Self::BuiltInRulesOnly => "ran with the built-in rules only",
+        }
+    }
+
+    /// The severity this outcome gives the turn's dot (R5: a resulting block is red).
+    pub(crate) fn worst(self) -> crate::protocol::TurnWorst {
+        match self {
+            Self::Blocked => crate::protocol::TurnWorst::Red,
+            _ => crate::protocol::TurnWorst::Amber,
+        }
+    }
+}
+
+/// Why a `SidecarUnavailable` row exists, read from the producer's `<reason>; outcome ...`
+/// summary (GC-WR-03). Only a real outage says the scanner is down: a reason where the
+/// sidecar answered but refused the subject (`timeout`, `killed_for_timeouts`, `too_large`,
+/// `protocol_error`, `unsupported_subject`) is a subject that could not be screened.
+#[cfg(feature = "server")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidecarCause {
+    /// The sidecar binary is not installed.
+    Missing,
+    /// The sidecar process is gone or not answering. Also the fallback for a reason word
+    /// that does not parse.
+    NotResponding,
+    /// The sidecar refused this subject; it did not go down.
+    NotScreened(ironhermes_security::UnavailableReason),
+}
+
+/// Classify the reason word before the first `;` in `summary`, with
+/// `UnavailableReason::from_word`. The producer's text itself is never copied into a row.
+#[cfg(feature = "server")]
+pub(crate) fn sidecar_reason_phrase(summary: &str) -> SidecarCause {
+    use ironhermes_security::UnavailableReason;
+
+    let word = summary.split(';').next().unwrap_or("").trim();
+    match UnavailableReason::from_word(word) {
+        Some(UnavailableReason::Missing) => SidecarCause::Missing,
+        Some(reason) if !reason.is_outage() => SidecarCause::NotScreened(reason),
+        _ => SidecarCause::NotResponding,
+    }
+}
+
+/// What the outage did, from plan 07's `<reason>; outcome <token>` summary. Without a
+/// recognised token the D-12 Warn-class default applies: blocked at levels 1-3, an audited
+/// bypass at 4-5.
+#[cfg(feature = "server")]
+pub(crate) fn sidecar_outcome(summary: &str, level: u8) -> SidecarOutcome {
+    let token = summary
+        .split("outcome ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric()));
+    match token {
+        Some("blocked") => SidecarOutcome::Blocked,
+        Some("approval") => SidecarOutcome::HeldForApproval,
+        Some("bypass") => SidecarOutcome::AuditedBypass,
+        Some("allowed") => SidecarOutcome::BuiltInRulesOnly,
+        _ if level <= 3 => SidecarOutcome::Blocked,
+        _ => SidecarOutcome::AuditedBypass,
+    }
+}
+
+/// The text that follows the word "blocked" in a Block row, naming the cause (G-2).
+///
+/// Precedence: named rule ids (` by rule {ids}`), then the regex floor
+/// (` by the built-in rules`), then a subject the sidecar could not screen
+/// (`: it could not be screened ({reason})`), then a scanner outage
+/// (`: the security scanner is {missing|not responding}`), and last, for a producer that
+/// sent no ids at all, ` by the security policy`. Cause markers are core constants. A
+/// reason word is rendered only after it parses as an `UnavailableReason`, and named ids
+/// pass `sanitize_notice_field`, so no producer text reaches the row unchecked.
+#[cfg(feature = "server")]
+fn blocked_clause(rule_ids: &[String]) -> String {
+    use ironhermes_core::content_screen::{
+        REGEX_FLOOR_RULE_ID, SIDECAR_OUTAGE_RULE_PREFIX, UNSCREENED_RULE_PREFIX,
+    };
+    use ironhermes_security::UnavailableReason;
+
+    let is_marker = |r: &str| {
+        r == REGEX_FLOOR_RULE_ID
+            || r.starts_with(UNSCREENED_RULE_PREFIX)
+            || r.starts_with(SIDECAR_OUTAGE_RULE_PREFIX)
+    };
+    let named = rule_ids
+        .iter()
+        .filter(|r| !is_marker(r))
+        .map(|r| ironhermes_core::sanitize_notice_field(r))
+        .filter(|r| !r.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !named.is_empty() {
+        return format!(" by rule {named}");
+    }
+    if rule_ids.iter().any(|r| r == REGEX_FLOOR_RULE_ID) {
+        return " by the built-in rules".to_string();
+    }
+    if let Some(word) = rule_ids
+        .iter()
+        .find_map(|r| r.strip_prefix(UNSCREENED_RULE_PREFIX))
+    {
+        return match UnavailableReason::from_word(word) {
+            Some(reason) => format!(": it could not be screened ({reason})"),
+            None => ": it could not be screened".to_string(),
+        };
+    }
+    if let Some(word) = rule_ids
+        .iter()
+        .find_map(|r| r.strip_prefix(SIDECAR_OUTAGE_RULE_PREFIX))
+    {
+        return match UnavailableReason::from_word(word) {
+            Some(UnavailableReason::Missing) => ": the security scanner is missing".to_string(),
+            _ => ": the security scanner is not responding".to_string(),
+        };
+    }
+    " by the security policy".to_string()
+}
+
+/// Phase 57 D-16/D-17, UI-SPEC C2 and R4/R5: map one in-turn [`SecurityEvent`] to the wire
+/// events for turn `turn_id`: a `TurnSeverity` for the dot, plus a transcript
+/// `CriticalEvent` only for the kinds that render a row. Approval events (the card), a
+/// turn-ending tool failure (the Error bubble), `DefconChanged` (the web slash path) and
+/// `JobBlocked` (the process bus) never yield a row here, so nothing is shown twice. The
+/// producer's `summary` is only scanned for a reason word and an outcome token; command
+/// text never reaches a row.
+#[cfg(feature = "server")]
+pub(crate) fn security_event_to_stream(
+    turn_id: uuid::Uuid,
+    session_id: &str,
+    ev: &ironhermes_core::SecurityEvent,
+) -> Vec<ChatStreamEvent> {
+    use crate::protocol::TurnWorst;
+    use ironhermes_core::SecurityEventKind as K;
+
+    let sev = |worst: TurnWorst| ChatStreamEvent::TurnSeverity {
+        turn_id,
+        session_id: session_id.to_string(),
+        worst,
+    };
+    let crit = |kind: &str, summary: String| ChatStreamEvent::CriticalEvent {
+        turn_id,
+        session_id: session_id.to_string(),
+        kind: kind.to_string(),
+        summary,
+    };
+    let tool = ironhermes_core::sanitize_notice_field(&ev.tool);
+    match ev.kind {
+        K::Blocked => vec![
+            sev(TurnWorst::Red),
+            crit(
+                "blocked",
+                format!(
+                    "{tool} was blocked{}. It did not run.",
+                    blocked_clause(&ev.rule_ids)
+                ),
+            ),
+        ],
+        K::SidecarUnavailable => {
+            let outcome = sidecar_outcome(&ev.summary, ev.level);
+            let text = match sidecar_reason_phrase(&ev.summary) {
+                SidecarCause::Missing => {
+                    format!(
+                        "The security scanner is missing. {tool} {}.",
+                        outcome.phrase()
+                    )
+                }
+                SidecarCause::NotResponding => format!(
+                    "The security scanner is not responding. {tool} {}.",
+                    outcome.phrase()
+                ),
+                SidecarCause::NotScreened(reason) => {
+                    format!(
+                        "{tool} could not be screened ({reason}) and {}.",
+                        outcome.phrase()
+                    )
+                }
+            };
+            vec![sev(outcome.worst()), crit("sidecar_unavailable", text)]
+        }
+        K::CredentialDetected => vec![
+            sev(TurnWorst::Amber),
+            crit(
+                "credential_detected",
+                format!("A credential was found in {tool}. The value is hidden."),
+            ),
+        ],
+        K::WarnRan | K::BypassRan => vec![sev(TurnWorst::Amber)],
+        K::ToolFailedTurnEnded => vec![sev(TurnWorst::Red)],
+        K::ApprovalRequested | K::ApprovalResolved | K::DefconChanged | K::JobBlocked => Vec::new(),
+    }
+}
+
+/// Phase 57 D-16 / UI-SPEC C2, R6: map an event from the process-local security bus to its
+/// wire event. Only `JobBlocked` (a cron prompt or kanban task blocked outside any turn,
+/// raised in this process by plan 11) is forwarded: an in-turn kind arrives through the
+/// turn's own gate, so forwarding it here would show it twice. The row is built from the
+/// job label (`ev.summary`: a cron job's name or id, a kanban task's id; plan 11 never
+/// puts prompt or task text there) and the rule ids only. It is a nil-turn row with no
+/// session, attached to no dot.
+#[cfg(feature = "server")]
+pub(crate) fn process_event_to_stream(
+    ev: &ironhermes_core::SecurityEvent,
+) -> Option<ChatStreamEvent> {
+    if ev.kind != ironhermes_core::SecurityEventKind::JobBlocked {
+        return None;
+    }
+    let label = ironhermes_core::sanitize_notice_field(ev.summary.trim());
+    let label = label.trim();
+    let label = if label.is_empty() { "(unnamed)" } else { label };
+    Some(ChatStreamEvent::CriticalEvent {
+        turn_id: uuid::Uuid::nil(),
+        session_id: String::new(),
+        kind: "job_blocked".to_string(),
+        summary: format!(
+            "Scheduled job {label} was blocked{}. It did not run.",
+            blocked_clause(&ev.rule_ids)
+        ),
+    })
+}
+
+/// Phase 57 R8 / D-10 / D-16: the critical row for a web `/yolo <N>` that changed the
+/// session's level, `DEFCON {old} to {new}, set from {surface} by {actor}.`. `None` when the
+/// level did not change. The slash dispatch passes the registry level read before and after
+/// the command, so a refused (auth off, flag off), invalid or same-level `/yolo` never
+/// produces a row (T-57-79).
+#[cfg(feature = "server")]
+pub(crate) fn defcon_changed_event(
+    session_id: &str,
+    old: ironhermes_core::config::DefconLevel,
+    new: ironhermes_core::config::DefconLevel,
+    surface: &str,
+    actor: &str,
+) -> Option<ChatStreamEvent> {
+    if old == new {
+        return None;
+    }
+    Some(ChatStreamEvent::CriticalEvent {
+        turn_id: uuid::Uuid::nil(),
+        session_id: session_id.to_string(),
+        kind: "defcon_changed".to_string(),
+        summary: format!(
+            "DEFCON {} to {}, set from {} by {}.",
+            old.level(),
+            new.level(),
+            ironhermes_core::sanitize_notice_field(surface),
+            ironhermes_core::sanitize_notice_field(actor),
+        ),
     })
 }
 
@@ -3529,5 +4389,1416 @@ mod goal_loop_web_rendering_tests {
                 || rendered.to_lowercase().contains("isn't available"),
             "must contain an explicit not-available phrase: {rendered}"
         );
+    }
+}
+
+// =============================================================================
+// Phase 54.7 Plan 10 (D-18 / D-19): saved voice settings reach the next web
+// voice turn without a restart. Each test saves through the REAL save path
+// (validate_voice_payload -> apply_voice_payload -> Config::save_to) into a
+// tempdir IRONHERMES_HOME, then drives the extracted ws.rs seam against a
+// wiremock server.
+// =============================================================================
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod d18_tests {
+    use super::{
+        fresh_voice_config, fresh_voice_config_async, synthesize_reply_audio, transcribe_turn_audio, voice_status_from,
+        wake_word_matches, wake_word_transcript,
+    };
+    use crate::protocol::ChatStreamEvent;
+    use crate::server::api::{apply_voice_payload, validate_voice_payload, VoiceWritePayload};
+    use ironhermes_core::config::Config;
+    use std::path::Path;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    /// Restores IRONHERMES_HOME when dropped, even on panic.
+    struct HomeRestore(Option<String>);
+
+    impl HomeRestore {
+        fn set(home: &Path) -> Self {
+            let prior = std::env::var("IRONHERMES_HOME").ok();
+            // SAFETY: callers hold crate::server::test_support::env_lock().
+            unsafe { std::env::set_var("IRONHERMES_HOME", home) };
+            Self(prior)
+        }
+    }
+
+    impl Drop for HomeRestore {
+        fn drop(&mut self) {
+            // SAFETY: callers hold crate::server::test_support::env_lock().
+            unsafe {
+                match &self.0 {
+                    Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                    None => std::env::remove_var("IRONHERMES_HOME"),
+                }
+            }
+        }
+    }
+
+    /// The same order `update_voice_config` runs, minus the write gate.
+    fn save_through_real_path(path: &Path, payload: &VoiceWritePayload) {
+        validate_voice_payload(payload).expect("payload validates");
+        let mut config = Config::load_from(path).expect("load");
+        apply_voice_payload(&mut config, payload).expect("apply");
+        config.save_to(path).expect("save");
+    }
+
+    fn whisper_cpp_text(body: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_string(body.to_string())
+    }
+
+    fn stt_compat_payload(base_url: &str) -> VoiceWritePayload {
+        VoiceWritePayload {
+            stt_provider: Some("openai_compatible".into()),
+            stt_compat_base_url: Some(base_url.to_string()),
+            stt_compat_path: Some("/inference".into()),
+            stt_compat_model: Some("whisper-large-v3".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn d18_saved_stt_settings_apply_to_next_turn() {
+        let _guard = crate::server::test_support::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _restore = HomeRestore::set(home.path());
+        let cfg_path = home.path().join("config.yaml");
+
+        // Config A: the boot snapshot, STT on groq.
+        let mut a = Config::default();
+        a.stt.provider = "groq".into();
+        a.save_to(&cfg_path).expect("write config A");
+        let snapshot = Config::load_from(&cfg_path).expect("snapshot");
+        assert_eq!(snapshot.stt.provider, "groq");
+
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/inference"))
+                .respond_with(whisper_cpp_text("{\"text\":\" Hi.\\n\"}"))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            // The operator saves openai_compatible STT from the panel.
+            save_through_real_path(&cfg_path, &stt_compat_payload(&server.uri()));
+
+            // The next turn reads fresh config, not the boot snapshot.
+            let fresh = fresh_voice_config(&snapshot);
+            assert_eq!(fresh.stt.provider, "openai_compatible");
+
+            let cache = home.path().join("audio_cache");
+            let text =
+                transcribe_turn_audio(&fresh, b"fake webm bytes", "audio/webm", &cache).await;
+            assert_eq!(text.as_deref(), Some("Hi."));
+
+            let requests = server.received_requests().await.expect("requests");
+            assert_eq!(requests.len(), 1, "the mock must receive exactly one clip");
+        });
+    }
+
+    /// IN-05: the async variant loads on the blocking pool and returns the same
+    /// config; a broken file falls back to the snapshot.
+    #[test]
+    fn fresh_voice_config_async_matches_the_sync_load() {
+        let _guard = crate::server::test_support::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _restore = HomeRestore::set(home.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let mut snapshot = Config::default();
+        snapshot.stt.provider = "openai".into();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "stt:\n  provider: groq\n",
+        )
+        .expect("write config");
+        let fresh = runtime.block_on(fresh_voice_config_async(&snapshot));
+        assert_eq!(fresh.stt.provider, "groq", "the saved file wins over the snapshot");
+
+        std::fs::write(home.path().join("config.yaml"), "stt: [broken: yaml\n  - {")
+            .expect("write broken yaml");
+        let fallback = runtime.block_on(fresh_voice_config_async(&snapshot));
+        assert_eq!(fallback.stt.provider, "openai");
+
+        // The per-clip call sites use the async variant (no blocking load on the
+        // executor); only the sync WS-connect status path keeps the sync one.
+        let src = include_str!("ws.rs");
+        assert!(src.contains("fresh_voice_config_async(&ww_app_state.config()).await"));
+        assert!(src.contains("fresh_voice_config_async(&app_state_stt.config()).await"));
+    }
+
+    #[test]
+    fn fresh_voice_config_falls_back_to_snapshot_on_load_error() {
+        let _guard = crate::server::test_support::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _restore = HomeRestore::set(home.path());
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "stt: [this is: not: valid yaml\n  - {",
+        )
+        .expect("write broken yaml");
+
+        let mut snapshot = Config::default();
+        snapshot.stt.provider = "openai".into();
+        let fresh = fresh_voice_config(&snapshot);
+        assert_eq!(
+            fresh.stt.provider, "openai",
+            "a config that fails to load must fall back to the boot snapshot"
+        );
+    }
+
+    #[test]
+    fn turn_audio_filters_hallucinations() {
+        let _guard = crate::server::test_support::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _restore = HomeRestore::set(home.path());
+        let cfg_path = home.path().join("config.yaml");
+        Config::default().save_to(&cfg_path).expect("write config");
+
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/inference"))
+                .respond_with(whisper_cpp_text("{\"text\":\" Thank you.\\n\"}"))
+                .mount(&server)
+                .await;
+            save_through_real_path(&cfg_path, &stt_compat_payload(&server.uri()));
+            let fresh = fresh_voice_config(&Config::default());
+
+            let cache = home.path().join("audio_cache");
+            let text =
+                transcribe_turn_audio(&fresh, b"fake webm bytes", "audio/webm", &cache).await;
+            assert_eq!(text, None, "HallucinationFilter must reject the phrase");
+        });
+    }
+
+    #[test]
+    fn wake_word_transcript_uses_fresh_compat_config() {
+        let _guard = crate::server::test_support::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _restore = HomeRestore::set(home.path());
+        let cfg_path = home.path().join("config.yaml");
+        Config::default().save_to(&cfg_path).expect("write config");
+
+        block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/inference"))
+                .respond_with(whisper_cpp_text("{\"text\":\" hey hermes open\\n\"}"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            save_through_real_path(&cfg_path, &stt_compat_payload(&server.uri()));
+            let fresh = fresh_voice_config(&Config::default());
+
+            let cache = home.path().join("audio_cache");
+            let transcript =
+                wake_word_transcript(&fresh, b"fake webm bytes", "audio/webm", &cache).await;
+            assert_eq!(transcript.as_deref(), Some("hey hermes open"));
+            assert!(wake_word_matches(
+                transcript.as_deref().unwrap_or(""),
+                "hey hermes"
+            ));
+        });
+    }
+
+    fn status_fields(ev: ChatStreamEvent) -> (bool, Option<String>, Option<String>) {
+        match ev {
+            ChatStreamEvent::VoiceStatus {
+                stt_available,
+                stt_provider,
+                stt_model,
+                ..
+            } => (stt_available, stt_provider, stt_model),
+            other => panic!("expected VoiceStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn voice_status_reports_openai_compatible() {
+        let mut cfg = Config::default();
+        cfg.stt.provider = "openai_compatible".into();
+        cfg.stt.openai_compatible.base_url = "http://stt.lan:8178".into();
+        cfg.stt.openai_compatible.model = "whisper-large-v3".into();
+        let (available, provider, model) = status_fields(voice_status_from(&cfg));
+        assert!(available, "a configured openai_compatible STT is available");
+        assert_eq!(provider.as_deref(), Some("openai_compatible"));
+        assert_eq!(model.as_deref(), Some("whisper-large-v3"));
+
+        // Pitfall 15: selected but not usable (empty base_url) is NOT available.
+        cfg.stt.openai_compatible.base_url = String::new();
+        let (available, _, _) = status_fields(voice_status_from(&cfg));
+        assert!(
+            !available,
+            "an openai_compatible STT with an empty base_url must report unavailable"
+        );
+    }
+
+    #[test]
+    fn ws_stt_sites_read_fresh_config() {
+        let src = include_str!("ws.rs");
+        // Needles are assembled from fragments so this test's own text never matches.
+        for needle in [
+            [".config()", ".stt"].concat(),
+            ["config().voice.wake", "_word"].concat(),
+        ] {
+            assert!(
+                !src.contains(&needle),
+                "ws.rs still reads the boot snapshot via `{needle}` (D-18)"
+            );
+        }
+    }
+
+    const FAKE_AUDIO: &[u8] = b"ID3 fake synthesized audio body";
+
+    /// A mock OpenAI-compatible speech server answering `POST /v1/audio/speech`.
+    async fn speech_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(FAKE_AUDIO.to_vec()))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn tts_compat_config(base_url: &str, format: &str) -> Config {
+        let mut cfg = Config::default();
+        cfg.tts.provider = "openai_compatible".into();
+        cfg.tts.openai_compatible.base_url = base_url.to_string();
+        cfg.tts.openai_compatible.format = format.to_string();
+        cfg
+    }
+
+    #[test]
+    fn d18_saved_tts_settings_apply_to_next_reply() {
+        let _guard = crate::server::test_support::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _restore = HomeRestore::set(home.path());
+        let cfg_path = home.path().join("config.yaml");
+        Config::default()
+            .save_to(&cfg_path)
+            .expect("write config A");
+        let snapshot = Config::load_from(&cfg_path).expect("snapshot");
+        assert_ne!(snapshot.tts.provider, "openai_compatible");
+
+        block_on(async {
+            let server = speech_server().await;
+            let payload = VoiceWritePayload {
+                tts_provider: Some("openai_compatible".into()),
+                tts_compat_base_url: Some(format!("{}/v1", server.uri())),
+                tts_compat_format: Some("mp3".into()),
+                ..Default::default()
+            };
+            save_through_real_path(&cfg_path, &payload);
+
+            let fresh = fresh_voice_config(&snapshot);
+            let audio_dir = home.path().join("audio_cache");
+            let written = synthesize_reply_audio(&fresh, "hi", None, &audio_dir)
+                .await
+                .expect("the new TTS server must synthesize");
+            assert_eq!(written.extension().and_then(|e| e.to_str()), Some("mp3"));
+            assert_eq!(std::fs::read(&written).expect("read audio"), FAKE_AUDIO);
+            assert_eq!(
+                server.received_requests().await.expect("requests").len(),
+                1,
+                "the mock must receive exactly one synthesis request"
+            );
+        });
+    }
+
+    #[test]
+    fn reply_audio_extension_follows_format() {
+        let home = tempfile::tempdir().expect("tempdir");
+        block_on(async {
+            let server = speech_server().await;
+            let cfg = tts_compat_config(&format!("{}/v1", server.uri()), "wav");
+            let audio_dir = home.path().join("audio_cache");
+            let written = synthesize_reply_audio(&cfg, "hi", None, &audio_dir)
+                .await
+                .expect("synthesize");
+            assert_eq!(written.extension().and_then(|e| e.to_str()), Some("wav"));
+        });
+    }
+
+    #[test]
+    fn reply_audio_rejects_unknown_identity_for_selection() {
+        let home = tempfile::tempdir().expect("tempdir");
+        block_on(async {
+            let server = speech_server().await;
+            let mut cfg = tts_compat_config(&format!("{}/v1", server.uri()), "mp3");
+            // Both slugs carry a format override; only a known preset may apply it.
+            for slug in ["rogue_slug_not_a_preset", "orb_classic"] {
+                let mut record = ironhermes_core::config::IdentityRecord::default();
+                record.voice.free_mode_tts_format = Some("opus".into());
+                cfg.identities.insert(slug.to_string(), record);
+            }
+            let audio_dir = home.path().join("audio_cache");
+
+            let unknown =
+                synthesize_reply_audio(&cfg, "hi", Some("rogue_slug_not_a_preset"), &audio_dir)
+                    .await
+                    .expect("synthesize with an unknown identity");
+            assert_eq!(
+                unknown.extension().and_then(|e| e.to_str()),
+                Some("mp3"),
+                "an unknown identity slug must be ignored (global config used)"
+            );
+
+            let known = synthesize_reply_audio(&cfg, "hi", Some("orb_classic"), &audio_dir)
+                .await
+                .expect("synthesize with a known identity");
+            assert_eq!(
+                known.extension().and_then(|e| e.to_str()),
+                Some("opus"),
+                "a known identity applies its override"
+            );
+        });
+    }
+
+    #[test]
+    fn ws_voice_paths_do_not_call_apply_config_now() {
+        // Scan the production code only: this test fn's own name contains the needle.
+        let src = include_str!("ws.rs")
+            .split("mod d18_tests")
+            .next()
+            .unwrap_or_default();
+        let needle = ["apply_config", "_now("].concat();
+        assert!(
+            !src.contains(&needle),
+            "voice paths must not call apply_config_now (T-54.7-44)"
+        );
+    }
+}
+
+// =============================================================================
+// Phase 57 plan 12 (D-04b, D-22, UI-SPEC R9c): web surface wiring tests
+// =============================================================================
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod web_level_tests {
+    use super::*;
+    use ironhermes_core::commands::context::CommandContext;
+    use ironhermes_core::commands::{CommandResult, CommandRouter, ResolveResult};
+    use ironhermes_core::config::DefconLevel;
+    use ironhermes_core::defcon::session_defcon;
+    use ironhermes_core::types::Platform;
+    use ironhermes_core::{AuditConfig, AuditLog};
+    use ironhermes_security::policy::Severity;
+    use ironhermes_security::testing::{
+        FakeBackend, clear_installed_for_tests, install_fake_for_tests,
+    };
+
+    fn level(n: u8) -> DefconLevel {
+        DefconLevel::try_from(n).expect("valid level")
+    }
+
+    fn as_json(events: &[ChatStreamEvent]) -> Vec<serde_json::Value> {
+        events
+            .iter()
+            .map(|e| serde_json::to_value(e).expect("serialize"))
+            .collect()
+    }
+
+    fn rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    /// R9c: a level change pushes exactly one `DefconLevel` (with the server's own
+    /// `bypass`); a refused or same-level `/yolo` pushes nothing.
+    #[test]
+    fn web_level_change_pushes_defcon_level() {
+        assert_eq!(
+            as_json(&web_level_change_events("s1", level(3), level(1))),
+            vec![serde_json::json!(
+                {"DefconLevel":{"session_id":"s1","level":1,"bypass":false}}
+            )]
+        );
+        assert_eq!(
+            as_json(&web_level_change_events("s1", level(3), level(5))),
+            vec![serde_json::json!(
+                {"DefconLevel":{"session_id":"s1","level":5,"bypass":true}}
+            )]
+        );
+        assert_eq!(
+            as_json(&web_level_change_events("s1", level(4), level(4))),
+            Vec::<serde_json::Value>::new(),
+            "an unchanged level pushes nothing"
+        );
+    }
+
+    /// D-14: each gate event reaches the turn's channel as the matching wire event, with
+    /// the turn id, the tool name, and no arguments anywhere.
+    #[test]
+    fn gate_events_map_to_wire_events() {
+        use crate::server::web_approval_gate::WebGateEvent;
+        let turn = uuid::Uuid::new_v4();
+
+        let requested = web_gate_event_to_stream_event(
+            turn,
+            &WebGateEvent::ApprovalRequested {
+                session_id: "s".into(),
+                approval_id: "a".into(),
+                tool: "terminal".into(),
+                reason: "needs approval".into(),
+            },
+        )
+        .expect("ApprovalRequested maps");
+        assert_eq!(
+            serde_json::to_value(&requested).unwrap(),
+            serde_json::json!({"ApprovalRequested":{
+                "turn_id": turn.to_string(), "session_id":"s", "approval_id":"a",
+                "tool":"terminal", "reason":"needs approval"}})
+        );
+
+        let resolved = web_gate_event_to_stream_event(
+            turn,
+            &WebGateEvent::ApprovalResolved {
+                session_id: "s".into(),
+                approval_id: "a".into(),
+                tool: "terminal".into(),
+                outcome: "timed_out".into(),
+            },
+        )
+        .expect("ApprovalResolved maps");
+        assert_eq!(
+            serde_json::to_value(&resolved).unwrap(),
+            serde_json::json!({"ApprovalResolved":{
+                "turn_id": turn.to_string(), "session_id":"s", "approval_id":"a",
+                "tool":"terminal", "outcome":"timed_out"}})
+        );
+
+        let bypass = web_gate_event_to_stream_event(
+            turn,
+            &WebGateEvent::YoloBypass(ironhermes_core::YoloBypassSummary::single(
+                "s", "web", "", "terminal", "reason",
+            )),
+        )
+        .expect("YoloBypass maps");
+        assert!(matches!(
+            bypass,
+            ChatStreamEvent::YoloBypassNotice { count: 1, .. }
+        ));
+
+        let security = web_gate_event_to_stream_event(
+            turn,
+            &WebGateEvent::Security(ironhermes_core::SecurityEvent {
+                kind: ironhermes_core::SecurityEventKind::Blocked,
+                tool: "terminal".into(),
+                rule_ids: vec![],
+                level: 3,
+                summary: "blocked".into(),
+            }),
+        );
+        assert!(
+            security.is_none(),
+            "Security is one-to-many: web_notice_sink maps it through security_event_to_stream"
+        );
+    }
+
+    /// D-04(b): a Block never reaches the model (the gate returns false, so the caller
+    /// never starts the turn), names the rule id, and is audited without the text.
+    // The std lock is held across awaits ON PURPOSE: it serializes this test's use of the
+    // process-global content-screen slot against other tests that install one.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn web_inbound_message_blocked() {
+        let _env = crate::server::test_support::env_lock();
+        install_fake_for_tests(
+            FakeBackend::new()
+                .block_if_contains("CANARY-BLOCK", Severity::High)
+                .warn_if_contains("CANARY-WARN", Severity::Medium),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let audit_path = dir.path().join("audit.jsonl");
+        let audit = AuditLog::with_path(audit_path.clone(), AuditConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+
+        // The test seam: `turns` is what `run_web_turn` would have been called for.
+        let mut turns = 0;
+        if web_inbound_gate_with(
+            &tx,
+            uuid::Uuid::nil(),
+            "s-in",
+            "please CANARY-BLOCK this",
+            level(3),
+            &audit,
+        )
+        .await
+        {
+            turns += 1;
+        }
+        assert_eq!(turns, 0, "a blocked message must never start a turn");
+        match rx.try_recv().expect("an Error event") {
+            ChatStreamEvent::Error { message, .. } => {
+                assert!(
+                    message.contains("FakeBlock"),
+                    "names the rule id: {message}"
+                );
+                assert!(
+                    !message.contains("CANARY-BLOCK"),
+                    "never echoes the text: {message}"
+                );
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+        let written = rows(&audit_path);
+        assert_eq!(written.len(), 1, "{written:?}");
+        assert_eq!(written[0]["kind"], "security_verdict");
+        assert_eq!(written[0]["tool"], "inbound_message");
+        assert_eq!(written[0]["decision"], "blocked");
+        assert!(
+            !std::fs::read_to_string(&audit_path)
+                .unwrap()
+                .contains("CANARY"),
+            "the audit row must carry rule ids, not the text"
+        );
+
+        // A benign message proceeds and writes nothing.
+        assert!(
+            web_inbound_gate_with(&tx, uuid::Uuid::nil(), "s-in", "hello", level(3), &audit).await
+        );
+        assert!(rx.try_recv().is_err(), "no event for a clean message");
+        assert_eq!(rows(&audit_path).len(), 1);
+
+        // A Warn is audited and proceeds.
+        assert!(
+            web_inbound_gate_with(
+                &tx,
+                uuid::Uuid::nil(),
+                "s-in",
+                "some CANARY-WARN text",
+                level(3),
+                &audit
+            )
+            .await,
+            "a Warn does not stop the message"
+        );
+        assert!(rx.try_recv().is_err(), "a Warn sends no Error");
+        let written = rows(&audit_path);
+        assert_eq!(written.len(), 2, "{written:?}");
+        assert_eq!(written[1]["decision"], "warn");
+
+        clear_installed_for_tests();
+    }
+
+    /// CR-01 / D-04(b) / D-12: a message the sidecar could not screen never starts a
+    /// turn at DEFCON 3, names the reason without echoing the text, and is audited as a
+    /// `sidecar_unavailable` row. At DEFCON 5 it proceeds as a Warn with the same row.
+    // Held across awaits on purpose, as in `web_inbound_message_blocked`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn web_inbound_unscreenable_refused_at_three() {
+        let _env = crate::server::test_support::env_lock();
+        install_fake_for_tests(FakeBackend::unavailable(
+            ironhermes_security::UnavailableReason::TooLarge,
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let audit_path = dir.path().join("audit.jsonl");
+        let audit = AuditLog::with_path(audit_path.clone(), AuditConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+
+        assert!(
+            !web_inbound_gate_with(
+                &tx,
+                uuid::Uuid::nil(),
+                "s-unscreened",
+                "please CANARY-UNSCREENED",
+                level(3),
+                &audit,
+            )
+            .await,
+            "an unscreened message must never start a turn at DEFCON 3"
+        );
+        match rx.try_recv().expect("an Error event") {
+            ChatStreamEvent::Error { message, .. } => {
+                assert_eq!(
+                    message,
+                    "Message not processed: it could not be screened (too_large)."
+                );
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "exactly one Error event");
+        let written = rows(&audit_path);
+        assert_eq!(written.len(), 1, "{written:?}");
+        assert_eq!(written[0]["kind"], "sidecar_unavailable");
+        assert_eq!(written[0]["tool"], "inbound_message");
+        assert_eq!(written[0]["decision"], "blocked");
+        let text = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(!text.contains("CANARY"), "the row must not carry the text");
+        assert!(text.contains("too_large"), "the row carries the reason");
+
+        // DEFCON 5: a Warn. The message proceeds, no Error, one more row.
+        assert!(
+            web_inbound_gate_with(
+                &tx,
+                uuid::Uuid::nil(),
+                "s-unscreened",
+                "please CANARY-UNSCREENED",
+                level(5),
+                &audit,
+            )
+            .await,
+            "an unscreened message is a Warn at DEFCON 5"
+        );
+        assert!(rx.try_recv().is_err(), "a Warn sends no Error");
+        let written = rows(&audit_path);
+        assert_eq!(written.len(), 2, "{written:?}");
+        assert_eq!(written[1]["kind"], "sidecar_unavailable");
+        assert_eq!(written[1]["tool"], "inbound_message");
+        assert_eq!(written[1]["decision"], "warn");
+        assert!(
+            !std::fs::read_to_string(&audit_path)
+                .unwrap()
+                .contains("CANARY")
+        );
+
+        clear_installed_for_tests();
+    }
+
+    /// D-22: `/yolo <N>` from the web changes the level only when the auth layer is on
+    /// (and `defcon_remote_change_enabled` is set); with auth off it is refused.
+    #[test]
+    fn web_yolo_needs_auth_enabled() {
+        let _env = crate::server::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "security:\n  defcon_remote_change_enabled: true\n",
+        )
+        .unwrap();
+        unsafe { std::env::set_var("IRONHERMES_HOME", home.path()) };
+
+        let router = CommandRouter::new(ironhermes_core::commands::registry::build_registry());
+        let run = |auth_enabled: bool, session: &str| -> CommandResult {
+            let (ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def)) =
+                router.resolve("/yolo 5", &Platform::Web)
+            else {
+                panic!("/yolo must resolve on the web surface");
+            };
+            let ctx = CommandContext::new(Platform::Web, session.to_string())
+                .with_defcon_auth(web_defcon_auth_facts(auth_enabled));
+            ironhermes_core::commands::handlers::dispatch(def, &["5"], &ctx, &router)
+        };
+
+        session_defcon().set_session_level("s-yolo-off", level(3));
+        assert!(
+            matches!(run(false, "s-yolo-off"), CommandResult::Error(_)),
+            "auth disabled: the web surface cannot change the level"
+        );
+        assert_eq!(session_defcon().handle_for("s-yolo-off").get(), level(3));
+
+        session_defcon().set_session_level("s-yolo-on", level(3));
+        assert!(
+            matches!(run(true, "s-yolo-on"), CommandResult::Output(_)),
+            "auth enabled and the remote flag on: the level changes"
+        );
+        assert_eq!(session_defcon().handle_for("s-yolo-on").get(), level(5));
+
+        let audit = rows(&home.path().join("logs").join("audit.jsonl"));
+        assert!(
+            audit.iter().any(|r| r["kind"] == "defcon_change"
+                && r["session"] == "s-yolo-on"
+                && r["decision"] == "changed"),
+            "a defcon_change row was written: {audit:?}"
+        );
+        assert!(
+            audit.iter().any(|r| r["kind"] == "defcon_change"
+                && r["session"] == "s-yolo-off"
+                && r["decision"] == "refused"),
+            "the refusal is audited too: {audit:?}"
+        );
+
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+        session_defcon().forget("s-yolo-off");
+        session_defcon().forget("s-yolo-on");
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod security_stream_tests {
+    //! Phase 57 plan 14: the server half of the critical-only chat. An in-turn
+    //! `SecurityEvent` becomes at most one `TurnSeverity` plus at most one transcript
+    //! `CriticalEvent`, built from the tool name and rule ids only.
+    use super::*;
+    use crate::protocol::TurnWorst;
+    use ironhermes_core::{SecurityEvent, SecurityEventKind};
+
+    fn ev(
+        kind: SecurityEventKind,
+        tool: &str,
+        rules: &[&str],
+        level: u8,
+        summary: &str,
+    ) -> SecurityEvent {
+        SecurityEvent {
+            kind,
+            tool: tool.to_string(),
+            rule_ids: rules.iter().map(|r| r.to_string()).collect(),
+            level,
+            summary: summary.to_string(),
+        }
+    }
+
+    fn turn() -> uuid::Uuid {
+        uuid::Uuid::new_v4()
+    }
+
+    /// `(worst, kind, summary)` of the `[TurnSeverity, CriticalEvent]` pair, or panic.
+    fn sev_and_crit(out: &[ChatStreamEvent]) -> (TurnWorst, String, String) {
+        assert_eq!(
+            out.len(),
+            2,
+            "expected [TurnSeverity, CriticalEvent], got {out:?}"
+        );
+        let worst = match &out[0] {
+            ChatStreamEvent::TurnSeverity { worst, .. } => *worst,
+            other => panic!("first event is not TurnSeverity: {other:?}"),
+        };
+        match &out[1] {
+            ChatStreamEvent::CriticalEvent { kind, summary, .. } => {
+                (worst, kind.clone(), summary.clone())
+            }
+            other => panic!("second event is not CriticalEvent: {other:?}"),
+        }
+    }
+
+    fn only_severity(out: &[ChatStreamEvent]) -> TurnWorst {
+        assert_eq!(out.len(), 1, "expected exactly [TurnSeverity], got {out:?}");
+        match &out[0] {
+            ChatStreamEvent::TurnSeverity { worst, .. } => *worst,
+            other => panic!("not TurnSeverity: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn security_block_maps_to_red_and_critical() {
+        let t = turn();
+        let out = security_event_to_stream(
+            t,
+            "s",
+            &ev(
+                SecurityEventKind::Blocked,
+                "terminal",
+                &["guardrail.rm_rf"],
+                3,
+                "CANARY-CMD",
+            ),
+        );
+        let (worst, kind, summary) = sev_and_crit(&out);
+        assert_eq!(worst, TurnWorst::Red);
+        assert_eq!(kind, "blocked");
+        assert_eq!(
+            summary,
+            "terminal was blocked by rule guardrail.rm_rf. It did not run."
+        );
+        for e in &out {
+            match e {
+                ChatStreamEvent::TurnSeverity {
+                    turn_id,
+                    session_id,
+                    ..
+                }
+                | ChatStreamEvent::CriticalEvent {
+                    turn_id,
+                    session_id,
+                    ..
+                } => {
+                    assert_eq!(*turn_id, t);
+                    assert_eq!(session_id, "s");
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert!(!serde_json::to_string(&out).unwrap().contains("CANARY-CMD"));
+
+        let out = security_event_to_stream(
+            t,
+            "s",
+            &ev(SecurityEventKind::Blocked, "terminal", &[], 3, "CANARY-CMD"),
+        );
+        let (_, _, summary) = sev_and_crit(&out);
+        assert_eq!(
+            summary,
+            "terminal was blocked by the security policy. It did not run."
+        );
+
+        let out = security_event_to_stream(
+            t,
+            "s",
+            &ev(
+                SecurityEventKind::Blocked,
+                "terminal",
+                &["a.one", "b.two"],
+                3,
+                "x",
+            ),
+        );
+        let (_, _, summary) = sev_and_crit(&out);
+        assert_eq!(
+            summary,
+            "terminal was blocked by rule a.one, b.two. It did not run."
+        );
+
+        let out = security_event_to_stream(
+            t,
+            "s",
+            &ev(
+                SecurityEventKind::CredentialDetected,
+                "terminal",
+                &[],
+                3,
+                "CANARY-CMD",
+            ),
+        );
+        let (worst, kind, summary) = sev_and_crit(&out);
+        assert_eq!(worst, TurnWorst::Amber);
+        assert_eq!(kind, "credential_detected");
+        assert_eq!(
+            summary,
+            "A credential was found in terminal. The value is hidden."
+        );
+
+        for k in [SecurityEventKind::WarnRan, SecurityEventKind::BypassRan] {
+            let out = security_event_to_stream(t, "s", &ev(k, "terminal", &[], 3, "CANARY-CMD"));
+            assert_eq!(only_severity(&out), TurnWorst::Amber);
+            assert!(!serde_json::to_string(&out).unwrap().contains("CANARY-CMD"));
+        }
+    }
+
+    #[test]
+    fn sidecar_unavailable_outcome_branches() {
+        let t = turn();
+        let run = |tool: &str, level: u8, summary: &str| {
+            sev_and_crit(&security_event_to_stream(
+                t,
+                "s",
+                &ev(
+                    SecurityEventKind::SidecarUnavailable,
+                    tool,
+                    &[],
+                    level,
+                    summary,
+                ),
+            ))
+        };
+
+        let (w, k, s) = run("terminal", 3, "timeout; outcome blocked");
+        assert_eq!((w, k.as_str()), (TurnWorst::Red, "sidecar_unavailable"));
+        assert_eq!(
+            s,
+            "terminal could not be screened (timeout) and was blocked."
+        );
+
+        let (w, _, s) = run("write_file", 3, "too_large; outcome approval");
+        assert_eq!(w, TurnWorst::Amber);
+        assert_eq!(
+            s,
+            "write_file could not be screened (too_large) and was held for approval."
+        );
+
+        let (w, _, s) = run("terminal", 5, "killed_for_timeouts; outcome bypass");
+        assert_eq!(w, TurnWorst::Amber);
+        assert_eq!(
+            s,
+            "terminal could not be screened (killed_for_timeouts) and ran without approval (audited bypass)."
+        );
+
+        let (w, _, s) = run("write_file", 2, "crash; outcome approval");
+        assert_eq!(w, TurnWorst::Amber);
+        assert_eq!(
+            s,
+            "The security scanner is not responding. write_file was held for approval."
+        );
+
+        let (w, _, s) = run("terminal", 5, "missing; outcome bypass");
+        assert_eq!(w, TurnWorst::Amber);
+        assert_eq!(
+            s,
+            "The security scanner is missing. terminal ran without approval (audited bypass)."
+        );
+
+        // A floor Critical blocks at every level (D-07).
+        let (w, _, s) = run("terminal", 5, "crash; outcome blocked");
+        assert_eq!(w, TurnWorst::Red);
+        assert_eq!(
+            s,
+            "The security scanner is not responding. terminal was blocked."
+        );
+
+        let (w, _, s) = run("read_file", 3, "crash; outcome allowed");
+        assert_eq!(w, TurnWorst::Amber);
+        assert_eq!(
+            s,
+            "The security scanner is not responding. read_file ran with the built-in rules only."
+        );
+
+        // No token: the D-12 Warn-class default.
+        let (w, _, s) = run("terminal", 3, "crash");
+        assert_eq!(w, TurnWorst::Red);
+        assert!(s.ends_with("terminal was blocked."), "{s}");
+        let (w, _, s) = run("terminal", 4, "crash");
+        assert_eq!(w, TurnWorst::Amber);
+        assert!(
+            s.ends_with("terminal ran without approval (audited bypass)."),
+            "{s}"
+        );
+
+        for summary in [
+            "timeout; outcome blocked",
+            "crash; outcome approval",
+            "missing; outcome bypass",
+            "crash; outcome allowed",
+            "crash",
+        ] {
+            let (_, _, s) = run("terminal", 3, summary);
+            assert!(!s.contains("outcome"), "token leaked: {s}");
+            assert!(!s.contains('{'), "raw placeholder: {s}");
+        }
+    }
+
+    /// Drive a terminal call at DEFCON 3 through the real `execute_gated_command`, a
+    /// `WebApprovalGate` capture sink and `security_event_to_stream` with a sidecar that
+    /// is unavailable for `reason`. Returns the `(kind, summary)` of every `CriticalEvent`
+    /// the web would render, in order.
+    async fn gated_block_rows(
+        reason: ironhermes_security::UnavailableReason,
+    ) -> Vec<(String, String)> {
+        use crate::server::web_approval_gate::{NoticeSink, WebApprovalGate, WebGateEvent};
+        use ironhermes_core::config::DefconLevel;
+        use ironhermes_core::{AuditConfig, AuditLog};
+        use ironhermes_hooks::{
+            execute_gated_command, DangerousCommandGuardrail, GatePolicy, GatedOutcome,
+        };
+        use ironhermes_security::service::SecurityService;
+        use ironhermes_security::testing::FakeBackend;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let captured: Arc<Mutex<Vec<WebGateEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_events = captured.clone();
+        let sink: NoticeSink = Arc::new(move |e: &WebGateEvent| {
+            sink_events.lock().unwrap().push(e.clone());
+        });
+        let gate = WebApprovalGate::with_notice_sink(sink);
+        let dir = tempfile::tempdir().unwrap();
+        let audit = AuditLog::with_path(dir.path().join("audit.jsonl"), AuditConfig::default());
+        let policy = GatePolicy::fixed(
+            DefconLevel::THREE,
+            Some(Arc::new(SecurityService::new(Arc::new(
+                FakeBackend::unavailable(reason),
+            )))),
+        );
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in = ran.clone();
+        let outcome = execute_gated_command(
+            "terminal",
+            "ls",
+            &DangerousCommandGuardrail::new(),
+            Some(&gate),
+            &audit,
+            "s-g2",
+            "web",
+            "s-g2",
+            policy,
+            false,
+            false,
+            || async move {
+                ran_in.fetch_add(1, Ordering::SeqCst);
+                Ok("ran".to_string())
+            },
+        )
+        .await;
+        assert!(matches!(outcome, GatedOutcome::Blocked(_)), "{outcome:?}");
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the call must not run");
+
+        let t = turn();
+        let events = captured.lock().unwrap().clone();
+        let mut rows = Vec::new();
+        for e in events {
+            let WebGateEvent::Security(sev) = e else {
+                continue;
+            };
+            for out in security_event_to_stream(t, "s-g2", &sev) {
+                if let ChatStreamEvent::CriticalEvent { kind, summary, .. } = out {
+                    rows.push((kind, summary));
+                }
+            }
+        }
+        rows
+    }
+
+    /// G-2 (D-16, D-12): a terminal call Blocked at DEFCON 3 because the sidecar crashed
+    /// shows a web row that names the scanner, through the real chokepoint.
+    #[tokio::test]
+    async fn outage_block_card_names_the_scanner_e2e() {
+        let rows = gated_block_rows(ironhermes_security::UnavailableReason::Crash).await;
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "sidecar_unavailable".to_string(),
+                    "The security scanner is not responding. terminal was blocked.".to_string()
+                ),
+                (
+                    "blocked".to_string(),
+                    "terminal was blocked: the security scanner is not responding. It did not run."
+                        .to_string()
+                ),
+            ]
+        );
+    }
+
+    /// G-2: every cause renders its own clause, in the documented precedence, and an
+    /// unparseable marker suffix renders no suffix text.
+    /// GC-WR-03: a refused subject reads as "could not be screened" on both rows.
+    #[tokio::test]
+    async fn unscreened_block_card_names_the_reason_e2e() {
+        let rows = gated_block_rows(ironhermes_security::UnavailableReason::TooLarge).await;
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "sidecar_unavailable".to_string(),
+                    "terminal could not be screened (too_large) and was blocked.".to_string()
+                ),
+                (
+                    "blocked".to_string(),
+                    "terminal was blocked: it could not be screened (too_large). It did not run."
+                        .to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn blocked_clause_names_every_cause() {
+        let clause = |ids: &[&str]| {
+            let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+            blocked_clause(&ids)
+        };
+        assert_eq!(clause(&[]), " by the security policy");
+        assert_eq!(clause(&["regex_floor"]), " by the built-in rules");
+        assert_eq!(
+            clause(&["unscreened:too_large"]),
+            ": it could not be screened (too_large)"
+        );
+        assert_eq!(
+            clause(&["unscreened:killed_for_timeouts"]),
+            ": it could not be screened (killed_for_timeouts)"
+        );
+        assert_eq!(
+            clause(&["unscreened:<script>"]),
+            ": it could not be screened"
+        );
+        assert_eq!(
+            clause(&["sidecar_outage:crash"]),
+            ": the security scanner is not responding"
+        );
+        assert_eq!(
+            clause(&["sidecar_outage:missing"]),
+            ": the security scanner is missing"
+        );
+        assert_eq!(
+            clause(&["guardrail.rm_rf", "regex_floor"]),
+            " by rule guardrail.rm_rf"
+        );
+        assert_eq!(
+            clause(&["regex_floor", "unscreened:too_large"]),
+            " by the built-in rules"
+        );
+    }
+
+    #[test]
+    fn approval_and_turn_failure_render_once() {
+        let t = turn();
+        for k in [
+            SecurityEventKind::ApprovalRequested,
+            SecurityEventKind::ApprovalResolved,
+            SecurityEventKind::DefconChanged,
+            SecurityEventKind::JobBlocked,
+        ] {
+            let out = security_event_to_stream(t, "s", &ev(k.clone(), "terminal", &[], 3, "x"));
+            assert!(
+                out.is_empty(),
+                "{k:?} must yield no transcript event: {out:?}"
+            );
+        }
+        let out = security_event_to_stream(
+            t,
+            "s",
+            &ev(
+                SecurityEventKind::ToolFailedTurnEnded,
+                "terminal",
+                &[],
+                3,
+                "x",
+            ),
+        );
+        assert_eq!(only_severity(&out), TurnWorst::Red);
+        assert!(!out
+            .iter()
+            .any(|e| matches!(e, ChatStreamEvent::CriticalEvent { .. })));
+    }
+
+    fn crit_summary(ev: Option<ChatStreamEvent>) -> String {
+        match ev {
+            Some(ChatStreamEvent::CriticalEvent {
+                turn_id,
+                session_id,
+                kind,
+                summary,
+            }) => {
+                assert_eq!(
+                    turn_id,
+                    uuid::Uuid::nil(),
+                    "an out-of-turn row has a nil turn"
+                );
+                assert_eq!(session_id, "");
+                assert_eq!(kind, "job_blocked");
+                summary
+            }
+            other => panic!("expected a job_blocked CriticalEvent, got {other:?}"),
+        }
+    }
+
+    /// D-16 / R6: a blocked scheduled job becomes one nil-turn row built from the job
+    /// label and rule ids only; every other kind stays off this path.
+    #[test]
+    fn process_job_blocked_maps_to_critical_event() {
+        let job = |tool: &str, rules: &[&str], label: &str| {
+            process_event_to_stream(&ev(SecurityEventKind::JobBlocked, tool, rules, 3, label))
+        };
+        assert_eq!(
+            crit_summary(job("cron_prompt", &["cron.exfil"], "clawdi-fork-parity-daily")),
+            "Scheduled job clawdi-fork-parity-daily was blocked by rule cron.exfil. It did not run."
+        );
+        assert_eq!(
+            crit_summary(job("cron_prompt", &["cron.exfil"], "job-7")),
+            "Scheduled job job-7 was blocked by rule cron.exfil. It did not run."
+        );
+        assert_eq!(
+            crit_summary(job("cron_prompt", &["a.one", "b.two"], "nightly")),
+            "Scheduled job nightly was blocked by rule a.one, b.two. It did not run."
+        );
+        assert_eq!(
+            crit_summary(job("cron_prompt", &[], "nightly")),
+            "Scheduled job nightly was blocked by the security policy. It did not run."
+        );
+        assert_eq!(
+            crit_summary(job("cron_prompt", &["unscreened:too_large"], "nightly")),
+            "Scheduled job nightly was blocked: it could not be screened (too_large). It did not run."
+        );
+        assert_eq!(
+            crit_summary(job("kanban_task", &["kanban.exfil"], "42")),
+            "Scheduled job 42 was blocked by rule kanban.exfil. It did not run."
+        );
+        let unnamed = crit_summary(job("cron_prompt", &["r"], "   "));
+        assert_eq!(
+            unnamed,
+            "Scheduled job (unnamed) was blocked by rule r. It did not run."
+        );
+        assert!(!unnamed.contains('{'), "never a raw placeholder: {unnamed}");
+
+        for k in [
+            SecurityEventKind::Blocked,
+            SecurityEventKind::WarnRan,
+            SecurityEventKind::BypassRan,
+            SecurityEventKind::SidecarUnavailable,
+        ] {
+            assert!(
+                process_event_to_stream(&ev(k.clone(), "terminal", &["r"], 3, "x")).is_none(),
+                "{k:?} must not be forwarded from the bus"
+            );
+        }
+
+        // Structural: each chat socket subscribes to the bus and uses the mapper.
+        const WS_RS: &str = include_str!("ws.rs");
+        let prod = &WS_RS[..WS_RS.find(concat!("#[cfg(", "test)]")).unwrap()];
+        assert!(prod.contains(concat!("subscribe_security", "_events()")));
+        assert!(
+            prod.matches(concat!("process_event_to", "_stream("))
+                .count()
+                >= 2,
+            "the mapper is defined and used in production code"
+        );
+    }
+
+    fn level(n: u8) -> ironhermes_core::config::DefconLevel {
+        ironhermes_core::config::DefconLevel::try_from(n).expect("valid level")
+    }
+
+    /// R8: a web `/yolo <N>` that changes the level adds exactly one row.
+    #[test]
+    fn defcon_changed_maps_to_critical_event() {
+        match defcon_changed_event("s1", level(3), level(1), "web", "web") {
+            Some(ChatStreamEvent::CriticalEvent {
+                turn_id,
+                session_id,
+                kind,
+                summary,
+            }) => {
+                assert_eq!(turn_id, uuid::Uuid::nil());
+                assert_eq!(session_id, "s1");
+                assert_eq!(kind, "defcon_changed");
+                assert_eq!(summary, "DEFCON 3 to 1, set from web by web.");
+            }
+            other => panic!("expected a defcon_changed CriticalEvent, got {other:?}"),
+        }
+        const WS_RS: &str = include_str!("ws.rs");
+        let prod = &WS_RS[..WS_RS.find(concat!("#[cfg(", "test)]")).unwrap()];
+        assert!(
+            prod.matches(concat!("defcon_changed", "_event(")).count() >= 2,
+            "the builder is defined and called from the slash dispatch"
+        );
+    }
+
+    /// R8 / T-57-79: a refused or same-level `/yolo` leaves the level unchanged, so the
+    /// before/after pair the dispatch passes is equal and no row is built.
+    #[test]
+    fn refused_yolo_adds_no_critical_row() {
+        assert!(defcon_changed_event("s1", level(3), level(3), "web", "web").is_none());
+        assert!(defcon_changed_event("s1", level(5), level(5), "web", "web").is_none());
+    }
+}
+
+/// Phase 54.9 Plan 09 (D-09, T-54.9-24): the OpenUI overlay is server-owned and opt-in.
+#[cfg(all(test, feature = "server"))]
+mod openui_overlay_tests {
+    use super::*;
+
+    fn req(openui: bool) -> ChatRequest {
+        ChatRequest {
+            session_id: "s".into(),
+            message: "show a table".into(),
+            active_identity: None,
+            attachment_ids: Vec::new(),
+            openui,
+            openui_gateway: false,
+            openui_prompt: false,
+        }
+    }
+
+    #[test]
+    fn slash_guard_applies_to_actions_not_typed_prompts() {
+        // RR-04
+        let mut r = req(true);
+        r.message = "  /yolo".into();
+        assert!(openui_action_slash_blocked(&r), "an action with a slash is blocked");
+        r.openui_prompt = true;
+        assert!(!openui_action_slash_blocked(&r), "the operator's own prompt is not");
+        r.openui_prompt = false;
+        r.message = "do the thing".into();
+        assert!(!openui_action_slash_blocked(&r));
+        r.openui = false;
+        r.message = "/new".into();
+        assert!(!openui_action_slash_blocked(&r), "plain Chat is untouched");
+    }
+
+    #[test]
+    fn gateway_branch_only_when_flag_and_openui() {
+        let mut r = req(false);
+        assert!(!openui_gateway_requested(&r));
+        r.openui_gateway = true;
+        assert!(
+            !openui_gateway_requested(&r),
+            "the gateway flag alone is not enough"
+        );
+        r.openui = true;
+        assert!(openui_gateway_requested(&r));
+        r.openui_gateway = false;
+        assert!(!openui_gateway_requested(&r));
+        // The Gateway branch sits behind the flag and runs instead of run_web_turn. Anchored on
+        // the key resolution (unique to the branch); `if openui_gateway {` also matches the
+        // overlay selection earlier in the handler (WR-07).
+        let src = include_str!("ws.rs");
+        let branch = src
+            .find(concat!("openui_gateway::resolve_thesys_key", "().await"))
+            .expect("gateway branch");
+        let normal = src
+            .find("let scrubber_ws = std::sync::Arc::new")
+            .expect("normal turn path");
+        assert!(branch < normal);
+        let guard = src[..branch].rfind("if openui_gateway {").expect("flag guard");
+        assert!(branch - guard < 200, "the key resolution sits directly under the flag guard");
+    }
+
+    #[test]
+    fn openui_overlay_only_when_flagged() {
+        assert!(openui_overlay_for(&req(false)).is_none());
+        let (name, body) =
+            openui_overlay_for(&req(true)).expect("flagged request gets the overlay");
+        assert_eq!(name, "openui");
+        assert!(body.starts_with(super::super::openui_route::OPENUI_SYSTEM_PROMPT));
+        // ADR-0007 "Overlay content": the restrictions ride after the unmodified prompt.
+        for needle in ["images", "@OpenUrl", "Query()", "Mutation()"] {
+            assert!(body.contains(needle), "overlay must mention {needle}");
+        }
+        // WR-01: the handler selects the overlay at receipt but pushes it only inside the
+        // spawned turn, after the inbound gate and the Gateway branch, right before the normal
+        // `run_web_turn` path.
+        // RR-08: whitespace-insensitive anchors, so a rustfmt reflow cannot break the ordering check.
+        let src: String = include_str!("ws.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let select = src
+            .find("openui_overlay_for(&req)")
+            .expect("handler calls it");
+        let gate = src
+            .find("if!web_inbound_gate(&app_state,&tx,turn_id_spawn")
+            .expect("spawned gate");
+        let push = src
+            .find("push_web_skill_overlay(&session_id_for_turn,name,body)")
+            .expect("overlay push");
+        let normal = src
+            .find("letscrubber_ws=std::sync::Arc::new")
+            .expect("normal turn path");
+        assert!(select < gate && gate < push && push < normal);
+    }
+
+    #[test]
+    fn queued_openui_message_round_trips_its_marker() {
+        // RR-02: the queue path keeps the OpenUI flag so the drain can apply the overlay.
+        let tagged = tag_queued_message("make a form", true);
+        assert_ne!(tagged, "make a form");
+        assert_eq!(split_queued_message(tagged), ("make a form".to_string(), true));
+        let plain = tag_queued_message("hello", false);
+        assert_eq!(plain, "hello");
+        assert_eq!(split_queued_message(plain), ("hello".to_string(), false));
+    }
+
+    #[test]
+    fn queue_drain_applies_the_openui_overlay_after_the_gate() {
+        let src = include_str!("ws.rs");
+        let start = src.find("split_queued_message(next_text)").expect("drain split");
+        let rest = &src[start..];
+        let gate = rest.find("web_inbound_gate(").expect("drain gate");
+        let push = rest.find("push_web_skill_overlay(").expect("drain overlay");
+        let run = rest.find("run_web_turn(").expect("drain run");
+        assert!(gate < push && push < run, "gate, then overlay, then run");
+        // Both queue-on-busy paths tag the pushed text.
+        let prod = &src[..src.find("mod openui_overlay_tests").expect("test mod")];
+        assert_eq!(prod.matches("tag_queued_message(&message,").count(), 2);
     }
 }

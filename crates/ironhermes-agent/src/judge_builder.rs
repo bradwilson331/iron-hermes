@@ -260,7 +260,7 @@ fn build_runtime_judge_fn_with_env_scope(
             ];
 
             let response = client
-                .chat_completion(&messages, None, None, Some(1024), Some(0.0), None)
+                .chat_completion_fitting(&messages, None, None, Some(1024), Some(0.0), None)
                 .await
                 .map_err(|e| JudgeError::Provider(e.to_string()))?;
 

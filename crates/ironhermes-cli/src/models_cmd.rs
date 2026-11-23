@@ -237,9 +237,12 @@ async fn cmd_fetch() -> Result<()> {
     // Phase 50.5 (D-08's named trap): load-merge-save, never a whole-file
     // overwrite — a harvest written by another surface must survive this.
     let entry_count = entries.len();
-    let mut cache = ModelsCache::load();
-    cache.merge_entries(entries);
-    cache.save()?;
+    // `persist_fetch_to` also stores each probe's served ids for the picker.
+    ModelsCache::persist_fetch_to(
+        &ModelsCache::cache_path(),
+        entries,
+        &fetch_result.provider_probes,
+    )?;
 
     println!("{}", "Fetch Complete".bold().cyan());
     println!("{}", "─".repeat(70));

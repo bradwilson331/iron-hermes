@@ -58,10 +58,12 @@ pub struct ResolvedEndpoint {
     /// default's window.
     pub provider_model_context_length: Option<usize>,
     /// The provider's configured model-override keys (`ProviderConfig.models`,
-    /// sparse) unioned with `default_model`, deduped (D-10, Phase 36.6.3).
-    /// Populated by `ProviderResolver::build` after overlay + custom-provider
-    /// resolution so it reflects the FINAL `default_model`, not a pre-overlay
-    /// snapshot. Not a full catalog — "your configured models," honestly sparse.
+    /// sparse), then a non-empty `default_model`, then the ids the provider
+    /// served at the last `/models refresh` (`ModelsCache::served_models`),
+    /// deduped (D-10, Phase 36.6.3; G-58.3.1-12). Populated by
+    /// `ProviderResolver::build` after overlay + custom-provider resolution so
+    /// it reflects the FINAL `default_model`, not a pre-overlay snapshot. Never
+    /// holds an empty string.
     pub models: Vec<String>,
 }
 
@@ -86,6 +88,30 @@ pub enum ContextLengthSource {
     /// `DEFAULT_CONTEXT_LENGTH` (128,000) — nothing else resolved (D-04's
     /// kept cliff, plus its unknown-model warning at the metadata layer).
     Fallback,
+    /// Phase 58.3.1: a window the local server itself reported (probe).
+    Probed,
+    /// Phase 58.3.1: a window parsed from a provider context-length rejection.
+    Learned,
+    /// Phase 58.3.1 (D-11): `SMALL_LOCAL_CONTEXT_LENGTH` for an unknown model
+    /// on a loopback/LAN endpoint.
+    LocalDefault,
+}
+
+impl ContextLengthSource {
+    /// The user-facing word for this source (D-13). The Metadata tier covers
+    /// both the refreshed catalog cache and the static table and keeps the
+    /// Phase 50.5 Models-screen word "cache" (D-25, user-accepted amendment).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PerModelConfig => "override",
+            Self::Metadata => "cache",
+            Self::GlobalPin => "pin",
+            Self::Fallback => "default",
+            Self::Probed => "probed",
+            Self::Learned => "learned",
+            Self::LocalDefault => "local default",
+        }
+    }
 }
 
 /// Phase 50.5 (T-50.5-01): reject an implausible context-length candidate
@@ -122,16 +148,23 @@ impl ResolvedEndpoint {
     /// every other source):
     /// 1. [`ContextLengthSource::PerModelConfig`] — `provider_model_context_length`,
     ///    sourced from `providers.<p>.models.<m>.context_length` (D-01).
-    /// 2. [`ContextLengthSource::Metadata`] — `model_metadata.context_length`
+    /// 2. Phase 58.3.1: an observed window (`observed_windows::lookup` —
+    ///    `Probed` or `Learned`). D-22: a plausible global pin SMALLER than the
+    ///    observed value wins (`GlobalPin`); the pin is a ceiling for observed
+    ///    values, never a raise. Observed outranks Metadata because a loaded
+    ///    local window can be far below the static-table entry for the same id.
+    /// 3. [`ContextLengthSource::Metadata`] — `model_metadata.context_length`
     ///    (cache, which outranks the static table by `ModelRegistry::lookup`'s
     ///    own order).
-    /// 3. [`ContextLengthSource::GlobalPin`] — `config_context_length`, the
+    /// 4. [`ContextLengthSource::GlobalPin`] — `config_context_length`, the
     ///    operator's `model.context_length` pin. Now a FLOOR for models no
     ///    per-model source or metadata knows about, not a universal override.
-    /// 4. [`ContextLengthSource::Fallback`] — `DEFAULT_CONTEXT_LENGTH`
+    /// 5. [`ContextLengthSource::LocalDefault`] (`SMALL_LOCAL_CONTEXT_LENGTH`)
+    ///    on a loopback/LAN endpoint (D-11), else
+    ///    [`ContextLengthSource::Fallback`] — `DEFAULT_CONTEXT_LENGTH`
     ///    (128,000, D-04's kept cliff).
     ///
-    /// Each of the first three candidates passes through
+    /// Each pinned/metadata candidate passes through
     /// [`plausible_context_length`] (T-50.5-01); a rejected candidate falls
     /// THROUGH to the next tier rather than being clamped or returned.
     pub fn context_length_with_source(&self) -> (usize, ContextLengthSource) {
@@ -139,6 +172,28 @@ impl ResolvedEndpoint {
             && let Some(value) = plausible_context_length(candidate)
         {
             return (value, ContextLengthSource::PerModelConfig);
+        }
+        if let Some(observed) =
+            crate::observed_windows::lookup(&self.base_url, &self.default_model)
+            && (crate::constants::MIN_PLAUSIBLE_OBSERVED_CONTEXT_LENGTH
+                ..=crate::constants::MAX_PLAUSIBLE_CONTEXT_LENGTH)
+                .contains(&observed.tokens)
+        {
+            if let Some(pin) = self.config_context_length
+                && let Some(pin) = plausible_context_length(pin)
+                && pin < observed.tokens
+            {
+                return (pin, ContextLengthSource::GlobalPin);
+            }
+            let source = match observed.source {
+                crate::observed_windows::ObservedWindowSource::Probed => {
+                    ContextLengthSource::Probed
+                }
+                crate::observed_windows::ObservedWindowSource::Learned => {
+                    ContextLengthSource::Learned
+                }
+            };
+            return (observed.tokens, source);
         }
         if let Some(candidate) = self.model_metadata.as_ref().map(|m| m.context_length)
             && let Some(value) = plausible_context_length(candidate)
@@ -149,6 +204,12 @@ impl ResolvedEndpoint {
             && let Some(value) = plausible_context_length(candidate)
         {
             return (value, ContextLengthSource::GlobalPin);
+        }
+        if crate::net_class::is_local_endpoint(&self.base_url) {
+            return (
+                crate::constants::SMALL_LOCAL_CONTEXT_LENGTH,
+                ContextLengthSource::LocalDefault,
+            );
         }
         (DEFAULT_CONTEXT_LENGTH, ContextLengthSource::Fallback)
     }
@@ -492,12 +553,15 @@ impl ProviderResolver {
 
     fn build_with_env_scope(
         config: &Config,
-        disk_cache: ModelsCache,
+        mut disk_cache: ModelsCache,
         overrides: &HashMap<String, String>,
         allow_process_env: bool,
     ) -> Result<Self> {
         let mut endpoints: HashMap<String, ResolvedEndpoint> = HashMap::new();
         let mut model_registry = ModelRegistry::new();
+        crate::observed_windows::seed(&disk_cache.context_windows);
+        // Taken before `into_partial_metadata_map` consumes the cache (G-58.3.1-12).
+        let served_models = std::mem::take(&mut disk_cache.served_models);
         model_registry.merge_partial_cache(disk_cache.into_partial_metadata_map());
         let config_context_length = config.model.context_length;
 
@@ -628,6 +692,16 @@ impl ProviderResolver {
                     models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
                 },
             );
+        }
+
+        // --- 3b. Main provider with no model of its own uses `model.default` ---
+        // Only the built-in openrouter entry is seeded from `model.default`; a
+        // `config.providers`/`custom_providers` main with `default_model: null`
+        // would otherwise send model "" on every turn. An explicit overlay still wins.
+        if let Some(ep) = endpoints.get_mut(config.model.provider.as_str())
+            && ep.default_model.is_empty()
+        {
+            ep.default_model = config.model.default.clone();
         }
 
         // --- 4. Resolve API keys with precedence (D-03, PROV-03, PROV-04, D-11, D-12, D-13) ---
@@ -769,13 +843,22 @@ impl ProviderResolver {
             // (post-overlay) default_model, deduped. Computed here rather than at
             // each literal construction site above so it always reflects the
             // resolved default_model, never a pre-overlay snapshot. Stable order:
-            // override keys (sorted) then default_model if not already present.
+            // override keys (sorted), then a non-empty default_model, then the ids
+            // this provider served at the last `/models refresh` (G-58.3.1-12),
+            // deduped. Never an empty string: a null-default provider has none.
             let mut model_keys: Vec<String> = provider_cfg
                 .map(|p| p.models.keys().cloned().collect())
                 .unwrap_or_default();
             model_keys.sort();
-            if !model_keys.contains(&endpoint.default_model) {
+            if !endpoint.default_model.trim().is_empty()
+                && !model_keys.contains(&endpoint.default_model)
+            {
                 model_keys.push(endpoint.default_model.clone());
+            }
+            for id in served_models.get(name.as_str()).into_iter().flatten() {
+                if !model_keys.contains(id) {
+                    model_keys.push(id.clone());
+                }
             }
             endpoint.models = model_keys;
         }
@@ -825,7 +908,16 @@ impl ProviderResolver {
             })?;
             let mut aux_ep = base.clone();
             if !config.auxiliary.model.is_empty() {
+                // Re-derive both window fields for the overridden model, like
+                // `resolve_role_named` level 1, so auxiliary calls are sized
+                // against their own model rather than the provider default's.
                 aux_ep.default_model = config.auxiliary.model.clone();
+                aux_ep.model_metadata = model_registry.lookup(&aux_ep.default_model).cloned();
+                aux_ep.provider_model_context_length = config
+                    .providers
+                    .get(aux_provider_name.as_str())
+                    .and_then(|p| p.models.get(&aux_ep.default_model))
+                    .and_then(|m| m.context_length);
             }
             (Some(aux_ep), Some(aux_provider_name.clone()))
         } else {
@@ -856,6 +948,22 @@ impl ProviderResolver {
                 self.main_provider
             )
         })
+    }
+
+    /// Phase 58.3.1: the main endpoint with its model overridden to `model`,
+    /// with `model_metadata` and the per-model window re-derived for that id
+    /// (used by the subagent runner so a delegated model is sized against its
+    /// own window, not the main model's).
+    pub fn resolve_main_with_model(&self, model: &str) -> ResolvedEndpoint {
+        let mut ep = self.resolve_for_main().clone();
+        ep.default_model = model.to_string();
+        ep.model_metadata = self.model_registry.lookup(model).cloned();
+        ep.provider_model_context_length = self
+            .per_model_context_lengths
+            .get(&self.main_provider)
+            .and_then(|models| models.get(model))
+            .copied();
+        ep
     }
 
     /// Resolve an auxiliary model role (D-05, D-07, PROV-06, Phase 26) AND the
@@ -1194,6 +1302,31 @@ mod tests {
             ],
             "must be sorted and include both built-ins and config.providers entries"
         );
+    }
+
+    /// A `config.providers` main with `default_model: null` must resolve to
+    /// `model.default`, not "" (live: web turns failed "model id is empty").
+    #[test]
+    fn main_provider_without_overlay_falls_back_to_model_default() {
+        let mut config = default_config();
+        config.providers.insert(
+            "localbox".to_string(),
+            ProviderConfig {
+                base_url: Some("http://127.0.0.1:8888/v1".to_string()),
+                ..Default::default()
+            },
+        );
+        config.model.provider = "localbox".to_string();
+        config.model.default = "picked-model".to_string();
+        let resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default())
+            .expect("build");
+        assert_eq!(resolver.resolve_for_main().default_model, "picked-model");
+
+        // An explicit provider overlay still wins over model.default.
+        config.providers.get_mut("localbox").unwrap().default_model = Some("overlay".to_string());
+        let resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default())
+            .expect("build");
+        assert_eq!(resolver.resolve_for_main().default_model, "overlay");
     }
 
     #[test]
@@ -1705,6 +1838,177 @@ mod tests {
         assert_eq!(plausible_context_length(0), None);
         assert_eq!(plausible_context_length(10_000_001), None);
         assert_eq!(plausible_context_length(1_048_576), Some(1_048_576));
+    }
+
+    // =========================================================================
+    // Phase 58.3.1 (Plan 02): observed windows, D-22 precedence, D-11 local default
+    // =========================================================================
+
+    /// A endpoint on a loopback URL unique to the calling test, so the
+    /// process-global observed-window overlay never leaks between tests.
+    fn local_endpoint(test: &str) -> ResolvedEndpoint {
+        ResolvedEndpoint {
+            base_url: format!("http://127.0.0.1:9/{test}/v1"),
+            ..default_endpoint()
+        }
+    }
+
+    fn static_table_metadata(window: usize) -> Option<crate::model_metadata::ModelMetadata> {
+        Some(crate::model_metadata::ModelMetadata {
+            context_length: window,
+            max_output_tokens: Some(4_096),
+            tokenizer: "cl100k_base".to_string(),
+            capabilities: crate::model_metadata::ModelCapabilities::default(),
+        })
+    }
+
+    fn observe(ep: &ResolvedEndpoint, tokens: usize, src: crate::observed_windows::ObservedWindowSource) {
+        crate::observed_windows::record_in_memory(&ep.base_url, &ep.default_model, tokens, src)
+            .expect("plausible window");
+    }
+
+    #[test]
+    fn tier_learned_beats_static_table() {
+        use crate::observed_windows::ObservedWindowSource::Learned;
+        let ep = ResolvedEndpoint {
+            model_metadata: static_table_metadata(128_000),
+            ..local_endpoint("tier-a")
+        };
+        observe(&ep, 8192, Learned);
+        assert_eq!(ep.context_length_with_source(), (8192, ContextLengthSource::Learned));
+    }
+
+    #[test]
+    fn tier_global_pin_never_raises_observed() {
+        use crate::observed_windows::ObservedWindowSource::Learned;
+        let ep = ResolvedEndpoint {
+            config_context_length: Some(256_000),
+            ..local_endpoint("tier-b")
+        };
+        observe(&ep, 8192, Learned);
+        assert_eq!(ep.context_length_with_source(), (8192, ContextLengthSource::Learned));
+    }
+
+    #[test]
+    fn tier_global_pin_below_observed_caps() {
+        use crate::observed_windows::ObservedWindowSource::Probed;
+        let ep = ResolvedEndpoint {
+            config_context_length: Some(4_096),
+            ..local_endpoint("tier-c")
+        };
+        observe(&ep, 8_192, Probed);
+        assert_eq!(ep.context_length_with_source(), (4_096, ContextLengthSource::GlobalPin));
+    }
+
+    #[test]
+    fn tier_per_model_override_beats_learned() {
+        use crate::observed_windows::ObservedWindowSource::Learned;
+        let ep = ResolvedEndpoint {
+            provider_model_context_length: Some(32_768),
+            ..local_endpoint("tier-d")
+        };
+        observe(&ep, 8192, Learned);
+        assert_eq!(
+            ep.context_length_with_source(),
+            (32_768, ContextLengthSource::PerModelConfig)
+        );
+    }
+
+    #[test]
+    fn tier_local_unknown_uses_small_default_d11() {
+        let ep = ResolvedEndpoint {
+            base_url: "http://127.0.0.1:8080/v1".to_string(),
+            ..default_endpoint()
+        };
+        assert_eq!(ep.context_length_with_source(), (8192, ContextLengthSource::LocalDefault));
+    }
+
+    #[test]
+    fn tier_public_unknown_keeps_128k_fallback() {
+        for url in ["https://example.com", "http://localhost.evil.com"] {
+            let ep = ResolvedEndpoint {
+                base_url: url.to_string(),
+                ..default_endpoint()
+            };
+            assert_eq!(
+                ep.context_length_with_source(),
+                (128_000, ContextLengthSource::Fallback),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn tier_observed_seeded_from_disk_cache() {
+        use crate::observed_windows::{
+            ObservedWindow, ObservedWindowSource, observed_window_key,
+        };
+        let base_url = "http://127.0.0.1:9/tier-seed/v1";
+        let mut cache = ModelsCache::default();
+        cache.context_windows.insert(
+            observed_window_key(base_url, "seed-model"),
+            ObservedWindow {
+                tokens: 8192,
+                source: ObservedWindowSource::Learned,
+                observed_at: chrono::Utc::now(),
+            },
+        );
+        let mut config = default_config();
+        config.providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                base_url: Some(base_url.to_string()),
+                default_model: Some("seed-model".to_string()),
+                ..Default::default()
+            },
+        );
+        let resolver = ProviderResolver::build_with_cache(&config, cache).expect("build");
+        let ep = resolver.resolve("p").expect("p");
+        assert_eq!(ep.context_length_source(), ContextLengthSource::Learned);
+        assert_eq!(ep.context_length(), 8192);
+    }
+
+    #[test]
+    fn resolve_main_with_model_rederives_window() {
+        use crate::config_extras::ProviderModelConfig;
+        let mut models = HashMap::new();
+        models.insert(
+            "m2".to_string(),
+            ProviderModelConfig {
+                context_length: Some(300_000),
+                ..Default::default()
+            },
+        );
+        let mut config = default_config();
+        config
+            .providers
+            .insert("openrouter".to_string(), ProviderConfig { models, ..Default::default() });
+        let resolver =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
+        let ep = resolver.resolve_main_with_model("m2");
+        assert_eq!(ep.default_model, "m2");
+        assert_eq!(ep.context_length_with_source(), (300_000, ContextLengthSource::PerModelConfig));
+        // A model with no per-model entry must not inherit m2's window or the
+        // main default's metadata.
+        let other = resolver.resolve_main_with_model("claude-sonnet-4");
+        assert_eq!(other.provider_model_context_length, None);
+        assert!(other.model_metadata.is_some());
+    }
+
+    #[test]
+    fn source_labels_match_contract() {
+        use ContextLengthSource::*;
+        for (src, word) in [
+            (PerModelConfig, "override"),
+            (Metadata, "cache"),
+            (GlobalPin, "pin"),
+            (Fallback, "default"),
+            (Probed, "probed"),
+            (Learned, "learned"),
+            (LocalDefault, "local default"),
+        ] {
+            assert_eq!(src.label(), word);
+        }
     }
 
     /// Pins the STATIC-table metadata by injecting an empty cache. `build()`
@@ -2270,7 +2574,8 @@ mod tests {
     #[test]
     fn provider_resolver_providers_lists_configured_sorted() {
         let config = default_config();
-        let resolver = ProviderResolver::build(&config).expect("build");
+        let resolver =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
         let rows = resolver.providers();
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         let mut sorted_names = names.clone();
@@ -2293,7 +2598,8 @@ mod tests {
     #[test]
     fn provider_resolver_providers_models_sparse_defaults_to_default_model() {
         let config = default_config();
-        let resolver = ProviderResolver::build(&config).expect("build");
+        let resolver =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
         let rows = resolver.providers();
         let anthropic = rows
             .iter()
@@ -2322,7 +2628,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let resolver = ProviderResolver::build(&config).expect("build");
+        let resolver =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
         let rows = resolver.providers();
         let openrouter = rows
             .iter()
@@ -2335,6 +2642,53 @@ mod tests {
         );
     }
 
+    /// G-58.3.1-12: served ids from the models cache join the picker list after
+    /// configured models and default_model, deduped; an empty default_model never
+    /// becomes a blank row.
+    #[test]
+    fn providers_union_served_ids_and_skip_empty_default() {
+        use crate::config_extras::ProviderModelConfig;
+
+        let mut config = default_config();
+        config.providers.insert(
+            "unsloth-mac-local".to_string(),
+            ProviderConfig {
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                default_model: None,
+                models: [("pinned-id".to_string(), ProviderModelConfig::default())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        config.providers.insert(
+            "empty-local".to_string(),
+            ProviderConfig {
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                default_model: None,
+                ..Default::default()
+            },
+        );
+        let mut cache = ModelsCache::default();
+        cache.served_models.insert(
+            "unsloth-mac-local".to_string(),
+            vec!["unsloth/flint-GGUF".to_string(), "pinned-id".to_string()],
+        );
+        let resolver = ProviderResolver::build_with_cache(&config, cache).expect("build");
+        let rows = resolver.providers();
+        let unsloth = rows
+            .iter()
+            .find(|r| r.name == "unsloth-mac-local")
+            .expect("unsloth row");
+        assert_eq!(unsloth.models, vec!["pinned-id", "unsloth/flint-GGUF"]);
+        assert_eq!(unsloth.default_model, "");
+        let empty = rows
+            .iter()
+            .find(|r| r.name == "empty-local")
+            .expect("empty row");
+        assert!(empty.models.is_empty(), "no blank row: {:?}", empty.models);
+    }
+
     #[test]
     fn provider_picker_row_carries_no_credentials() {
         let mut config = default_config();
@@ -2345,7 +2699,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let resolver = ProviderResolver::build(&config).expect("build");
+        let resolver =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
         let rows = resolver.providers();
         // Debug-format the whole Vec<ProviderPickerRow> — the secret must not
         // leak through even indirectly (stricter than ResolvedEndpoint's

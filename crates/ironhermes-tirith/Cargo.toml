@@ -1,0 +1,30 @@
+[package]
+name = "ironhermes-tirith"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+# NOT license.workspace: this is the one AGPL crate in the workspace. It links
+# tirith-core (AGPL-3.0-only) and is distributed as a separate program that the
+# MIT binaries talk to only over newline-delimited JSON on stdio (Phase 57 D-01).
+license = "AGPL-3.0-only"
+publish = false
+description = "AGPL-3.0-only detection sidecar: tirith-core behind a JSONL stdio protocol"
+
+[[bin]]
+name = "ironhermes-tirith"
+path = "src/main.rs"
+
+[dependencies]
+# Exact pin (D-01). Linked into this crate and no other.
+tirith-core = "=0.4.2"
+ironhermes-security-proto = { path = "../ironhermes-security-proto" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Dev-only edges (Gate 10 inspects `-e normal,build`): the AGPL crate may depend on
+# MIT crates, never the reverse. Real-sidecar tests drive the MIT client and call
+# ironhermes-core entry points.
+ironhermes-security = { path = "../ironhermes-security" }
+ironhermes-core = { path = "../ironhermes-core" }
+tokio = { workspace = true }

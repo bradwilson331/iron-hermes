@@ -14,9 +14,21 @@ use crate::registry::Tool;
 /// to a manager handle so writes fan out to the optional mirror provider.
 pub type SharedMemoryManager = Arc<Mutex<dyn MemoryManagerHandle + Send>>;
 
+/// The full `memory` description, with an optional suffix, as one `&'static str` per variant.
+macro_rules! memory_description {
+    ($suffix:expr) => {
+        concat!(
+            "Save, update, or remove persistent facts. Memory entries appear in your system prompt at the start of each session. Use 'memory' target for your personal notes and 'user' target for user profile information.",
+            $suffix
+        )
+    };
+}
+
 pub struct MemoryTool {
     manager: SharedMemoryManager,
     read_only: bool,
+    /// D-29: a Tier 2 handle is attached, so the description mentions daily notes and memory_search.
+    tier2: bool,
 }
 
 impl MemoryTool {
@@ -24,6 +36,7 @@ impl MemoryTool {
         Self {
             manager,
             read_only: false,
+            tier2: false,
         }
     }
 
@@ -31,7 +44,15 @@ impl MemoryTool {
         Self {
             manager,
             read_only: true,
+            tier2: false,
         }
+    }
+
+    /// D-29: extend the full description with the Tier 2 move/recall guidance. Fixed at
+    /// registration, so the tool schema is stable for a session.
+    pub fn with_tier2(mut self, on: bool) -> Self {
+        self.tier2 = on;
+        self
     }
 }
 
@@ -133,8 +154,12 @@ impl Tool for MemoryTool {
     fn description(&self) -> &str {
         if self.read_only {
             "Query persistent facts from memory. This is a read-only view; add/replace/remove are not available in subagent context. Memory facts are provided in the system prompt."
+        } else if self.tier2 {
+            memory_description!(
+                " Entries you remove or replace move to your long-term daily notes and stay findable with memory_search; put day-to-day detail in memory_note instead."
+            )
         } else {
-            "Save, update, or remove persistent facts. Memory entries appear in your system prompt at the start of each session. Use 'memory' target for your personal notes and 'user' target for user profile information."
+            memory_description!("")
         }
     }
 
@@ -346,6 +371,21 @@ mod tests {
         let (mock, writes) = MockManager::new_ok(response);
         let manager: SharedMemoryManager = Arc::new(Mutex::new(mock));
         (MemoryTool::new(manager), writes)
+    }
+
+    #[test]
+    fn description_mentions_memory_search_only_with_tier2() {
+        let mk = || -> SharedMemoryManager { Arc::new(Mutex::new(MockManager::new_ok("{}").0)) };
+        let plain = MemoryTool::new(mk()).description().to_string();
+        assert!(!plain.contains("memory_search"));
+        let on = MemoryTool::new(mk()).with_tier2(true);
+        assert!(on.description().starts_with(&plain));
+        for w in ["memory_search", "memory_note", "daily notes"] {
+            assert!(on.description().contains(w), "{w}");
+        }
+        let ro = MemoryTool::new_read_only(mk());
+        let ro_text = ro.description().to_string();
+        assert_eq!(ro.with_tier2(true).description(), ro_text);
     }
 
     #[tokio::test]

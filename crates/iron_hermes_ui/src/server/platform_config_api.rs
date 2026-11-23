@@ -320,6 +320,7 @@ async fn set_buzz_enabled_impl(
     scope: ConfigScope,
     enabled: bool,
 ) -> Result<BuzzPlatformView, String> {
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     check_buzz_write_gate()?;
 
@@ -335,6 +336,7 @@ async fn set_buzz_enabled_impl(
         .platforms
         .insert(BUZZ_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target)?;
+    drop(_root_write);
 
     let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     // Computed from the RE-READ config, not the pre-write one, so the
@@ -592,6 +594,7 @@ async fn set_buzz_edit_impl(
 ) -> Result<BuzzPlatformView, Vec<String>> {
     let normalized = validate_and_normalize_buzz_edit(&payload)?;
 
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
     check_buzz_write_gate().map_err(|e| vec![e])?;
@@ -610,6 +613,7 @@ async fn set_buzz_edit_impl(
         .platforms
         .insert(BUZZ_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+    drop(_root_write);
 
     let (reread, _reread_target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
@@ -769,6 +773,7 @@ async fn set_telegram_enabled_impl(
     scope: ConfigScope,
     enabled: bool,
 ) -> Result<TelegramPlatformView, String> {
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     check_buzz_write_gate()?;
 
@@ -784,6 +789,7 @@ async fn set_telegram_enabled_impl(
         .platforms
         .insert(TELEGRAM_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target)?;
+    drop(_root_write);
 
     let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     Ok(build_telegram_view(
@@ -993,6 +999,7 @@ async fn set_discord_enabled_impl(
     scope: ConfigScope,
     enabled: bool,
 ) -> Result<DiscordPlatformView, String> {
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     check_buzz_write_gate()?;
 
@@ -1008,6 +1015,7 @@ async fn set_discord_enabled_impl(
         .platforms
         .insert(DISCORD_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target)?;
+    drop(_root_write);
 
     let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     Ok(build_discord_view(
@@ -1042,6 +1050,7 @@ async fn set_slack_enabled_impl(
     scope: ConfigScope,
     enabled: bool,
 ) -> Result<SlackPlatformView, String> {
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     check_buzz_write_gate()?;
 
@@ -1057,6 +1066,7 @@ async fn set_slack_enabled_impl(
         .platforms
         .insert(SLACK_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target)?;
+    drop(_root_write);
 
     let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     Ok(build_slack_view(
@@ -1181,6 +1191,7 @@ async fn set_telegram_edit_impl(
 ) -> Result<TelegramPlatformView, Vec<String>> {
     let normalized = validate_and_normalize_chat_edit(&payload)?;
 
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
     check_buzz_write_gate().map_err(|e| vec![e])?;
@@ -1200,6 +1211,7 @@ async fn set_telegram_edit_impl(
         .platforms
         .insert(TELEGRAM_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+    drop(_root_write);
 
     let (reread, _reread_target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
@@ -1239,6 +1251,7 @@ async fn set_discord_edit_impl(
 ) -> Result<DiscordPlatformView, Vec<String>> {
     let normalized = validate_and_normalize_chat_edit(&payload)?;
 
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
     check_buzz_write_gate().map_err(|e| vec![e])?;
@@ -1258,6 +1271,7 @@ async fn set_discord_edit_impl(
         .platforms
         .insert(DISCORD_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+    drop(_root_write);
 
     let (reread, _reread_target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
@@ -1297,6 +1311,7 @@ async fn set_slack_edit_impl(
 ) -> Result<SlackPlatformView, Vec<String>> {
     let normalized = validate_and_normalize_chat_edit(&payload)?;
 
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
     check_buzz_write_gate().map_err(|e| vec![e])?;
@@ -1316,6 +1331,7 @@ async fn set_slack_edit_impl(
         .platforms
         .insert(SLACK_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+    drop(_root_write);
 
     let (reread, _reread_target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
@@ -1746,6 +1762,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Config::default()
         }

@@ -28,6 +28,7 @@
 //! emitted regardless of the vault variables below (Phase 51 Plan 16, WR-06):
 //!   IRONHERMES_WORKER_BIN = resolve_worker_bin()
 //!   IRONHERMES_ROOT_HOME  = ironhermes_core::get_root_hermes_home()
+//!   IRONHERMES_DEFCON_LEVEL = session_defcon().process_default().level()  (Phase 57, research OQ7)
 //!
 //! Kanban vars — each emitted twice: canonical (IRONHERMES_*) + legacy (HERMES_*):
 //!   IRONHERMES_KANBAN_TASK / HERMES_KANBAN_TASK         = task.id
@@ -59,6 +60,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use ironhermes_core::config::DefconLevel;
+use ironhermes_core::content_screen::{
+    ContentKind, ContentScreenRequest, ScreenVerdict, content_screen,
+};
+use ironhermes_core::context_scanner::{SECURITY_VERDICT_KIND, SIDECAR_UNAVAILABLE_KIND};
+use ironhermes_core::defcon::session_defcon;
+use ironhermes_core::{
+    AuditConfig, AuditLog, SecurityEvent, SecurityEventKind, publish_security_event,
+    sanitize_notice_field,
+};
 use secrecy::{ExposeSecret, SecretString};
 
 use tokio::process::Command;
@@ -389,6 +400,208 @@ impl WorkerVaultBootstrap {
 }
 
 // ---------------------------------------------------------------------------
+// Task screening (Phase 57 D-04a)
+// ---------------------------------------------------------------------------
+
+/// Worker env var carrying the dispatcher's effective default DEFCON level (research OQ7).
+/// Emitted explicitly by [`build_kanban_worker_env`], never via [`SAFE_SYSTEM_VARS`].
+pub const DEFCON_LEVEL_ENV: &str = "IRONHERMES_DEFCON_LEVEL";
+
+/// `AuditEntry::tool` for kanban task screening rows and `JobBlocked` events.
+const KANBAN_TASK_TOOL: &str = "kanban_task";
+
+/// Rule ids that are not a block when they are the ONLY thing the sidecar reported. The
+/// sidecar's `paste` op raises a HIGH `AnalysisIncomplete` on benign prose with quote
+/// characters (plan 57-06's replay of a real daily prompt); a lone one must not refuse a
+/// legitimate task. Same rule as the cron prompt screen.
+const NOT_A_BLOCK_ALONE: &[&str] = &["AnalysisIncomplete"];
+
+/// Append one audit row for kanban task screening. Never carries task text. A failed
+/// write is logged, never fatal.
+fn write_task_row(
+    kind: &str,
+    reason: String,
+    decision: &str,
+    level: DefconLevel,
+    rules: &[String],
+    task_id: &str,
+) {
+    let log = AuditLog::load(AuditConfig::default());
+    let args = serde_json::json!({ "level": level.level(), "rules": rules, "task": task_id });
+    let entry = log.make_entry(
+        kind,
+        KANBAN_TASK_TOOL,
+        None,
+        "",
+        "kanban",
+        "",
+        reason,
+        decision,
+        "policy",
+        &args,
+    );
+    if let Err(e) = log.append_sync(&entry) {
+        tracing::warn!("could not write {kind} audit row for kanban task {task_id}: {e}");
+    }
+}
+
+/// Screen a task's title and body with the detection sidecar before any worker is spawned
+/// (Phase 57 D-04a). The text is screened as a `paste` subject at the process default level
+/// (the dispatcher has no interactive session).
+///
+/// - Block -> `Err(.. blocked by the security screen: <rule ids>)`, which the dispatcher's
+///   existing spawn-failure path records on the run; plus a `security_verdict` row (tool
+///   `kanban_task`, decision `blocked`) and a `JobBlocked` event whose `summary` is the task
+///   id and nothing else (the title is screened text, so it is never the label);
+/// - Warn -> a scheduled task cannot ask a human, so it spawns and the verdict is audited
+///   (`warned`);
+/// - unavailable -> spawns, with a `sidecar_unavailable` row (never reported as clean);
+/// - could not be screened (the sidecar is up, for example `too_large`; a Block or Warn
+///   carrying `unavailable`, CR-01) -> at DEFCON 1-3 `Err(kanban task <id> could not be
+///   screened (<reason>))` with a `sidecar_unavailable` row (`blocked`) and a `JobBlocked`
+///   event whose rule id is `unscreened:<reason>`; at DEFCON 4-5 it spawns with a
+///   `sidecar_unavailable` row (`warned`);
+/// - no screen installed -> unchanged behaviour.
+///
+/// A result whose only rule is `AnalysisIncomplete` is a Warn, not a Block.
+fn screen_task_before_spawn(task: &Task) -> Result<()> {
+    let Some(screen) = content_screen() else {
+        return Ok(());
+    };
+    let level = session_defcon().process_default();
+    let text = match task.body.as_deref() {
+        Some(body) if !body.is_empty() => format!("{}\n{}", task.title, body),
+        _ => task.title.clone(),
+    };
+    let outcome = screen.screen(&ContentScreenRequest {
+        kind: ContentKind::Paste,
+        text: &text,
+        name: None,
+        level,
+        warn_class: false,
+    });
+    let mut rule_ids: Vec<String> = outcome
+        .rules
+        .iter()
+        .map(|r| format!("tirith:{r}"))
+        .collect();
+    let only_benign = !outcome.rules.is_empty()
+        && outcome
+            .rules
+            .iter()
+            .all(|r| NOT_A_BLOCK_ALONE.iter().any(|b| r.eq_ignore_ascii_case(b)));
+    let verdict = if only_benign && outcome.verdict == ScreenVerdict::Block {
+        ScreenVerdict::Warn
+    } else {
+        outcome.verdict
+    };
+    let label = sanitize_notice_field(&task.id);
+
+    match verdict {
+        ScreenVerdict::Block => {
+            // CR-01 / D-04(a): a Block that carries `unavailable` means the task could not
+            // be screened. Name the cause, audit it as `sidecar_unavailable` (D-12) and
+            // report `unscreened:<reason>` on `JobBlocked` (D-16).
+            if let (Some(why), Some(rule_id)) =
+                (outcome.unscreened_reason(), outcome.unscreened_rule_id())
+            {
+                write_task_row(
+                    SIDECAR_UNAVAILABLE_KIND,
+                    format!("kanban task refused: {why}"),
+                    "blocked",
+                    level,
+                    std::slice::from_ref(&rule_id),
+                    &label,
+                );
+                publish_security_event(&SecurityEvent {
+                    kind: SecurityEventKind::JobBlocked,
+                    tool: KANBAN_TASK_TOOL.to_string(),
+                    rule_ids: vec![rule_id],
+                    level: level.level(),
+                    summary: label,
+                });
+                return Err(KanbanError::Other(anyhow::anyhow!(
+                    "kanban task {} {why}",
+                    task.id
+                )));
+            }
+            if rule_ids.is_empty() {
+                rule_ids.push("tirith:block".to_string());
+            }
+            let joined = rule_ids.join(", ");
+            write_task_row(
+                SECURITY_VERDICT_KIND,
+                format!("kanban task blocked: {joined}"),
+                "blocked",
+                level,
+                &rule_ids,
+                &label,
+            );
+            publish_security_event(&SecurityEvent {
+                kind: SecurityEventKind::JobBlocked,
+                tool: KANBAN_TASK_TOOL.to_string(),
+                rule_ids,
+                level: level.level(),
+                summary: label,
+            });
+            Err(KanbanError::Other(anyhow::anyhow!(
+                "kanban task {} blocked by the security screen: {joined}",
+                task.id
+            )))
+        }
+        ScreenVerdict::Warn => {
+            if let (Some(why), Some(rule_id)) =
+                (outcome.unscreened_reason(), outcome.unscreened_rule_id())
+            {
+                // CR-01: unscreened at DEFCON 4-5 spawns, audited with the reason.
+                tracing::warn!(task_id = %task.id, "kanban task spawns unscreened: {why}");
+                write_task_row(
+                    SIDECAR_UNAVAILABLE_KIND,
+                    format!("kanban task warned: {why}"),
+                    "warned",
+                    level,
+                    &[rule_id],
+                    &label,
+                );
+                return Ok(());
+            }
+            let joined = rule_ids.join(", ");
+            tracing::warn!(
+                task_id = %task.id,
+                rules = %joined,
+                "kanban task spawns with a security screen warning"
+            );
+            write_task_row(
+                SECURITY_VERDICT_KIND,
+                format!("kanban task warned: {joined}"),
+                "warned",
+                level,
+                &rule_ids,
+                &label,
+            );
+            Ok(())
+        }
+        ScreenVerdict::Allow => {
+            if let Some(reason) = outcome.unavailable.as_deref() {
+                tracing::warn!(
+                    task_id = %task.id,
+                    "kanban task spawns without sidecar screening: {reason}"
+                );
+                write_task_row(
+                    SIDECAR_UNAVAILABLE_KIND,
+                    format!("kanban task: {reason}"),
+                    "allow",
+                    level,
+                    &[],
+                    &label,
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // build_kanban_worker_env
 // ---------------------------------------------------------------------------
 
@@ -582,6 +795,16 @@ pub fn build_kanban_worker_env(
             .to_string_lossy()
             .into_owned(),
     ));
+    // Phase 57 (research OQ7): the dispatcher's effective default DEFCON level, emitted
+    // EXPLICITLY, computed by the spawning process like IRONHERMES_WORKER_BIN above and
+    // never forwarded from SAFE_SYSTEM_VARS (an ambient value must not steer how strict a
+    // worker is). The worker takes the STRICTER of this value and its own profile's
+    // effective level, so the env can tighten a worker but never loosen a profile
+    // (enforced worker-side, plan 13). It carries one number and no secret material.
+    env.push((
+        DEFCON_LEVEL_ENV.to_string(),
+        session_defcon().process_default().level().to_string(),
+    ));
 
     // Phase 51 Plan 07 (D-07/D-11): the two vault variables, emitted EXPLICITLY —
     // deliberately excluded from the pass-through allowlist above, which forwards
@@ -653,6 +876,11 @@ pub async fn spawn_worker_for_board(
     board_slug: &str,
     vault: Option<&WorkerVaultBootstrap>,
 ) -> Result<u32> {
+    // Phase 57 D-04a: screen the task text BEFORE anything is created on disk or spawned.
+    // A Block returns Err here, so the dispatcher's spawn-failure path records it and no
+    // worker process ever starts.
+    screen_task_before_spawn(task)?;
+
     // Profile-scoped worker logs (D-19): logs land under the assignee's
     // profile (`~/.ironhermes/profiles/<assignee>/logs/kanban/`) so every
     // artifact an agent produces — sessions, memories, state, and now its
@@ -1317,5 +1545,373 @@ mod tests {
         let resolved = resolve_workspace_dir(scratch.to_str().unwrap())
             .expect("scratch path under workspaces root should resolve Ok and be created");
         assert!(resolved.is_dir(), "scratch dir must be created on disk");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 57 Plan 11 (D-04a, D-16, research OQ7)
+    // -----------------------------------------------------------------------
+
+    use ironhermes_core::config::DefconLevel;
+    use ironhermes_core::content_screen::{
+        ContentScreen, ContentScreenOutcome, ContentScreenRequest, ScreenVerdict,
+        clear_content_screen_for_tests, install_content_screen,
+    };
+    use ironhermes_core::defcon::session_defcon;
+    use ironhermes_core::{SecurityEventKind, subscribe_security_events};
+
+    /// A core-level screen: `CANARY-TASK` Blocks (rule `FakeBlock`), `CANARY-WARN` Warns
+    /// (rule `FakeWarn`), `CANARY-DOWN` reports the sidecar unavailable, and
+    /// `CANARY-UNSCREENABLE[-WARN]` is a subject the sidecar could not screen (Block /
+    /// Warn with `unavailable` set and no rule).
+    struct TaskScreen;
+
+    impl ContentScreen for TaskScreen {
+        fn screen(&self, req: &ContentScreenRequest<'_>) -> ContentScreenOutcome {
+            let outcome =
+                |verdict, rule: Option<&str>, unavailable: Option<&str>| ContentScreenOutcome {
+                    verdict,
+                    rules: rule.map(|r| vec![r.to_string()]).unwrap_or_default(),
+                    max_severity: rule.map(|_| "HIGH".to_string()),
+                    unavailable: unavailable.map(str::to_string),
+                };
+            if req.text.contains("CANARY-UNSCREENABLE-WARN") {
+                outcome(ScreenVerdict::Warn, None, Some("timeout"))
+            } else if req.text.contains("CANARY-UNSCREENABLE") {
+                outcome(ScreenVerdict::Block, None, Some("too_large"))
+            } else if req.text.contains("CANARY-TASK") {
+                outcome(ScreenVerdict::Block, Some("FakeBlock"), None)
+            } else if req.text.contains("CANARY-WARN") {
+                outcome(ScreenVerdict::Warn, Some("FakeWarn"), None)
+            } else if req.text.contains("CANARY-INCOMPLETE") {
+                outcome(ScreenVerdict::Block, Some("AnalysisIncomplete"), None)
+            } else if req.text.contains("CANARY-DOWN") {
+                outcome(ScreenVerdict::Allow, None, Some("sidecar crashed"))
+            } else {
+                outcome(ScreenVerdict::Allow, None, None)
+            }
+        }
+    }
+
+    static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Everything a spawn test needs: a private home, a worker binary that writes a marker
+    /// file instead of doing work, the task screen, and a restored process state on drop.
+    struct SpawnFixture {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        home: tempfile::TempDir,
+        workspace: tempfile::TempDir,
+        marker: PathBuf,
+        _envs: Vec<ScopedEnv>,
+    }
+
+    impl SpawnFixture {
+        async fn new() -> Self {
+            let lock = SPAWN_LOCK.lock().await;
+            let home = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let marker = workspace.path().join("worker-ran.marker");
+            let script = home.path().join("fake-worker.sh");
+            std::fs::write(
+                &script,
+                format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
+            )
+            .unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let envs = vec![
+                ScopedEnv::set("IRONHERMES_HOME", home.path().to_str().unwrap()),
+                ScopedEnv::set("IRONHERMES_WORKER_BIN", script.to_str().unwrap()),
+            ];
+            install_content_screen(std::sync::Arc::new(TaskScreen));
+            session_defcon().set_process_default(DefconLevel::THREE);
+            Self {
+                _lock: lock,
+                home,
+                workspace,
+                marker,
+                _envs: envs,
+            }
+        }
+
+        fn audit_rows(&self) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(self.home.path().join("logs").join("audit.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("audit row is JSON"))
+                .collect()
+        }
+
+        fn kanban_rows(&self) -> Vec<serde_json::Value> {
+            self.audit_rows()
+                .into_iter()
+                .filter(|r| r["tool"] == "kanban_task")
+                .collect()
+        }
+
+        async fn spawn(&self, task: &Task) -> Result<u32> {
+            let run = fake_run("r_spawn", &task.id, "host:1:spawn");
+            spawn_worker_for_board(
+                task,
+                &run,
+                self.workspace.path().to_str().unwrap(),
+                "default",
+                None,
+            )
+            .await
+        }
+
+        /// Wait up to `secs` seconds for the fake worker's marker file.
+        async fn marker_appears(&self, secs: u64) -> bool {
+            for _ in 0..(secs * 20) {
+                if self.marker.exists() {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            false
+        }
+    }
+
+    impl Drop for SpawnFixture {
+        fn drop(&mut self) {
+            clear_content_screen_for_tests();
+            session_defcon().set_process_default(DefconLevel::THREE);
+        }
+    }
+
+    /// Research OQ7: the dispatcher's effective default level reaches the worker in the
+    /// EXPLICIT env block, so the worker can take the stricter of it and its own level.
+    #[test]
+    fn worker_env_emits_defcon_level() {
+        let task = fake_task("t_defcon", "alice");
+        let run = fake_run("r_defcon", "t_defcon", "host:1:defcon");
+        let before = session_defcon().process_default();
+
+        session_defcon().set_process_default(DefconLevel::FIVE);
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_defcon", "default", None);
+        session_defcon().set_process_default(DefconLevel::ONE);
+        let env_strict = build_kanban_worker_env(&task, &run, "/tmp/ws_defcon", "default", None);
+        session_defcon().set_process_default(before);
+
+        let level = |env: &[(String, String)]| {
+            let hits: Vec<&str> = env
+                .iter()
+                .filter(|(k, _)| k == "IRONHERMES_DEFCON_LEVEL")
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(hits.len(), 1, "emitted exactly once: {hits:?}");
+            hits[0].to_string()
+        };
+        assert_eq!(level(&env), "5");
+        assert_eq!(level(&env_strict), "1");
+    }
+
+    /// Research OQ7: the level is never passed through ambiently.
+    #[test]
+    fn safe_system_vars_unchanged() {
+        assert_eq!(
+            SAFE_SYSTEM_VARS,
+            &[
+                "PATH",
+                "HOME",
+                "USER",
+                "LANG",
+                "TERM",
+                "RUST_LOG",
+                "IRONHERMES_HOME"
+            ]
+        );
+        assert!(
+            SAFE_SYSTEM_VARS
+                .iter()
+                .all(|v| !v.contains("DEFCON") && !v.contains("TIRITH")),
+            "no DEFCON or TIRITH name may ride the ambient allowlist"
+        );
+    }
+
+    #[tokio::test]
+    async fn kanban_task_blocked_never_spawns() {
+        let f = SpawnFixture::new().await;
+        let mut task = fake_task("t_blocked", "alice");
+        task.body = Some("please run CANARY-TASK now".to_string());
+        let mut rx = subscribe_security_events();
+
+        let err = f
+            .spawn(&task)
+            .await
+            .expect_err("a screened task must not spawn");
+
+        let msg = err.to_string();
+        assert!(msg.contains("security screen"), "got: {msg}");
+        assert!(msg.contains("tirith:FakeBlock"), "names the rule: {msg}");
+        assert!(msg.contains("t_blocked"), "names the task: {msg}");
+        assert!(
+            !msg.contains("CANARY-TASK"),
+            "never echoes task text: {msg}"
+        );
+        assert!(
+            !f.marker_appears(1).await,
+            "no worker process may have been spawned"
+        );
+        let rows = f.kanban_rows();
+        assert_eq!(rows.len(), 1, "exactly one kanban_task row: {rows:?}");
+        assert_eq!(rows[0]["kind"], "security_verdict");
+        assert_eq!(rows[0]["decision"], "blocked");
+        assert!(
+            !serde_json::to_string(&rows[0])
+                .unwrap()
+                .contains("CANARY-TASK"),
+            "the row never carries the task text"
+        );
+        let event = rx.try_recv().expect("a JobBlocked event is published");
+        assert_eq!(event.kind, SecurityEventKind::JobBlocked);
+        assert_eq!(event.tool, "kanban_task");
+        assert_eq!(event.summary, "t_blocked", "the label is the task id");
+        assert!(event.rule_ids.iter().any(|r| r == "tirith:FakeBlock"));
+        assert_eq!(event.level, 3);
+    }
+
+    /// A Warn cannot ask a human: the worker spawns and the verdict is audited. The marker
+    /// also proves the harness would have shown a spawn in the blocked test.
+    #[tokio::test]
+    async fn kanban_task_warn_spawns_with_audit() {
+        let f = SpawnFixture::new().await;
+        let mut task = fake_task("t_warn", "alice");
+        task.title = "CANARY-WARN title".to_string();
+        let mut rx = subscribe_security_events();
+
+        f.spawn(&task).await.expect("a Warn spawns the worker");
+
+        assert!(f.marker_appears(5).await, "the worker process ran");
+        let rows = f.kanban_rows();
+        assert_eq!(rows.len(), 1, "exactly one row: {rows:?}");
+        assert_eq!(rows[0]["kind"], "security_verdict");
+        assert_eq!(rows[0]["decision"], "warned");
+        assert!(rx.try_recv().is_err(), "a Warn is not a blocked job");
+    }
+
+    /// An outage is never reported as clean (D-12): the task spawns, with a row saying why.
+    #[tokio::test]
+    async fn kanban_task_sidecar_unavailable_spawns_with_row() {
+        let f = SpawnFixture::new().await;
+        let mut task = fake_task("t_down", "alice");
+        task.body = Some("CANARY-DOWN".to_string());
+
+        f.spawn(&task).await.expect("an outage still spawns");
+
+        assert!(f.marker_appears(5).await, "the worker process ran");
+        let rows = f.kanban_rows();
+        assert_eq!(rows.len(), 1, "exactly one row: {rows:?}");
+        assert_eq!(rows[0]["kind"], "sidecar_unavailable");
+    }
+
+    /// CR-01 / D-04(a) / D-12: a task the sidecar could not screen does not spawn at DEFCON
+    /// 3. The error names the cause, the row is `sidecar_unavailable`, and `JobBlocked`
+    /// carries `unscreened:<reason>`.
+    #[tokio::test]
+    async fn kanban_task_unscreenable_is_refused_with_row() {
+        let f = SpawnFixture::new().await;
+        let mut task = fake_task("t_unscreened", "alice");
+        task.body = Some("CANARY-UNSCREENABLE".to_string());
+        let mut rx = subscribe_security_events();
+
+        let err = f
+            .spawn(&task)
+            .await
+            .expect_err("an unscreened task must not spawn at DEFCON 3");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("could not be screened (too_large)"),
+            "names the cause: {msg}"
+        );
+        assert!(msg.contains("t_unscreened"), "names the task: {msg}");
+        assert!(
+            !msg.contains("CANARY-UNSCREENABLE"),
+            "never echoes task text: {msg}"
+        );
+        assert!(
+            !f.marker_appears(1).await,
+            "no worker process may have been spawned"
+        );
+        let rows = f.kanban_rows();
+        assert_eq!(rows.len(), 1, "exactly one kanban_task row: {rows:?}");
+        assert_eq!(rows[0]["kind"], "sidecar_unavailable");
+        assert_eq!(rows[0]["decision"], "blocked");
+        let raw = serde_json::to_string(&rows[0]).unwrap();
+        assert!(
+            !raw.contains("CANARY-UNSCREENABLE"),
+            "the row never carries the task text: {raw}"
+        );
+        assert!(raw.contains("too_large"), "the row names the reason: {raw}");
+        let event = rx.try_recv().expect("a JobBlocked event is published");
+        assert_eq!(event.kind, SecurityEventKind::JobBlocked);
+        assert_eq!(event.tool, "kanban_task");
+        assert_eq!(event.summary, "t_unscreened");
+        assert_eq!(event.rule_ids, vec!["unscreened:too_large".to_string()]);
+        assert!(rx.try_recv().is_err(), "exactly one event");
+    }
+
+    /// CR-01 / D-12: at DEFCON 5 an unscreened task spawns as a Warn with a
+    /// `sidecar_unavailable` row (decision `warned`) and no `JobBlocked`.
+    #[tokio::test]
+    async fn kanban_task_unscreenable_warn_spawns_with_row() {
+        let f = SpawnFixture::new().await;
+        let mut task = fake_task("t_unscreened_warn", "alice");
+        task.body = Some("CANARY-UNSCREENABLE-WARN".to_string());
+        let mut rx = subscribe_security_events();
+
+        f.spawn(&task).await.expect("an unscreened Warn spawns");
+
+        assert!(f.marker_appears(5).await, "the worker process ran");
+        let rows = f.kanban_rows();
+        assert_eq!(rows.len(), 1, "exactly one row: {rows:?}");
+        assert_eq!(rows[0]["kind"], "sidecar_unavailable");
+        assert_eq!(rows[0]["decision"], "warned");
+        assert!(
+            !serde_json::to_string(&rows[0])
+                .unwrap()
+                .contains("CANARY-UNSCREENABLE")
+        );
+        assert!(rx.try_recv().is_err(), "a Warn is not a blocked job");
+    }
+
+    /// 57-06: the paste op raises a lone `AnalysisIncomplete` HIGH on benign quote-bearing
+    /// prose. That alone must not refuse a legitimate task; it spawns with a `warned` row.
+    #[tokio::test]
+    async fn kanban_task_analysis_incomplete_alone_spawns() {
+        let f = SpawnFixture::new().await;
+        let mut task = fake_task("t_incomplete", "alice");
+        task.body = Some("CANARY-INCOMPLETE".to_string());
+        let mut rx = subscribe_security_events();
+
+        f.spawn(&task)
+            .await
+            .expect("a lone AnalysisIncomplete is not a block");
+
+        assert!(f.marker_appears(5).await, "the worker process ran");
+        let rows = f.kanban_rows();
+        assert_eq!(rows.len(), 1, "still audited: {rows:?}");
+        assert_eq!(rows[0]["decision"], "warned");
+        assert!(rx.try_recv().is_err(), "not a blocked job");
+    }
+
+    /// With no screen installed a spawn is exactly what it was before Phase 57.
+    #[tokio::test]
+    async fn kanban_task_without_a_screen_spawns_unchanged() {
+        let f = SpawnFixture::new().await;
+        clear_content_screen_for_tests();
+        let mut task = fake_task("t_plain", "alice");
+        task.body = Some("CANARY-TASK".to_string());
+
+        f.spawn(&task).await.expect("no screen, no refusal");
+
+        assert!(f.marker_appears(5).await, "the worker process ran");
+        assert!(
+            f.kanban_rows().is_empty(),
+            "no screening row without a screen"
+        );
     }
 }

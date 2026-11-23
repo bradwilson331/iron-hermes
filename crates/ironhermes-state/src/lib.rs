@@ -803,6 +803,54 @@ impl StateStore {
             .map_err(Into::into)
     }
 
+    /// User/assistant text rows with `id > after_id`, oldest first, at most `limit`.
+    ///
+    /// 58.2 D-17: the role filter is the extraction safety boundary. Tool results, system
+    /// prompts and fetched-web text never reach Tier 2 consolidation through this query.
+    pub fn conversation_messages_after(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, role, content, tool_call_id, tool_calls, tool_name, \
+             timestamp, token_count, finish_reason \
+             FROM messages WHERE id > ?1 AND role IN ('user','assistant') \
+             AND content IS NOT NULL AND content != '' ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_id, limit as i64], message_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Highest id among the rows [`Self::conversation_messages_after`] can return; 0 if none.
+    ///
+    /// 58.2 D-17: the role filter is the extraction safety boundary.
+    pub fn max_conversation_message_id(&self) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE role IN ('user','assistant') \
+                 AND content IS NOT NULL AND content != ''",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Highest conversation-row id with `timestamp < unix_ts`; 0 if none.
+    ///
+    /// 58.2 D-17: the role filter is the extraction safety boundary.
+    pub fn max_message_id_before(&self, unix_ts: f64) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE timestamp < ?1 \
+                 AND role IN ('user','assistant') AND content IS NOT NULL AND content != ''",
+                params![unix_ts],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     /// Retrieve a session's messages already converted to [`ChatMessage`],
     /// ready to rehydrate an in-memory conversation (Phase 36.17.9 resume).
     ///
@@ -1258,6 +1306,49 @@ impl StateStore {
         Ok(())
     }
 
+    /// One turn's usage written atomically: the `usage_events` row plus the `sessions`
+    /// aggregate, in one transaction. For callers outside the agent loop (the OpenUI Gateway).
+    pub fn record_turn_usage(&mut self, ev: &UsageEvent) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO usage_events \
+             (session_id, ts, provider, model, in_tok, out_tok, \
+              cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                ev.session_id,
+                ev.ts,
+                ev.provider,
+                ev.model,
+                ev.in_tok,
+                ev.out_tok,
+                ev.cache_read,
+                ev.cache_create,
+                ev.cost_usd_micros,
+                ev.error_kind
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET \
+             input_tokens = input_tokens + ?1, \
+             output_tokens = output_tokens + ?2, \
+             cache_read_tokens = cache_read_tokens + ?3, \
+             cache_creation_tokens = cache_creation_tokens + ?4, \
+             cost_usd_micros = cost_usd_micros + ?5 \
+             WHERE id = ?6",
+            params![
+                ev.in_tok,
+                ev.out_tok,
+                ev.cache_read,
+                ev.cache_create,
+                ev.cost_usd_micros,
+                ev.session_id
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Test-only accessor for the underlying rusqlite Connection.
     ///
     /// Phase 36.2 (D-USAGE-02): the per-turn write path is two SQL
@@ -1454,6 +1545,22 @@ impl StateStore {
             })?
             .collect();
         Ok(rows?)
+    }
+
+    /// Count `usage_events` rows that recorded a failure (`error_kind IS NOT NULL`), optionally
+    /// limited to the last `since_seconds` (same `now_ms - secs * 1000` cutoff as
+    /// [`Self::query_usage_events`]). Phase 54.10 D-07: the Dashboard Usage tile's failed calls.
+    pub fn count_usage_errors(&self, since_seconds: Option<i64>) -> Result<i64> {
+        let mut sql =
+            String::from("SELECT COUNT(*) FROM usage_events WHERE error_kind IS NOT NULL");
+        let mut bound: Vec<i64> = Vec::new();
+        if let Some(secs) = since_seconds {
+            sql.push_str(" AND ts >= ?");
+            bound.push(chrono::Utc::now().timestamp_millis() - secs * 1000);
+        }
+        Ok(self
+            .conn
+            .query_row(&sql, rusqlite::params_from_iter(bound), |r| r.get(0))?)
     }
 
     /// Set or replace the human-readable title for a session.
@@ -2259,6 +2366,30 @@ mod schema_migration_v8_tests {
             .unwrap();
         assert_eq!(r1.as_deref(), Some("/repo/foo"));
         assert!(r2.is_none());
+    }
+
+    /// Phase 54.10 D-07: failed-call count honours the window and ignores successes.
+    #[test]
+    fn count_usage_errors_counts_failed_events_in_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path().join("state.db")).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let conn = store.conn_for_test();
+        for (ts, err) in [
+            (now - 3_600_000, Some("rate_limit")),
+            (now - 3_600_000, None),
+            (now - 10 * 86_400_000, Some("timeout")),
+        ] {
+            conn.execute(
+                "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+                 cache_read, cache_create, cost_usd_micros, error_kind) \
+                 VALUES ('s', ?1, 'openai', 'gpt-4o', 1, 1, 0, 0, 0, ?2)",
+                rusqlite::params![ts, err],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.count_usage_errors(Some(7 * 86_400)).unwrap(), 1);
+        assert_eq!(store.count_usage_errors(None).unwrap(), 2);
     }
 
     /// Phase 36.2 follow-up: backfill recomputes cost_usd_micros and resyncs

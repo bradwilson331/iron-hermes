@@ -27,7 +27,9 @@ pub use delivery::*;
 pub use heartbeat::*;
 pub use job::*;
 pub use parser::*;
-pub use scanner::scan_cron_prompt;
+pub use scanner::{
+    CronScanHit, scan_cron_prompt, scan_cron_prompt_detailed, scan_cron_prompt_screened,
+};
 pub use store::*;
 pub use tick::*;
 pub use writer_impl::*;

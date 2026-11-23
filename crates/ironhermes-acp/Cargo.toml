@@ -16,6 +16,8 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 ironhermes-core = { path = "../ironhermes-core" }
+# Phase 57 Plan 05 (D-02): every agent host reaches the tirith sidecar service through this crate.
+ironhermes-security = { path = "../ironhermes-security" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }

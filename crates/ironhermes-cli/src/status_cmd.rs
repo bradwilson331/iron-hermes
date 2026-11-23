@@ -282,9 +282,21 @@ pub struct McpServer {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct YoloStatus {
+    /// Whether approvals are bypassed: the effective DEFCON level is 4-5 (D-21).
     pub enabled: bool,
-    /// One of: "flag" | "config" | "disabled" (D-12).
+    /// The effective DEFCON level, 1-5 (D-08): `security.defcon_level`, else the
+    /// deprecated aliases, else the D-21 default of 3. Reports written before this field
+    /// existed deserialize as 3.
+    #[serde(default = "default_yolo_level")]
+    pub level: u8,
+    /// One of: "config" (a level key or the deprecated `autonomous.yolo` alias set
+    /// it) | "default" (nothing set it) | "flag" (kept for older reports) | "disabled"
+    /// (the `fixture()` placeholder) (D-12).
     pub source: String,
+}
+
+fn default_yolo_level() -> u8 {
+    3
 }
 
 impl StatusReport {
@@ -350,6 +362,7 @@ impl StatusReport {
             },
             yolo: YoloStatus {
                 enabled: false,
+                level: 3,
                 source: "disabled".into(),
             },
             profiles: None,
@@ -359,7 +372,7 @@ impl StatusReport {
     /// Phase 21.7 Plan 09 Task 9-02: collect a live status snapshot.
     ///
     /// Reads config-derived values directly (provider/model/gateway shape,
-    /// mcp servers, autonomous.yolo). Reads on-disk memory files + sessions
+    /// mcp servers, the effective DEFCON level). Reads on-disk memory files + sessions
     /// dir for memory stats. Subagents/processes report zeros because
     /// `hermes status` is a one-shot CLI snapshot — it does not inspect a
     /// live agent's in-memory registries (that is a REPL slash-command
@@ -370,7 +383,8 @@ impl StatusReport {
         args: &StatusArgs,
         probe: &dyn probe::DeepProbe,
     ) -> anyhow::Result<Self> {
-        let (yolo_enabled, yolo_source) = resolve_yolo_from_config(config.autonomous.yolo);
+        // D-08: the level the gates actually use, not the legacy boolean.
+        let yolo = yolo_status_from_config(config);
 
         // -- Provider (D-18 section a) --------------------------------------
         let provider_name = config.model.provider.clone();
@@ -495,10 +509,7 @@ impl StatusReport {
             subagents,
             processes,
             mcp,
-            yolo: YoloStatus {
-                enabled: yolo_enabled,
-                source: yolo_source.into(),
-            },
+            yolo,
             profiles: None, // Phase 24 D-14: populated by run_status after collect()
         })
     }
@@ -623,7 +634,11 @@ pub fn format_styled(s: &StatusReport) -> String {
             out,
             "  {} {}",
             "--yolo enabled:".bold().red(),
-            "approvals bypassed; iteration budget + ctrl-c + fatal error remain.".red()
+            format!(
+                "approvals bypassed (DEFCON {}); iteration budget + ctrl-c + fatal error remain.",
+                s.yolo.level
+            )
+            .red()
         );
     }
     let _ = writeln!(out);
@@ -732,13 +747,23 @@ pub fn print_styled(s: &StatusReport) {
 // Helpers — config-derived and filesystem-derived.
 // ---------------------------------------------------------------------
 
-fn resolve_yolo_from_config(config_yolo: bool) -> (bool, &'static str) {
-    // `hermes status` is a CLI snapshot — there is no per-invocation
-    // --yolo flag on the Status subcommand. Only the config contributes.
-    if config_yolo {
-        (true, "config")
-    } else {
-        (false, "disabled")
+/// The yolo block of a status report from a loaded config (D-08).
+///
+/// `ironhermes status` is a CLI snapshot: there is no per-invocation `--yolo` flag on the
+/// Status subcommand, so only the config contributes. The level is
+/// `Config::effective_defcon_level()` - the same resolution every gate uses - so
+/// `security.defcon_level`, the deprecated `skills.defcon_level` and `autonomous.yolo`
+/// aliases and the D-21 default of 3 all report correctly. `enabled` is the bypass rule
+/// (levels 4-5). `source` is `config` when a level key or an alias is in play (an
+/// explicitly configured 3 counts), else `default`.
+pub(crate) fn yolo_status_from_config(config: &ironhermes_core::Config) -> YoloStatus {
+    let level = config.effective_defcon_level();
+    let configured =
+        config.security.defcon_level.is_some() || !config.defcon_alias_warnings().is_empty();
+    YoloStatus {
+        enabled: level.yolo_bypass_active(),
+        level: level.level(),
+        source: if configured { "config" } else { "default" }.into(),
     }
 }
 
@@ -835,6 +860,51 @@ fn telegram_authed(config: &ironhermes_core::Config) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn config_with(level: Option<u8>, legacy_yolo: bool) -> ironhermes_core::Config {
+        let mut config = ironhermes_core::Config::default();
+        config.security.defcon_level = level.map(|n| {
+            ironhermes_core::config::DefconLevel::try_from(n).expect("valid DEFCON level")
+        });
+        config.autonomous = ironhermes_core::config::AutonomousConfig { yolo: legacy_yolo };
+        config
+    }
+
+    /// D-08: `ironhermes status` reports the EFFECTIVE level (the one the gates use), and
+    /// whether approvals are bypassed, from `Config::effective_defcon_level()`: no keys is
+    /// 3 with bypass off; `security.defcon_level` wins over the legacy alias; the legacy
+    /// alias alone is 5.
+    #[test]
+    fn status_reports_effective_level() {
+        let none = yolo_status_from_config(&config_with(None, false));
+        assert_eq!((none.level, none.enabled), (3, false), "{none:?}");
+        assert_eq!(none.source, "default", "{none:?}");
+
+        let five = yolo_status_from_config(&config_with(Some(5), false));
+        assert_eq!((five.level, five.enabled), (5, true), "{five:?}");
+        assert_eq!(five.source, "config", "{five:?}");
+
+        let four = yolo_status_from_config(&config_with(Some(4), false));
+        assert_eq!((four.level, four.enabled), (4, true), "{four:?}");
+
+        let alias = yolo_status_from_config(&config_with(None, true));
+        assert_eq!((alias.level, alias.enabled), (5, true), "{alias:?}");
+        assert_eq!(alias.source, "config", "{alias:?}");
+
+        let tight = yolo_status_from_config(&config_with(Some(2), true));
+        assert_eq!(
+            (tight.level, tight.enabled),
+            (2, false),
+            "an explicit level beats the legacy alias: {tight:?}"
+        );
+        assert_eq!(tight.source, "config", "{tight:?}");
+
+        let explicit_default = yolo_status_from_config(&config_with(Some(3), false));
+        assert_eq!(
+            explicit_default.source, "config",
+            "an explicitly configured 3 is `config`, not `default`: {explicit_default:?}"
+        );
+    }
 
     #[test]
     fn enumerate_profiles_empty_when_no_profiles_dir() {

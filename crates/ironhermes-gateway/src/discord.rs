@@ -1,4 +1,4 @@
-use crate::adapter::PlatformAdapter;
+use crate::adapter::{DirectMessageSender, PlatformAdapter};
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal::ProcessedAttachments;
 use anyhow::Result;
@@ -17,11 +17,54 @@ use tokio_util::sync::CancellationToken;
 
 /// Platform adapter for Discord using the serenity HTTP client.
 ///
-/// The `ctx` field holds the serenity Context, which owns the HTTP client
-/// used to send, edit, and delete Discord messages. The adapter is created
-/// per-message inside `DiscordEventHandler::message` and is not persistent.
+/// The `http` field is the serenity HTTP client used to send, edit, and delete
+/// Discord messages. The per-message path builds the adapter from the message's
+/// `Context` (`from_context`); the approval path builds a persistent one at boot from
+/// the bot token (`from_http`). Behaviour is identical either way.
 pub struct DiscordAdapter {
-    ctx: SerenityContext,
+    http: Arc<serenity::http::Http>,
+}
+
+impl DiscordAdapter {
+    pub fn from_context(ctx: &SerenityContext) -> Self {
+        Self {
+            http: ctx.http.clone(),
+        }
+    }
+
+    pub fn from_http(http: Arc<serenity::http::Http>) -> Self {
+        Self { http }
+    }
+}
+
+#[async_trait]
+impl DirectMessageSender for DiscordAdapter {
+    fn platform(&self) -> Platform {
+        Platform::Discord
+    }
+
+    /// Create (or reuse) the user's DM channel and post into it.
+    async fn send_direct_message(&self, user_id: &str, content: &str) -> Result<MessageResponse> {
+        let user = serenity::model::id::UserId::new(
+            user_id
+                .parse::<u64>()
+                .map_err(|e| anyhow::anyhow!("invalid Discord user_id {user_id}: {e}"))?,
+        );
+        let dm = user
+            .create_dm_channel(&self.http)
+            .await
+            .map_err(|e| anyhow::anyhow!("Discord create_dm_channel failed: {e}"))?;
+        let sent = dm
+            .id
+            .say(&self.http, content)
+            .await
+            .map_err(|e| anyhow::anyhow!("Discord DM send failed: {e}"))?;
+        Ok(MessageResponse {
+            message_id: sent.id.to_string(),
+            chat_id: dm.id.to_string(),
+            platform: Platform::Discord,
+        })
+    }
 }
 
 #[async_trait]
@@ -42,7 +85,7 @@ impl PlatformAdapter for DiscordAdapter {
                 .map_err(|e| anyhow::anyhow!("invalid Discord channel_id {chat_id}: {e}"))?,
         );
         let sent = channel_id
-            .say(&self.ctx.http, content)
+            .say(&self.http, content)
             .await
             .map_err(|e| anyhow::anyhow!("Discord send_message failed: {e}"))?;
         Ok(MessageResponse {
@@ -65,7 +108,7 @@ impl PlatformAdapter for DiscordAdapter {
         );
         channel_id
             .edit_message(
-                &self.ctx.http,
+                &self.http,
                 msg_id,
                 serenity::builder::EditMessage::new().content(content),
             )
@@ -114,7 +157,7 @@ impl PlatformAdapter for DiscordAdapter {
                 .map_err(|e| anyhow::anyhow!("invalid Discord message_id {message_id}: {e}"))?,
         );
         channel_id
-            .delete_message(&self.ctx.http, msg_id)
+            .delete_message(&self.http, msg_id)
             .await
             .map_err(|e| anyhow::anyhow!("Discord delete_message failed: {e}"))?;
         Ok(())
@@ -235,7 +278,7 @@ impl EventHandler for DiscordEventHandler {
             return;
         }
 
-        let adapter = Arc::new(DiscordAdapter { ctx: ctx.clone() });
+        let adapter = Arc::new(DiscordAdapter::from_context(&ctx));
         let event = discord_message_to_event(&msg);
         let processed = ProcessedAttachments {
             text_prefix: None,

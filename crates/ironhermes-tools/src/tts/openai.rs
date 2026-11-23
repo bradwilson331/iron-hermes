@@ -31,6 +31,14 @@ impl OpenAiTtsProvider {
         Self { config }
     }
 
+    /// The `response_format` sent to the API (IN-04): the same normalisation
+    /// `audio_format::extension_for` applies, so the bytes returned always match the
+    /// file extension and MIME type derived from the configured format (a legacy
+    /// stored `flac` is requested as `mp3`, not requested as flac and saved as `.mp3`).
+    fn response_format(configured: &str) -> &'static str {
+        crate::tts::audio_format::effective_format(configured)
+    }
+
     /// Truncate text to the OpenAI `/v1/audio/speech` cap (4096 chars).
     ///
     /// Truncating client-side avoids API errors and bounds cost-blowup
@@ -89,11 +97,7 @@ impl TtsProvider for OpenAiTtsProvider {
         // Per-call client — mirrors ElevenLabsProvider pattern.
         let client = reqwest::Client::new();
 
-        let response_format = if self.config.format.is_empty() {
-            "mp3".to_string()
-        } else {
-            self.config.format.clone()
-        };
+        let response_format = Self::response_format(&self.config.format);
 
         let response = client
             .post("https://api.openai.com/v1/audio/speech")
@@ -143,6 +147,25 @@ mod tests {
 
     fn default_provider() -> OpenAiTtsProvider {
         OpenAiTtsProvider::new(OpenAiTtsConfig::default())
+    }
+
+    /// IN-04: the format requested from OpenAI is the one the extension/MIME helpers
+    /// assume.
+    #[test]
+    fn response_format_matches_the_extension_helper() {
+        for configured in ["mp3", "opus", "wav", "OPUS", " wav ", "flac", "aac", ""] {
+            let mut cfg = TtsConfig {
+                provider: "openai".to_string(),
+                ..Default::default()
+            };
+            cfg.openai.format = configured.to_string();
+            assert_eq!(
+                OpenAiTtsProvider::response_format(configured),
+                crate::tts::audio_format::extension_for(&cfg),
+                "{configured:?}"
+            );
+        }
+        assert_eq!(OpenAiTtsProvider::response_format("flac"), "mp3");
     }
 
     #[test]

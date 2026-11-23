@@ -18,7 +18,9 @@
 use std::sync::OnceLock;
 
 use ironhermes_core::config::BrowserBackend;
-use ironhermes_tools::browser_session::{BrowserSession, find_chromium_binary, find_obscura_binary};
+use ironhermes_tools::browser_session::{
+    BrowserSession, find_chromium_binary, find_obscura_binary,
+};
 use ironhermes_tools::browser_vision::VisionClientHandle;
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -137,11 +139,13 @@ fn make_browser_registry(
             // so it can never be deleted out from under chromium mid-test;
             // BrowserSession::spawn create_dir_all's it on launch. Test-only — production
             // still uses the default profile dir.
-            static PROFILE_SEQ: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(0);
+            static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let seq = PROFILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let unique_profile = std::env::temp_dir()
-                .join(format!("ih-browser-test-{}-{}", std::process::id(), seq));
+            let unique_profile = std::env::temp_dir().join(format!(
+                "ih-browser-test-{}-{}",
+                std::process::id(),
+                seq
+            ));
             config.browser.user_data_dir = Some(unique_profile.to_string_lossy().into_owned());
         }
         BrowserBackend::Obscura => {
@@ -599,7 +603,9 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
     if obscura_available() {
         browser_vision_routes_to_auxiliary_vision_role_body(BrowserBackend::Obscura).await;
     } else {
-        eprintln!("SKIP browser_vision_routes_to_auxiliary_vision_role (obscura): no obscura binary");
+        eprintln!(
+            "SKIP browser_vision_routes_to_auxiliary_vision_role (obscura): no obscura binary"
+        );
     }
 }
 

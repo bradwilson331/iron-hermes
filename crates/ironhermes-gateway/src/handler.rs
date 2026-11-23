@@ -42,6 +42,10 @@ use crate::session_queue::{QueueError, SessionQueue};
 use crate::stream_consumer::{DeliveryMode, StreamConsumer, send_chunked};
 use crate::user_queue::{DispatchOutcome, UserQueueManager};
 
+/// Phase 57 D-04(b): the audit `tool` name of every inbound-message screening row
+/// (`security_verdict`, `sidecar_unavailable`) and of the `Blocked` security event.
+pub const INBOUND_SCREEN_TOOL: &str = "inbound_message";
+
 /// Phase 41.1 Plan 04 (UI-SPEC Copywriting Contract / §C): build the run-turn
 /// meta text sent immediately before the skill's run turn on Telegram. Bare
 /// invoke → `▶ Ran skill /{name}`; argued invoke → `▶ Ran skill /{name} · "{args}"`,
@@ -70,13 +74,169 @@ fn run_turn_meta_text(name: &str, trigger_text: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 54.8 D-07 — per-turn deadline
+// ---------------------------------------------------------------------------
+
+/// Grace given to a cancelled turn to unwind before its future is dropped.
+pub const TURN_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Prefix of the in-chat notice sent when a turn hits `gateway.turn_timeout_secs`.
+/// Tests and the `/goal` path reference this one spelling.
+pub const TURN_TIMEOUT_NOTICE_PREFIX: &str = "-- This request timed out";
+
+/// Typed error returned by [`with_turn_deadline`] when the deadline elapsed.
+/// The handler's `Err` arm downcasts to this to send the distinct notice
+/// instead of the generic "Something went wrong".
+#[derive(Debug)]
+pub struct TurnTimedOut {
+    pub after: std::time::Duration,
+}
+
+impl std::fmt::Display for TurnTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "turn timed out after {}s", self.after.as_secs())
+    }
+}
+
+impl std::error::Error for TurnTimedOut {}
+
+/// Build the user-facing timeout notice, naming the limit (minutes, rounded
+/// up, minimum 1) and the config key that raises it.
+pub fn turn_timeout_notice(after: std::time::Duration) -> String {
+    let minutes = after.as_secs().div_ceil(60).max(1);
+    format!(
+        "\n\n{TURN_TIMEOUT_NOTICE_PREFIX} after {minutes} min and was stopped. \
+         Send it again, or raise gateway.turn_timeout_secs."
+    )
+}
+
+/// Phase 58.3.1 D-05: the out-of-band `--- Context Warnings ---` block shared by
+/// `run_agent` and the /goal turn runner. `None` when there is nothing to show.
+fn context_warnings_message(warnings: &[String]) -> Option<String> {
+    if warnings.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = warnings.iter().map(|w| format!("- {w}")).collect();
+    Some(format!("--- Context Warnings ---\n{}", lines.join("\n")))
+}
+
+/// Run `fut` under an optional deadline.
+///
+/// `None` simply awaits it. Otherwise, when the deadline elapses the
+/// `cancel` token is cancelled, the future gets `grace` to unwind, and then
+/// it is dropped regardless. Whether or not it unwound in time, the result is
+/// `Err(TurnTimedOut)` — the bounded grace is what stops a future that never
+/// observes cancellation from becoming a new unbounded await (D-07).
+pub async fn with_turn_deadline<T, F>(
+    fut: F,
+    cancel: &CancellationToken,
+    deadline: Option<std::time::Duration>,
+    grace: std::time::Duration,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let Some(deadline) = deadline else {
+        return fut.await;
+    };
+    tokio::pin!(fut);
+    tokio::select! {
+        res = &mut fut => res,
+        _ = tokio::time::sleep(deadline) => {
+            cancel.cancel();
+            let _ = tokio::time::timeout(grace, &mut fut).await;
+            Err(TurnTimedOut { after: deadline }.into())
+        }
+    }
+}
+
+/// Budget for draining the stream consumer after the turn ends (D-07).
+pub const POST_TURN_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Budget for a single best-effort adapter send (first typing action, timeout
+/// notice, error notice, typing-task join) after the deadline (D-07).
+pub const NOTICE_SEND_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Slack added on top of the per-step budgets for the absolute handler ceiling
+/// enforced by `turn_slot::run_turn_slot` (D-07).
+pub const CEILING_SLACK: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Every time budget that bounds a gateway call (D-07). Resolved from
+/// `gateway.turn_timeout_secs` plus the fixed constants above; tests install
+/// small values through `set_turn_budgets_for_tests`.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnBudgets {
+    pub deadline: Option<std::time::Duration>,
+    pub cancel_grace: std::time::Duration,
+    pub drain: std::time::Duration,
+    pub notice: std::time::Duration,
+    pub slack: std::time::Duration,
+}
+
+impl TurnBudgets {
+    pub fn from_gateway_config(cfg: &ironhermes_core::config::GatewayConfig) -> Self {
+        Self {
+            deadline: cfg.turn_deadline(),
+            cancel_grace: TURN_CANCEL_GRACE,
+            drain: POST_TURN_DRAIN_BUDGET,
+            notice: NOTICE_SEND_BUDGET,
+            slack: CEILING_SLACK,
+        }
+    }
+
+    /// Absolute ceiling for one whole gateway call: deadline + grace + drain +
+    /// notice + slack. `None` when the deadline is disabled.
+    pub fn handler_ceiling(&self) -> Option<std::time::Duration> {
+        self.deadline
+            .map(|d| d + self.cancel_grace + self.drain + self.notice + self.slack)
+    }
+}
+
+/// Phase 54.8 D-15: how long a started Telegram MCP authorization stays pending
+/// for a paste. Matches the McpManager's own parked-state TTL.
+pub const MCP_PASTE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Phase 54.8 D-15 (review 09 HIGH): the whole off-loop processing of one pasted
+/// callback (delete, token exchange, one-server reconnect, reply). The token
+/// exchange alone is bounded at 60 s by `OAuthPasteBack::complete`.
+pub const MCP_PASTE_PROCESS_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// One authorization started in a chat by `/mcp connect`. The McpManager parks the
+/// session keyed by `state`; this only lets the handler recognize a paste in the
+/// right chat and refuse a state that belongs to another one.
+#[derive(Debug, Clone)]
+struct PendingPaste {
+    state: String,
+    server: String,
+    created_at: std::time::Instant,
+}
+
+/// Pure TTL decision for a pending paste entry.
+fn pending_expired(
+    created_at: std::time::Instant,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> bool {
+    now.saturating_duration_since(created_at) > ttl
+}
+
+/// Owner definition for MCP authorization from chat: a Telegram private chat. The
+/// runner's whitelist gate has already restricted the sender to whitelisted users.
+fn is_owner_dm(event: &MessageEvent) -> bool {
+    event.platform == Platform::Telegram && event.chat_type == "dm"
+}
+
+const MCP_PASTE_DM_ONLY: &str = "MCP authorization only works in a private chat with the bot.";
+
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
 pub struct GatewayMessageHandler {
     config: Config,
     resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
-    // retained handle; production per-turn AgentLoop construction wiring pending
-    #[allow(dead_code)]
+    // 49.8-08 (D-10/D-16): read at /start, /new and shutdown to await
+    // `ironhermes_tools::ros2::end_session_stop`, stopping the robot on every
+    // gateway session-boundary reset — same Arc as the AgentRuntime's registry.
     tool_registry: Arc<RwLock<ToolRegistry>>,
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
@@ -265,6 +425,21 @@ pub struct GatewayMessageHandler {
     /// Constructed from `config.approvals.timeout_secs`, the platform adapter,
     /// and the existing ApprovalsStore. `None` = gate unavailable (fail-closed).
     approval_coordinator: Option<Arc<crate::approval::ApprovalCoordinator>>,
+    /// Phase 54.8 D-07: test-only override of the turn budgets. `None` in
+    /// production — budgets then come from `config.gateway`.
+    turn_budgets_override: Option<TurnBudgets>,
+    /// Phase 54.8 D-15: paste-back seam. Set to the McpManager by `set_mcp_manager`
+    /// unless a test (or another caller) injected one with `set_oauth_paste_back`.
+    oauth_paste_back: Option<Arc<dyn ironhermes_mcp::paste_back::OAuthPasteBack>>,
+    oauth_paste_back_injected: bool,
+    /// Phase 54.8 D-15: `chat_id -> pending authorization`. A std mutex that is
+    /// never held across an await; taking an entry serializes completions per chat.
+    pending_mcp_paste: Arc<std::sync::Mutex<std::collections::HashMap<String, PendingPaste>>>,
+    /// Phase 54.8 D-15: budget for the off-loop paste processing task.
+    paste_process_budget: std::time::Duration,
+    /// Phase 54.8 D-15: test-only replacement for the fresh `Config::load()` read of
+    /// `mcp_servers`. `None` in production.
+    mcp_servers_override: Option<std::collections::HashMap<String, serde_yaml::Value>>,
 }
 
 impl GatewayMessageHandler {
@@ -358,7 +533,27 @@ impl GatewayMessageHandler {
             // by the platform runner. Handlers built via direct ::new() see None and
             // leave the gate unavailable (fail-closed — no approvals without wiring).
             approval_coordinator: None,
+            turn_budgets_override: None,
+            oauth_paste_back: None,
+            oauth_paste_back_injected: false,
+            pending_mcp_paste: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            paste_process_budget: MCP_PASTE_PROCESS_BUDGET,
+            mcp_servers_override: None,
         }
+    }
+
+    /// Phase 54.8 D-07: the budgets that bound one gateway call — from
+    /// `gateway.turn_timeout_secs` unless a test installed an override.
+    pub fn turn_budgets(&self) -> TurnBudgets {
+        self.turn_budgets_override
+            .unwrap_or_else(|| TurnBudgets::from_gateway_config(&self.config.gateway))
+    }
+
+    /// Test seam: install small budgets so the deadline/drain/ceiling paths
+    /// can be exercised in seconds instead of minutes.
+    #[doc(hidden)]
+    pub fn set_turn_budgets_for_tests(&mut self, budgets: TurnBudgets) {
+        self.turn_budgets_override = Some(budgets);
     }
 
     /// Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1 close-out for
@@ -398,6 +593,12 @@ impl GatewayMessageHandler {
         self.approval_coordinator = Some(coord);
     }
 
+    /// Whether an approval coordinator is installed (a gated Warn prompts instead of
+    /// failing closed with no prompt).
+    pub fn has_approval_coordinator(&self) -> bool {
+        self.approval_coordinator.is_some()
+    }
+
     /// Plan 21.7-06 (D-29, D-24): install the gateway-scoped ProcessRegistry
     /// so per-request on_session_end can invoke `drain_and_kill_session`.
     pub fn set_process_registry(&mut self, reg: Arc<RwLock<ProcessRegistry>>) {
@@ -417,7 +618,64 @@ impl GatewayMessageHandler {
     /// existing `GatewayRunner.mcp_manager` only served GAP-8 shutdown wiring).
     /// Caller is `GatewayRunner::build_gateway_handler`.
     pub fn set_mcp_manager(&mut self, mgr: Arc<ironhermes_mcp::McpManager>) {
+        // Phase 54.8 D-15: the same manager serves Telegram `/mcp connect` unless
+        // a different paste-back implementation was injected.
+        if !self.oauth_paste_back_injected {
+            self.oauth_paste_back =
+                Some(mgr.clone() as Arc<dyn ironhermes_mcp::paste_back::OAuthPasteBack>);
+        }
         self.mcp_manager = Some(mgr);
+    }
+
+    /// Phase 54.8 D-15: install the paste-back implementation (the test seam; in
+    /// production `set_mcp_manager` supplies the McpManager).
+    pub fn set_oauth_paste_back(&mut self, p: Arc<dyn ironhermes_mcp::paste_back::OAuthPasteBack>) {
+        self.oauth_paste_back = Some(p);
+        self.oauth_paste_back_injected = true;
+    }
+
+    /// Test seam: shrink the off-loop paste processing budget.
+    #[doc(hidden)]
+    pub fn set_paste_process_budget_for_tests(&mut self, d: std::time::Duration) {
+        self.paste_process_budget = d;
+    }
+
+    /// Test seam: the `mcp_servers` map `/mcp connect` reads instead of a fresh
+    /// `Config::load()`.
+    #[doc(hidden)]
+    pub fn set_mcp_servers_for_tests(
+        &mut self,
+        servers: std::collections::HashMap<String, serde_yaml::Value>,
+    ) {
+        self.mcp_servers_override = Some(servers);
+    }
+
+    /// Test seam: park a pending authorization of a given age in `chat_id`.
+    #[doc(hidden)]
+    pub fn insert_pending_paste_for_tests(
+        &self,
+        chat_id: &str,
+        state: &str,
+        server: &str,
+        age: std::time::Duration,
+    ) {
+        let created_at = std::time::Instant::now()
+            .checked_sub(age)
+            .unwrap_or_else(std::time::Instant::now);
+        self.pending_paste_map().insert(
+            chat_id.to_string(),
+            PendingPaste {
+                state: state.to_string(),
+                server: server.to_string(),
+                created_at,
+            },
+        );
+    }
+
+    /// Test seam: is an authorization pending in `chat_id`?
+    #[doc(hidden)]
+    pub fn has_pending_paste_for_tests(&self, chat_id: &str) -> bool {
+        self.pending_paste_map().contains_key(chat_id)
     }
 
     /// Phase 25.1 D-17: install the shared browser session Arc so each per-request
@@ -624,16 +882,19 @@ impl GatewayMessageHandler {
     /// already-registered `terminal` tool instance (`AgentRuntime::terminal_tool_arc`)
     /// so `background=true` keeps its `ProcessRegistry` wiring.
     ///
-    /// # yolo note (INV-21.7-05)
+    /// # Level note (INV-21.7-05, Phase 57 D-09)
     ///
     /// Gateway sessions NEVER read a per-request yolo flag from the incoming
-    /// message. Pass `yolo=false` for all production call sites. The parameter
-    /// is exposed here so callers that derive the flag from a process-wide config
-    /// value (e.g. `config.autonomous.yolo`) can thread it through.
+    /// message. The DEFCON level a call is judged under comes from the session
+    /// registry (`GatePolicy::for_session(session_id)`), which only the authorized,
+    /// audited `/yolo <N>` command or the config default (`security.defcon_level`,
+    /// seeded at gateway start) can change. A production caller passes
+    /// `GatePolicy::for_session(session_id)`; a captured bool cannot follow a
+    /// mid-session level change.
     pub async fn handle_shell_exec(
         &self,
         command: &str,
-        yolo: bool,
+        policy: ironhermes_hooks::GatePolicy,
         session_id: &str,
         chat_id: &str,
         approval_gate: Option<&dyn ironhermes_core::ApprovalGate>,
@@ -659,7 +920,7 @@ impl GatewayMessageHandler {
             session_id,
             "gateway",
             chat_id,
-            yolo,
+            policy,
             is_remote_backend,
             forward_env_nonempty,
             || async move {
@@ -687,6 +948,267 @@ impl GatewayMessageHandler {
             );
         }
         outcome
+    }
+
+    /// Phase 57 D-04(b): screen an inbound chat message as a `paste` subject at the
+    /// session's live DEFCON level before the agent sees it.
+    ///
+    /// `session_id` is the canonical id of the chat's EXISTING session, or empty when
+    /// the first turn has not created one yet (the process-default level then applies;
+    /// no registry entry is created for a session that does not exist).
+    ///
+    /// - `Block` writes a `security_verdict` row (decision `blocked`), tells the
+    ///   turn's approval gate (a critical chat notice), and returns `Err(text)`: the
+    ///   short refusal the caller sends in place of a model call. The message itself
+    ///   is never echoed and never reaches the session history.
+    /// - `Warn` writes a `security_verdict` row (decision `warned`) and proceeds.
+    /// - A `Block` or `Warn` that carries `unavailable` is a message that could not be
+    ///   screened (CR-01, for example `too_large`): the refusal reads
+    ///   `Message not processed: it could not be screened (<reason>).`, the critical
+    ///   notice names `unscreened:<reason>`, and the row is a `sidecar_unavailable` row
+    ///   (decision `blocked` / `warned`), never a reasonless `security_verdict` row.
+    /// - An unavailable sidecar writes a `sidecar_unavailable` row and proceeds:
+    ///   inbound text is not a Warn-class tool (D-12), so an outage alone never
+    ///   blocks a chat message.
+    /// - No screen installed (an unbooted process, a test) proceeds unchanged.
+    ///
+    /// Only `event.content` is screened. Attachment bytes never are.
+    async fn screen_inbound(&self, event: &MessageEvent, session_id: &str) -> Result<(), String> {
+        use ironhermes_core::content_screen::{
+            ContentKind, ContentScreenRequest, ScreenVerdict, content_screen,
+        };
+
+        let Some(screen) = content_screen() else {
+            return Ok(());
+        };
+        if event.content.trim().is_empty() {
+            return Ok(());
+        }
+        let level = if session_id.is_empty() {
+            ironhermes_core::defcon::session_defcon().process_default()
+        } else {
+            ironhermes_core::defcon::session_defcon()
+                .handle_for(session_id)
+                .get()
+        };
+        let audit_session = if session_id.is_empty() {
+            format!("gw:{}:{}", event.chat_id, event.sender_id)
+        } else {
+            session_id.to_string()
+        };
+
+        // The screen is synchronous (it may wait on the sidecar child): keep it off the
+        // async worker.
+        let text = event.content.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            screen.screen(&ContentScreenRequest {
+                kind: ContentKind::Paste,
+                text: &text,
+                name: None,
+                level,
+                warn_class: false,
+            })
+        })
+        .await;
+        let outcome = match joined {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                tracing::warn!(
+                    target: "ironhermes::gateway::inbound_screen",
+                    error = %e,
+                    "inbound screen task failed; treating the sidecar as unavailable"
+                );
+                self.write_inbound_row(
+                    event,
+                    &audit_session,
+                    ironhermes_core::context_scanner::SIDECAR_UNAVAILABLE_KIND,
+                    "inbound screen task failed".to_string(),
+                    "allow",
+                    serde_json::json!({
+                        "reason": "screen_task_failed",
+                        "tool": INBOUND_SCREEN_TOOL,
+                        "level": level.level(),
+                        "verdict": "allow",
+                    }),
+                )
+                .await;
+                return Ok(());
+            }
+        };
+
+        match outcome.verdict {
+            ScreenVerdict::Block => {
+                // CR-01 / D-04(b): a Block that carries `unavailable` means the message
+                // could not be screened. Name the cause and audit it as the D-12
+                // `sidecar_unavailable` row instead of a reasonless verdict.
+                if let (Some(why), Some(rule_id)) =
+                    (outcome.unscreened_reason(), outcome.unscreened_rule_id())
+                {
+                    self.write_inbound_row(
+                        event,
+                        &audit_session,
+                        ironhermes_core::context_scanner::SIDECAR_UNAVAILABLE_KIND,
+                        format!("inbound message refused at DEFCON {}: {why}", level.level()),
+                        "blocked",
+                        serde_json::json!({
+                            "reason": outcome.unavailable,
+                            "tool": INBOUND_SCREEN_TOOL,
+                            "level": level.level(),
+                            "verdict": "block",
+                        }),
+                    )
+                    .await;
+                    let ids = vec![ironhermes_core::sanitize_notice_field(&rule_id)];
+                    self.notify_inbound_block(event, &audit_session, &ids, level.level())
+                        .await;
+                    return Err(format!("Message not processed: it {why}."));
+                }
+                let mut ids: Vec<String> = outcome
+                    .rules
+                    .iter()
+                    .map(|r| ironhermes_core::sanitize_notice_field(r))
+                    .collect();
+                if ids.is_empty() {
+                    ids.push("block".to_string());
+                }
+                self.write_inbound_row(
+                    event,
+                    &audit_session,
+                    ironhermes_core::context_scanner::SECURITY_VERDICT_KIND,
+                    format!("inbound message blocked at DEFCON {}", level.level()),
+                    "blocked",
+                    serde_json::json!({
+                        "rule": outcome.rules.join(","),
+                        "rules": outcome.rules,
+                        "level": level.level(),
+                    }),
+                )
+                .await;
+                self.notify_inbound_block(event, &audit_session, &ids, level.level())
+                    .await;
+                Err(format!(
+                    "Message not processed: the security screen flagged it ({}).",
+                    ids.join(", ")
+                ))
+            }
+            ScreenVerdict::Warn => {
+                if let Some(why) = outcome.unscreened_reason() {
+                    // CR-01: an unscreened message at DEFCON 4-5 proceeds, audited as
+                    // `sidecar_unavailable` with the reason.
+                    self.write_inbound_row(
+                        event,
+                        &audit_session,
+                        ironhermes_core::context_scanner::SIDECAR_UNAVAILABLE_KIND,
+                        format!("inbound message warned at DEFCON {}: {why}", level.level()),
+                        "warned",
+                        serde_json::json!({
+                            "reason": outcome.unavailable,
+                            "tool": INBOUND_SCREEN_TOOL,
+                            "level": level.level(),
+                            "verdict": "warn",
+                        }),
+                    )
+                    .await;
+                    return Ok(());
+                }
+                self.write_inbound_row(
+                    event,
+                    &audit_session,
+                    ironhermes_core::context_scanner::SECURITY_VERDICT_KIND,
+                    format!("inbound message warned at DEFCON {}", level.level()),
+                    "warned",
+                    serde_json::json!({
+                        "rule": outcome.rules.join(","),
+                        "rules": outcome.rules,
+                        "level": level.level(),
+                    }),
+                )
+                .await;
+                Ok(())
+            }
+            ScreenVerdict::Allow => {
+                if let Some(reason) = outcome.unavailable.as_deref() {
+                    self.write_inbound_row(
+                        event,
+                        &audit_session,
+                        ironhermes_core::context_scanner::SIDECAR_UNAVAILABLE_KIND,
+                        format!("inbound message not screened: {reason}"),
+                        "allow",
+                        serde_json::json!({
+                            "reason": reason,
+                            "tool": INBOUND_SCREEN_TOOL,
+                            "level": level.level(),
+                            "verdict": "allow",
+                        }),
+                    )
+                    .await;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// One audit row for the inbound screen. Never carries the message text. A failed
+    /// write is logged, never fatal: a Block still blocks and a Warn still proceeds.
+    async fn write_inbound_row(
+        &self,
+        event: &MessageEvent,
+        session: &str,
+        kind: &str,
+        reason: String,
+        decision: &str,
+        args: serde_json::Value,
+    ) {
+        let log = ironhermes_core::AuditLog::load(self.config.audit.clone());
+        let entry = log.make_entry(
+            kind,
+            INBOUND_SCREEN_TOOL,
+            None,
+            session,
+            event.platform.to_string(),
+            event.chat_id.clone(),
+            reason,
+            decision,
+            "verdict",
+            &args,
+        );
+        if let Err(e) = log.append(&entry).await {
+            tracing::warn!(
+                target: "ironhermes::gateway::inbound_screen",
+                error = %e,
+                kind,
+                "failed to append inbound screen audit entry"
+            );
+        }
+    }
+
+    /// Tell the turn's approval gate an inbound message was blocked (D-12/D-16). The
+    /// event carries the tool name, rule ids and level only. Bounded, best effort.
+    async fn notify_inbound_block(
+        &self,
+        event: &MessageEvent,
+        session: &str,
+        rule_ids: &[String],
+        level: u8,
+    ) {
+        let target = approval_target_for(event);
+        let (gate, _denials) =
+            approval_gate_for_event(event, self.approval_coordinator.as_ref(), &target);
+        let Some(gate) = gate else {
+            return;
+        };
+        let security_event = ironhermes_core::SecurityEvent {
+            kind: ironhermes_core::SecurityEventKind::Blocked,
+            tool: INBOUND_SCREEN_TOOL.to_string(),
+            rule_ids: rule_ids.to_vec(),
+            level,
+            summary: format!("inbound message blocked at DEFCON {level}"),
+        };
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            gate.notify_security_event(session, &security_event),
+        )
+        .await;
     }
 
     /// Phase 36.17.9: handle `/voice on|off|tts|status` for a gateway chat.
@@ -733,6 +1255,315 @@ impl GatewayMessageHandler {
         persisted.unwrap_or_else(|| "off".to_string())
     }
 
+    // ------------------------------------------------------------------
+    // Phase 54.8 D-15 — Telegram `/mcp connect` and OAuth paste-back
+    // ------------------------------------------------------------------
+
+    fn pending_paste_map(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, PendingPaste>> {
+        // A poisoned lock only means another thread panicked mid-insert; the map is
+        // still a valid map, and refusing to classify a callback would be worse.
+        self.pending_mcp_paste
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// `mcp_servers` as the operator has it NOW (a server added after boot is
+    /// visible), or the test override.
+    fn fresh_mcp_servers(&self) -> std::collections::HashMap<String, serde_yaml::Value> {
+        if let Some(servers) = &self.mcp_servers_override {
+            return servers.clone();
+        }
+        Config::load()
+            .map(|c| c.mcp_servers)
+            .unwrap_or_else(|_| self.config.mcp_servers.clone())
+    }
+
+    /// Parse and env-interpolate one configured server. The `Err` is a finished,
+    /// secret-free chat reply.
+    fn load_mcp_server_config(
+        &self,
+        name: &str,
+    ) -> Result<ironhermes_mcp::McpServerConfig, String> {
+        let servers = self.fresh_mcp_servers();
+        let Some(raw) = servers.get(name) else {
+            return Err(format!("{name} is not a configured MCP server."));
+        };
+        let mut cfg: ironhermes_mcp::McpServerConfig = serde_yaml::from_value(raw.clone())
+            .map_err(|_| format!("The configuration of {name} could not be read."))?;
+        ironhermes_mcp::interpolate_config(&mut cfg);
+        Ok(cfg)
+    }
+
+    /// One bounded adapter send. Replies carry only a server name, an outcome and a
+    /// count — never the pasted URL.
+    async fn send_bounded(
+        &self,
+        adapter: &Arc<dyn PlatformAdapter>,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<()> {
+        let budget = self.turn_budgets().notice;
+        match tokio::time::timeout(
+            budget,
+            with_rate_limit_retry(|| adapter.send_message(chat_id, text, None)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_elapsed) => Err(anyhow::anyhow!("send exceeded its budget")),
+        }
+    }
+
+    /// `/mcp connect <server>` (and a bare `/mcp paste`). Owner, Telegram private
+    /// chat, baseline issuer only.
+    async fn handle_mcp_connect(
+        &self,
+        event: &MessageEvent,
+        args: &[&str],
+        adapter: Arc<dyn PlatformAdapter>,
+    ) -> Result<()> {
+        let reply = self.mcp_connect_reply(event, args).await;
+        self.send_bounded(&adapter, &event.chat_id, &reply).await
+    }
+
+    async fn mcp_connect_reply(&self, event: &MessageEvent, args: &[&str]) -> String {
+        if args.first().copied() == Some("paste") {
+            // `/mcp paste <url>` never reaches here (the intercept consumes it);
+            // this is the bare form, or a platform with no intercept.
+            return "Run /mcp connect <server> first, then paste the address from your \
+                    browser's address bar into this chat."
+                .to_string();
+        }
+        if !is_owner_dm(event) {
+            return MCP_PASTE_DM_ONLY.to_string();
+        }
+        let Some(name) = args.get(1).copied() else {
+            return "Usage: /mcp connect <server>".to_string();
+        };
+        let Some(paste_back) = self.oauth_paste_back.clone() else {
+            return "MCP authorization is not available in this gateway.".to_string();
+        };
+        let cfg = match self.load_mcp_server_config(name) {
+            Ok(cfg) => cfg,
+            Err(reply) => return reply,
+        };
+        if cfg.oauth_provider.is_none() {
+            return format!("{name} does not use OAuth.");
+        }
+        // RESEARCH OQ7: only a baseline issuer may be trusted from chat. Anything
+        // else keeps the CLI's DEFCON confirm and new_issuer audit as its only path.
+        let baseline = match cfg.url.as_deref() {
+            Some(server_url) => ironhermes_mcp::security::is_baseline_issuer(server_url),
+            None => false,
+        };
+        if !baseline {
+            return format!(
+                "{name} uses an issuer that needs confirmation — run: \
+                 ironhermes mcp connect {name} --no-browser"
+            );
+        }
+
+        // A new connect in this chat discards the previous parked authorization.
+        let previous = self.pending_paste_map().remove(&event.chat_id);
+        if let Some(prev) = previous {
+            paste_back.cancel(&prev.state).await;
+        }
+
+        match paste_back.begin(name, &cfg).await {
+            Err(e) => format!(
+                "Could not start authorization of {name}: {}",
+                ironhermes_mcp::paste_back::redact_oauth_params(&e)
+            ),
+            Ok(start) => {
+                let replaced = self.pending_paste_map().insert(
+                    event.chat_id.clone(),
+                    PendingPaste {
+                        state: start.state.clone(),
+                        server: name.to_string(),
+                        created_at: std::time::Instant::now(),
+                    },
+                );
+                if let Some(old) = replaced {
+                    // A concurrent connect in the same chat slipped in; keep the newest.
+                    paste_back.cancel(&old.state).await;
+                }
+                format!(
+                    "Authorize {name}:\n{}\n\nOpen this link on any device and approve access. \
+                     The page will then fail to load - that is expected. Copy the full address \
+                     from the browser's address bar and paste it here within 5 minutes.",
+                    start.auth_url
+                )
+            }
+        }
+    }
+
+    /// The dispatch loop's decision for a pasted OAuth callback (D-15, review 09).
+    ///
+    /// Synchronous and infallible by construction: no `.await`, no `Result`. A message
+    /// containing a callback URL (bare, `/mcp paste <url>`, or inside a sentence) is
+    /// consumed — this chat's pending entry is taken under the std mutex, the
+    /// processing task is spawned, and `true` is returned — regardless of what the
+    /// processing later does. Everything that can block (message delete, token
+    /// exchange, one-server reconnect, reply) runs off the loop.
+    pub fn intercept_oauth_paste(
+        self: &Arc<Self>,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+    ) -> bool {
+        let Some(url) = ironhermes_mcp::paste_back::find_oauth_callback_in_text(&event.content)
+        else {
+            return false;
+        };
+        let taken = self.pending_paste_map().remove(&event.chat_id);
+        let this = self.clone();
+        let event = event.clone();
+        tokio::spawn(async move {
+            this.process_oauth_paste(event, adapter, url, taken).await;
+        });
+        true
+    }
+
+    /// Off-loop processing of one consumed callback, under the paste budget. The URL
+    /// (and so the code) is never logged, replied or stored.
+    async fn process_oauth_paste(
+        self: Arc<Self>,
+        event: MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+        url: String,
+        entry: Option<PendingPaste>,
+    ) {
+        let paste_back = self.oauth_paste_back.clone();
+        let outcome = tokio::time::timeout(
+            self.paste_process_budget,
+            self.paste_steps(&event, &adapter, &url, entry.clone(), paste_back.clone()),
+        )
+        .await;
+        if outcome.is_err() {
+            let notice = self.turn_budgets().notice;
+            if let (Some(pb), Some(e)) = (&paste_back, &entry) {
+                let _ = tokio::time::timeout(notice, pb.cancel(&e.state)).await;
+            }
+            let server = entry
+                .as_ref()
+                .map(|e| e.server.clone())
+                .unwrap_or_else(|| "<server>".to_string());
+            let _ = self
+                .send_bounded(
+                    &adapter,
+                    &event.chat_id,
+                    &format!(
+                        "Authorization of {server} timed out - run /mcp connect {server} again."
+                    ),
+                )
+                .await;
+        }
+    }
+
+    async fn paste_steps(
+        &self,
+        event: &MessageEvent,
+        adapter: &Arc<dyn PlatformAdapter>,
+        url: &str,
+        entry: Option<PendingPaste>,
+        paste_back: Option<Arc<dyn ironhermes_mcp::paste_back::OAuthPasteBack>>,
+    ) {
+        use ironhermes_mcp::paste_back::redact_oauth_params;
+
+        // Delete first: the address must not linger in the chat.
+        let budget = self.turn_budgets().notice;
+        match tokio::time::timeout(
+            budget,
+            adapter.delete_message(&event.chat_id, &event.message_id),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            _ => tracing::warn!(
+                chat_id = %event.chat_id,
+                "could not delete the pasted OAuth callback message"
+            ),
+        }
+
+        let reply = |text: String| async move {
+            let _ = self.send_bounded(adapter, &event.chat_id, &text).await;
+        };
+
+        if !is_owner_dm(event) {
+            reply(MCP_PASTE_DM_ONLY.to_string()).await;
+            return;
+        }
+        let Some(pb) = paste_back else {
+            reply("MCP authorization is not available in this gateway.".to_string()).await;
+            return;
+        };
+        let Some(entry) = entry else {
+            reply(
+                "No pending authorization in this chat. Run /mcp connect <server> first."
+                    .to_string(),
+            )
+            .await;
+            return;
+        };
+
+        let url_state = ironhermes_mcp::transport::oauth_state_from_url(url).ok();
+        if url_state.as_deref() != Some(entry.state.as_str()) {
+            pb.cancel(&entry.state).await;
+            reply(format!(
+                "That address does not belong to the authorization started in this chat. \
+                 Run /mcp connect {} again.",
+                entry.server
+            ))
+            .await;
+            return;
+        }
+        if pending_expired(entry.created_at, std::time::Instant::now(), MCP_PASTE_TTL) {
+            pb.cancel(&entry.state).await;
+            reply(format!(
+                "The authorization of {} expired - run /mcp connect {} again.",
+                entry.server, entry.server
+            ))
+            .await;
+            return;
+        }
+        if ironhermes_mcp::paste_back::is_oauth_denial(url) {
+            pb.cancel(&entry.state).await;
+            reply(format!(
+                "Authorization of {} was denied; nothing was connected.",
+                entry.server
+            ))
+            .await;
+            return;
+        }
+
+        match pb.complete(url).await {
+            Ok(_server) => {
+                let summary = match self.load_mcp_server_config(&entry.server) {
+                    Ok(cfg) => pb.reconnect_server(&entry.server, &cfg).await,
+                    Err(_) => "Its configuration could not be reloaded; restart the gateway \
+                               to load the new token."
+                        .to_string(),
+                };
+                reply(format!(
+                    "Authorized {}. {}",
+                    entry.server,
+                    redact_oauth_params(&summary)
+                ))
+                .await;
+            }
+            Err(e) => {
+                reply(format!(
+                    "Authorization of {} failed: {}",
+                    entry.server,
+                    redact_oauth_params(&e)
+                ))
+                .await;
+            }
+        }
+    }
+
     /// Dispatch a slash command via the unified CommandRouter (Phase 21.1 Plan 02).
     ///
     /// Replaces the old hardcoded match on /start, /new, /clear, /help.
@@ -762,6 +1593,20 @@ impl GatewayMessageHandler {
         // Falls back to the string-key form if no canonical id exists yet
         // (e.g., slash command issued before the first chat turn creates the
         // SQLite session row).
+        //
+        // Phase 57 D-09: `/yolo <N>` stores the level under this id, and every gated call
+        // of the chat's turns reads it under the canonical session id. A `/yolo` sent
+        // before the chat's first model turn would otherwise key the level on the
+        // string-key placeholder below, which no turn ever reads: a `/yolo 1` would
+        // silently not tighten anything. So `/yolo` makes sure the session exists first.
+        if command_input.split_whitespace().next() == Some("/yolo") {
+            let model = self.config.model.default.clone();
+            let source = session_key.platform.to_string();
+            self.session_store
+                .write()
+                .await
+                .get_or_create(session_key.clone(), &model, &source);
+        }
         let ctx_session_id = {
             let store = self.session_store.read().await;
             store
@@ -851,6 +1696,19 @@ impl GatewayMessageHandler {
         // other platforms pass None.
         let ctx = ctx.with_chat_origin(event.chat_id.clone(), event.thread_id.clone());
 
+        // Phase 57 D-22: the per-message facts `/yolo <N>` is authorized against. The
+        // command layer cannot tell a DM from a group or an allowlisted sender from a
+        // stranger; this surface can. Every fact defaults to refusing, so the level only
+        // changes from a direct message by a sender on the platform's own allowlist, and
+        // only when `security.defcon_remote_change_enabled` is on. A gateway message is
+        // never an authenticated web session.
+        let ctx = ctx.with_defcon_auth(ironhermes_core::commands::context::DefconAuthFacts {
+            direct_message: event.chat_type == "dm",
+            sender_whitelisted: sender_is_whitelisted(&self.config, event),
+            web_authenticated: false,
+            actor: event.sender_id.clone(),
+        });
+
         // Phase 36.3.7.5 BUG-36.3.7.5-06: attach the KanbanStoreWriter so the
         // /kanban create slash arm can actually create tasks + write
         // subscriptions. KanbanStoreWriterImpl lives in ironhermes-kanban
@@ -928,9 +1786,32 @@ impl GatewayMessageHandler {
                 // back to the chat_id-keyed lookup ONLY in that specific
                 // combination (Buzz + DM reply) so Telegram/Discord/Slack
                 // and Buzz DM-to-DM approvals are entirely unaffected.
+                //
+                // Discord and Slack approvals are DM-only: the prompt went to the
+                // requester's DM, so only a reply from a DM can answer it. A channel
+                // `/approve` or `/deny` is refused outright (even from the requester,
+                // whose channel session would otherwise match the pending entry), and
+                // the reply names no pending id.
+                if matches!(event.platform, Platform::Discord | Platform::Slack)
+                    && event.chat_type != "dm"
+                {
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(
+                            &event.chat_id,
+                            "Approvals are answered in a DM to the bot, not in a channel.",
+                            None,
+                        )
+                    })
+                    .await?;
+                    return Ok(());
+                }
                 let resolved = if coord.resolve(&ctx_session_id, approved).await {
                     true
-                } else if event.platform == Platform::Buzz && event.chat_type == "dm" {
+                } else if matches!(
+                    event.platform,
+                    Platform::Buzz | Platform::Discord | Platform::Slack
+                ) && event.chat_type == "dm"
+                {
                     coord.resolve_by_chat_id(&event.sender_id, approved).await
                 } else {
                     false
@@ -1048,6 +1929,15 @@ impl GatewayMessageHandler {
                         .await?;
                     return Ok(());
                 }
+                // Phase 54.8 D-15: `/mcp connect <server>` (and a bare `/mcp paste`)
+                // authorize an OAuth MCP server from a Telegram DM. A pasted callback
+                // URL never gets here — the runner's `intercept_oauth_paste` consumes
+                // it first. Every other `/mcp` subcommand goes to core dispatch.
+                if def.name == "mcp"
+                    && matches!(args.first().copied(), Some("connect") | Some("paste"))
+                {
+                    return self.handle_mcp_connect(event, &args, adapter).await;
+                }
                 let core_result = ironhermes_core::commands::handlers::dispatch(
                     def,
                     &args,
@@ -1085,6 +1975,17 @@ impl GatewayMessageHandler {
                                 // from /new so the two commands stay distinguishable
                                 // in durable audit state.
                                 let _ = store.reset_session(&session_key, "start");
+                            }
+                            // 49.8-08 (D-10/D-16): /start is a real session
+                            // boundary — stop the robot and cancel any goals
+                            // before the fresh conversation begins. Awaited so
+                            // the stop lands before the reply, bounded so a
+                            // slow/unreachable bridge can never wedge /start.
+                            let ros2_report =
+                                ironhermes_tools::ros2::end_session_stop(&self.tool_registry)
+                                    .await;
+                            if ros2_report != "nothing to stop" {
+                                info!(report = %ros2_report, "gateway /start: ros2 session-end stop");
                             }
                             let mut intro_event = event.clone();
                             intro_event.content =
@@ -1142,6 +2043,14 @@ impl GatewayMessageHandler {
                             let mut store = self.session_store.write().await;
                             store.reset_session(&session_key, "new")
                         };
+                        // 49.8-08 (D-10/D-16): /new is a real session boundary
+                        // too — stop the robot and cancel any goals before the
+                        // "cleared" reply, same awaited/bounded call as /start.
+                        let ros2_report =
+                            ironhermes_tools::ros2::end_session_stop(&self.tool_registry).await;
+                        if ros2_report != "nothing to stop" {
+                            info!(report = %ros2_report, "gateway /new: ros2 session-end stop");
+                        }
                         let msg = if had_session {
                             "Conversation cleared. Starting fresh."
                         } else {
@@ -1580,6 +2489,21 @@ impl GatewayMessageHandler {
                     // below and the SUMMARY for the documented field-by-field
                     // comparison against `run_agent`'s own `TurnRequest`.
                     CoreCommandResult::StartGoalLoop { objective, budget } => {
+                        // Phase 57 D-04(b): the goal text goes to the model every
+                        // iteration, so it is screened like any other inbound text.
+                        let goal_event = MessageEvent {
+                            content: objective.clone(),
+                            ..event.clone()
+                        };
+                        if let Err(refusal) =
+                            self.screen_inbound(&goal_event, &ctx_session_id).await
+                        {
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(&event.chat_id, &refusal, None)
+                            })
+                            .await?;
+                            return Ok(());
+                        }
                         let kanban_config: ironhermes_kanban::KanbanConfig =
                             if self.config.kanban.is_null() {
                                 ironhermes_kanban::KanbanConfig::default()
@@ -1635,7 +2559,10 @@ impl GatewayMessageHandler {
                         let execute_code_tool = agent_runtime.execute_code_tool_arc();
                         let dcfg = self.config.dangerous_commands.clone();
                         let audit_cfg = self.config.audit.clone();
-                        let yolo = self.config.autonomous.yolo;
+                        // Phase 57 D-09: no boot-time copy of the config's yolo flag. Each
+                        // gated call below builds `GatePolicy::for_session(&sid)` inside its
+                        // own closure, so a `/yolo <N>` sent while the goal loop runs
+                        // applies to the loop's very next call.
                         let is_remote_backend = self.config.terminal.backend == "ssh";
                         let forward_env_nonempty = !self.config.terminal.forward_env.is_empty();
                         let terminal_intercept: Option<
@@ -1662,6 +2589,7 @@ impl GatewayMessageHandler {
                                 let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
                                 let cid = chat_id.clone();
                                 let tool = tool.clone();
+                                let policy = ironhermes_hooks::GatePolicy::for_session(&sid);
                                 Box::pin(async move {
                                     let outcome = ironhermes_hooks::execute_gated_command(
                                         "terminal",
@@ -1672,7 +2600,7 @@ impl GatewayMessageHandler {
                                         &sid,
                                         "gateway",
                                         &cid,
-                                        yolo,
+                                        policy,
                                         is_remote_backend,
                                         forward_env_nonempty,
                                         || async move {
@@ -1708,17 +2636,26 @@ impl GatewayMessageHandler {
                                 let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
                                 let cid = chat_id.clone();
                                 let tool = tool.clone();
+                                let policy = ironhermes_hooks::GatePolicy::for_session(&sid);
                                 Box::pin(async move {
+                                    // D-01 (overturns D-11): extract the real Python source
+                                    // so DangerousCommandGuardrail's execute_code branch can
+                                    // classify it, instead of the previous opaque "".
+                                    let classify_arg = args
+                                        .get("code")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                     let outcome = ironhermes_hooks::execute_gated_command(
                                         "execute_code",
-                                        "",
+                                        &classify_arg,
                                         &guard,
                                         g.as_deref(),
                                         &audit_log,
                                         &sid,
                                         "gateway",
                                         &cid,
-                                        yolo,
+                                        policy,
                                         false,
                                         false,
                                         || async move {
@@ -1772,6 +2709,13 @@ impl GatewayMessageHandler {
                         let session_store_for_loop = self.session_store.clone();
                         let turn_registry_for_loop = self.turn_registry.clone();
                         let ctx_session_id_for_loop = ctx_session_id.clone();
+                        // Phase 54.8 D-07: the goal runner's run_turn is bounded
+                        // by the same deadline; on expiry it tells the chat
+                        // (the loop's own progress channel only reports
+                        // judge/budget outcomes) and the loop stops.
+                        let goal_budgets = self.turn_budgets();
+                        let goal_adapter = adapter.clone();
+                        let goal_chat_id = event.chat_id.clone();
 
                         // Cloned BEFORE the `move` closure below takes
                         // ownership of `loop_cancel`/`ctx_session_id` — both
@@ -1809,6 +2753,8 @@ impl GatewayMessageHandler {
                                 let execute_code_intercept = execute_code_intercept.clone();
                                 let trajectory_writer = trajectory_writer.clone();
                                 let state_store_for_turn = state_store_for_turn.clone();
+                                let goal_adapter = goal_adapter.clone();
+                                let goal_chat_id = goal_chat_id.clone();
 
                                 Box::pin(async move {
                                     // Register-before-spawn: THIS iteration's
@@ -1868,11 +2814,15 @@ impl GatewayMessageHandler {
 
                                     // System message — same PromptBuilder
                                     // construction as run_agent's.
+                                    // Same key the loop's gated intercepts pass to
+                                    // `GatePolicy::for_session` (ctx_session_id); set BEFORE
+                                    // load_context so context files screen at its level.
                                     let mut prompt_builder = PromptBuilder::new(
                                         &config.model.default,
                                         session_key.platform.to_string(),
                                     )
                                     .with_provider(&config.model.provider)
+                                    .with_defcon_session(ctx_session_id.clone())
                                     .load_context(&cwd);
                                     if let Some(ref ws) = workspace {
                                         prompt_builder =
@@ -1929,7 +2879,51 @@ impl GatewayMessageHandler {
                                         ..Default::default()
                                     };
 
-                                    let result = agent_runtime.run_turn(request).await?;
+                                    // `loop_cancel` is the whole goal loop's token:
+                                    // cancelling it on expiry also stops the loop.
+                                    let result = match with_turn_deadline(
+                                        agent_runtime.run_turn(request),
+                                        &loop_cancel,
+                                        goal_budgets.deadline,
+                                        goal_budgets.cancel_grace,
+                                    )
+                                    .await
+                                    {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            if let Some(timed_out) =
+                                                e.downcast_ref::<TurnTimedOut>()
+                                            {
+                                                tracing::warn!(
+                                                    chat_id = %goal_chat_id,
+                                                    after_secs = timed_out.after.as_secs(),
+                                                    "gateway /goal turn timed out (D-07)"
+                                                );
+                                                let notice = turn_timeout_notice(timed_out.after);
+                                                let _ = tokio::time::timeout(
+                                                    goal_budgets.notice,
+                                                    goal_adapter.send_message(
+                                                        &goal_chat_id,
+                                                        &notice,
+                                                        None,
+                                                    ),
+                                                )
+                                                .await;
+                                            }
+                                            return Err(e);
+                                        }
+                                    };
+
+                                    // D-05: a /goal turn uses up the once-per-session notice, so it is shown here.
+                                    if let Some(block) =
+                                        context_warnings_message(&result.context_warnings)
+                                    {
+                                        let _ = tokio::time::timeout(
+                                            goal_budgets.notice,
+                                            goal_adapter.send_message(&goal_chat_id, &block, None),
+                                        )
+                                        .await;
+                                    }
 
                                     if !result.appended.is_empty() {
                                         let mut store = session_store.write().await;
@@ -2131,6 +3125,32 @@ impl GatewayMessageHandler {
         // so that process shutdown propagates, but /stop can cancel just this turn.
         let turn_cancel = cancel.child_token();
 
+        // Phase 54.8 D-07: every time budget for this call, resolved once.
+        let budgets = self.turn_budgets();
+
+        // Phase 57 D-04(b): screen the inbound text BEFORE anything else happens for
+        // this message: before the turn registers, before the placeholder, and before
+        // the text is written into the session history (a blocked message must not be
+        // replayed to the model on a later turn). The level is the chat's live session
+        // level; a chat with no session yet takes the process default.
+        let inbound_session = {
+            let key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            let store = self.session_store.read().await;
+            store
+                .get(&key)
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default()
+        };
+        if let Err(refusal) = self.screen_inbound(event, &inbound_session).await {
+            let _ = tokio::time::timeout(
+                budgets.notice,
+                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &refusal, None)),
+            )
+            .await;
+            return Ok(());
+        }
+
         // Build the session_id string used for TurnEntry + in_flight_warning.
         // Format matches the CommandContext session_id for gateway sessions.
         let gw_session_id = format!("gw:{}:{}", event.chat_id, event.sender_id);
@@ -2198,9 +3218,14 @@ impl GatewayMessageHandler {
         // this keeps the branch point in exactly one place per call site.
         let supports_in_place_edits = adapter.supports_in_place_edits();
         let placeholder_id: Option<String> = if supports_in_place_edits {
-            let placeholder =
-                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, "\u{2588}", None))
-                    .await?;
+            // Phase 54.8 D-07: bounded — a hung adapter must not hold the
+            // handler before the turn even starts.
+            let placeholder = tokio::time::timeout(
+                budgets.notice,
+                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, "\u{2588}", None)),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("placeholder send timed out (D-07)"))??;
             Some(placeholder.message_id.clone())
         } else {
             None
@@ -2221,7 +3246,12 @@ impl GatewayMessageHandler {
             }
         });
         // Send first typing action immediately
-        let _ = adapter.send_chat_action(&event.chat_id, "typing").await;
+        // (bounded, D-07)
+        let _ = tokio::time::timeout(
+            budgets.notice,
+            adapter.send_chat_action(&event.chat_id, "typing"),
+        )
+        .await;
 
         // 3. Get or create session; clone messages immediately to avoid holding lock across await
         // Per-turn snapshot of model at turn start (R39.1-07, D-06-RISK Pattern 3).
@@ -2274,8 +3304,21 @@ impl GatewayMessageHandler {
         // Phase 47.6 Plan 09 (P0-3): the prompt surface string follows the
         // EVENT's own platform, not a fixed "telegram" literal, so a Buzz
         // turn's system prompt correctly names the buzz surface.
+        // Gate session key: must equal `turn_session_id` below (the canonical
+        // SQLite session UUID, else the `gw:<chat>:<sender>` form), which is
+        // what the terminal/execute_code intercepts pass to
+        // `GatePolicy::for_session`.
+        let defcon_session_key = {
+            let store = self.session_store.read().await;
+            store
+                .get(&key)
+                .map(|s| s.session_id.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("gw:{}:{}", event.chat_id, event.sender_id))
+        };
         let mut prompt_builder = PromptBuilder::new(&model, event.platform.to_string())
             .with_provider(&self.config.model.provider)
+            .with_defcon_session(defcon_session_key)
             .load_context(&cwd);
         // Phase 25.3 D-W-2 (retargeted by Phase 47.6 Plan 09): inject the
         // resolved workspace root so the CURRENT surface renders
@@ -2335,7 +3378,7 @@ impl GatewayMessageHandler {
         // needs this string to construct the reinsert body when an attachment
         // fails (`format!("{final_body}\n\n{failed_tags}")`). Sending happens
         // exactly once, just before the consumer task breaks. The parent task
-        // awaits the receiver after `consumer_handle.await.ok()` so the value
+        // awaits the receiver after the bounded consumer drain so the value
         // is guaranteed-present whenever the consumer ran to completion.
         let (body_tx, body_rx) = tokio::sync::oneshot::channel::<String>();
         let mut body_tx = Some(body_tx);
@@ -2615,7 +3658,6 @@ impl GatewayMessageHandler {
         let _ti_gate = approval_gate_for_turn.clone();
         let _ti_dcfg = self.config.dangerous_commands.clone();
         let _ti_audit_cfg = self.config.audit.clone();
-        let _ti_yolo = self.config.autonomous.yolo;
         let _ti_is_remote = self.config.terminal.backend == "ssh";
         let _ti_fwd_env_nonempty = !self.config.terminal.forward_env.is_empty();
         let _ti_terminal_tool = self
@@ -2628,7 +3670,6 @@ impl GatewayMessageHandler {
             let gate = _ti_gate;
             let dcfg = _ti_dcfg;
             let audit_cfg = _ti_audit_cfg;
-            let yolo = _ti_yolo;
             let is_remote_backend = _ti_is_remote;
             let forward_env_nonempty = _ti_fwd_env_nonempty;
             let tool = _ti_terminal_tool;
@@ -2645,6 +3686,10 @@ impl GatewayMessageHandler {
                 let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
                 let cid = chat_id.clone();
                 let tool = tool.clone();
+                // Phase 57 D-09: the level is read from the session registry at the moment
+                // of THIS call (the closure runs once per call), never captured at turn
+                // start, so a `/yolo <N>` sent mid-turn applies to the next gated call.
+                let policy = ironhermes_hooks::GatePolicy::for_session(&sid);
                 Box::pin(async move {
                     let outcome = ironhermes_hooks::execute_gated_command(
                         "terminal",
@@ -2655,7 +3700,7 @@ impl GatewayMessageHandler {
                         &sid,
                         "gateway",
                         &cid,
-                        yolo,
+                        policy,
                         is_remote_backend,
                         forward_env_nonempty,
                         || async move {
@@ -2683,7 +3728,6 @@ impl GatewayMessageHandler {
         let _eci_gate = approval_gate_for_turn.clone();
         let _eci_dcfg = self.config.dangerous_commands.clone();
         let _eci_audit_cfg = self.config.audit.clone();
-        let _eci_yolo = self.config.autonomous.yolo;
         let _eci_execute_code_tool = self
             .agent_runtime
             .as_ref()
@@ -2694,7 +3738,6 @@ impl GatewayMessageHandler {
             let gate = _eci_gate;
             let dcfg = _eci_dcfg;
             let audit_cfg = _eci_audit_cfg;
-            let yolo = _eci_yolo;
             let tool = _eci_execute_code_tool;
             let chat_id = _eci_chat_id;
             Some(std::sync::Arc::new(move |args: serde_json::Value| {
@@ -2704,19 +3747,29 @@ impl GatewayMessageHandler {
                 let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
                 let cid = chat_id.clone();
                 let tool = tool.clone();
+                // Phase 57 D-09: live level for THIS call (see the terminal intercept).
+                let policy = ironhermes_hooks::GatePolicy::for_session(&sid);
                 Box::pin(async move {
+                    // D-01 (overturns D-11): extract the real Python source so
+                    // DangerousCommandGuardrail's execute_code branch can classify it,
+                    // instead of the previous opaque "" that made the branch dead.
+                    let classify_arg = args
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let outcome = ironhermes_hooks::execute_gated_command(
                         "execute_code",
-                        "", // D-11: opaque — Python source is not shell syntax
+                        &classify_arg,
                         &guard,
                         g.as_deref(),
                         &audit_log,
                         &sid,
                         "gateway",
                         &cid,
-                        yolo,
-                        false, // D-11: execute_code never routes to a remote backend
-                        false, // D-11: execute_code never forwards credentials cross-boundary
+                        policy,
+                        false, // D-01: execute_code never routes to a remote backend
+                        false, // D-01: execute_code never forwards credentials cross-boundary
                         || async move {
                             match tool {
                                 Some(t) => t.execute(args).await,
@@ -2741,7 +3794,7 @@ impl GatewayMessageHandler {
                 tool_progress: tool_callback_opt.take(),
                 tool_result: None,
                 trajectory_writer,
-                pressure_tracker: None, // run_turn makes a fresh tracker per turn
+                pressure_tracker: None, // None -> the runtime's session-keyed tracker
                 state_store: Some(state_store_for_turn),
                 compression_count: 0,
                 tts_wiring,                            // Phase 36.17.7 D-01
@@ -2750,8 +3803,18 @@ impl GatewayMessageHandler {
                 approval_gate: approval_gate_for_turn, // Phase 45 D-11
                 terminal_intercept, // Phase 45 D-11: gated terminal tool override
                 execute_code_intercept, // Phase 36.3.12 D-08/D-11: gated execute_code override
+                // Phase 54.3 D-03: `approval_gate` above already carries the
+                // `GatewayApprovalGate`, which `run_turn` falls back to as the
+                // flush-time notice target — no separate notifier needed.
+                yolo_notifier: None,
             };
-            rt.run_turn(request).await
+            with_turn_deadline(
+                rt.run_turn(request),
+                &turn_cancel,
+                budgets.deadline,
+                budgets.cancel_grace,
+            )
+            .await
         } else {
             Err(anyhow::anyhow!(
                 "AgentRuntime not configured in gateway handler"
@@ -2790,11 +3853,32 @@ impl GatewayMessageHandler {
         drop(tool_callback_opt);
         drop(stream_tx);
         drop(tool_tx);
-        consumer_handle.await.ok();
+        // Phase 54.8 D-07: the consumer awaits network flushes — bound the
+        // drain, and on elapse abort + join so a hung adapter cannot hold the
+        // handler (and its run permit) after the deadline.
+        let mut consumer_handle = consumer_handle;
+        if tokio::time::timeout(budgets.drain, &mut consumer_handle)
+            .await
+            .is_err()
+        {
+            consumer_handle.abort();
+            let _ = consumer_handle.await;
+            tracing::warn!(
+                chat_id = %event.chat_id,
+                "stream consumer did not drain in time; aborted (D-07)"
+            );
+        }
 
         // 10. Cancel typing indicator
         cancel.cancel();
-        typing_handle.await.ok();
+        let mut typing_handle = typing_handle;
+        if tokio::time::timeout(budgets.notice, &mut typing_handle)
+            .await
+            .is_err()
+        {
+            typing_handle.abort();
+            let _ = typing_handle.await;
+        }
 
         // RC-1 / REQ-37.2-03: hoist body_rx consumption to a single site BEFORE the
         // D-10 block so both D-10 and the RC-1 fallback share the same `final_body`
@@ -2812,12 +3896,12 @@ impl GatewayMessageHandler {
         // Phase 36.17.2.2 D-19: dispatch extracted `<MEDIA: ...>` attachments.
         //
         // ANCHOR (per RESEARCH FLAGGED RISK / Pitfall 6 / Assumption A9): this
-        // block lives AFTER `consumer_handle.await.ok()` AND `typing_handle.await.ok()`,
+        // block lives AFTER the bounded consumer drain AND the typing-task join,
         // BEFORE `match agent_result`. CONTEXT.md D-19 cited an anchor
         // (`after stream_consumer.flush(true).await?`) that does NOT exist
         // inline — `flush(true)` lives inside the consumer task spawned at
         // handler.rs:~1313 area. The CORRECT synchronization point is the
-        // `consumer_handle.await.ok()` barrier; placing the dispatch here
+        // bounded consumer-drain barrier; placing the dispatch here
         // guarantees: (a) the final markdown edit has rendered before
         // attachments arrive, (b) the typing indicator has cleared, and
         // (c) attachments dispatch regardless of `agent_result` branch (the
@@ -3125,14 +4209,7 @@ impl GatewayMessageHandler {
                 // Sent as a SEPARATE message so it is visibly distinct from the agent
                 // response — mirrors the Err arm's error_suffix pattern (a distinct
                 // send_message call, not appended to the streamed response).
-                if !result.context_warnings.is_empty() {
-                    let warning_lines: Vec<String> = result
-                        .context_warnings
-                        .iter()
-                        .map(|w| format!("- {}", w))
-                        .collect();
-                    let warnings_block =
-                        format!("--- Context Warnings ---\n{}", warning_lines.join("\n"));
+                if let Some(warnings_block) = context_warnings_message(&result.context_warnings) {
                     let _ = adapter
                         .send_message(&event.chat_id, &warnings_block, None)
                         .await;
@@ -3176,12 +4253,30 @@ impl GatewayMessageHandler {
                 }
             }
             Err(e) => {
-                // D-18: Append error indicator to whatever was already streamed
-                error!("Agent error: {:#}", e);
-                let error_suffix = "\n\n-- Something went wrong, please try again";
-                let _ = adapter
-                    .send_message(&event.chat_id, error_suffix, None)
+                if let Some(timed_out) = e.downcast_ref::<TurnTimedOut>() {
+                    // Phase 54.8 D-07: a distinct, actionable notice. No message
+                    // content in the log line.
+                    tracing::warn!(
+                        chat_id = %event.chat_id,
+                        after_secs = timed_out.after.as_secs(),
+                        "gateway turn timed out (D-07)"
+                    );
+                    let notice = turn_timeout_notice(timed_out.after);
+                    let _ = tokio::time::timeout(
+                        budgets.notice,
+                        adapter.send_message(&event.chat_id, &notice, None),
+                    )
                     .await;
+                } else {
+                    // D-18: Append error indicator to whatever was already streamed
+                    error!("Agent error: {:#}", e);
+                    let error_suffix = "\n\n-- Something went wrong, please try again";
+                    let _ = tokio::time::timeout(
+                        budgets.notice,
+                        adapter.send_message(&event.chat_id, error_suffix, None),
+                    )
+                    .await;
+                }
             }
         }
 
@@ -3335,10 +4430,11 @@ pub(crate) fn requires_confirm(subcommand: &str, args: &[&str]) -> bool {
 /// Derive the approval-prompt delivery target for a turn's `MessageEvent`
 /// (Phase 47.6 Plan 09, P0-3 / T-47.6-09-01 / D-14).
 ///
-/// For every platform OTHER than Buzz, returns `event.chat_id` — this
-/// preserves today's approval-prompt behaviour exactly and MUST stay the
-/// default arm, so a future platform can never accidentally inherit Buzz's
-/// routing.
+/// For every platform OTHER than Buzz, Discord and Slack, returns
+/// `event.chat_id` — this preserves today's approval-prompt behaviour exactly
+/// and MUST stay the default arm, so a future platform can never accidentally
+/// inherit another platform's routing. Discord and Slack return
+/// `event.sender_id` for every event (see the match arm).
 ///
 /// For Buzz:
 /// - A direct message: returns `event.chat_id`, which plan 05 sets to the
@@ -3357,11 +4453,61 @@ pub(crate) fn requires_confirm(subcommand: &str, args: &[&str]) -> bool {
 /// guard rejects channel-borne approval COMMANDS (the inbound half); this
 /// derivation is the other half — it keeps the PROMPT out of the channel in
 /// the first place (the outbound half).
-pub(crate) fn approval_target_for(event: &MessageEvent) -> String {
-    if event.platform == Platform::Buzz && event.chat_type == "channel" {
-        event.sender_id.clone()
-    } else {
-        event.chat_id.clone()
+pub fn approval_target_for(event: &MessageEvent) -> String {
+    match event.platform {
+        Platform::Buzz if event.chat_type == "channel" => event.sender_id.clone(),
+        // Discord and Slack: the prompt ALWAYS goes to the requester's own DM, for a
+        // channel- and a DM-originated turn alike, so the key is the requester's user
+        // id. The coordinator's adapter for these platforms is a `DmOnlyAdapter`, which
+        // reads this value as a user id (never a channel id). `handle_slash_command`
+        // resolves it by `event.sender_id` from a DM only.
+        Platform::Discord | Platform::Slack => event.sender_id.clone(),
+        _ => event.chat_id.clone(),
+    }
+}
+
+/// Phase 57 D-22: is `event`'s sender on the allowlist of the platform the message came
+/// from? The allowlist is the platform's own (`gateway.platforms.<name>.whitelist`) and
+/// an empty list denies everyone, exactly as each adapter's own gate does.
+///
+/// Each arm reuses the predicate the platform's adapter applies on receive, so the
+/// answer here cannot drift from "was this message admitted at all". Buzz's own
+/// predicate is private to its module; the arm below is the same rule (empty = deny,
+/// otherwise exact match on the hex sender id).
+pub(crate) fn sender_is_whitelisted(config: &Config, event: &MessageEvent) -> bool {
+    let list = |name: &str| -> &[String] {
+        config
+            .gateway
+            .platforms
+            .get(name)
+            .map(|p| p.whitelist.as_slice())
+            .unwrap_or(&[])
+    };
+    match &event.platform {
+        Platform::Telegram => {
+            crate::telegram::telegram_whitelist_allows(list("telegram"), &event.sender_id)
+        }
+        Platform::Discord => {
+            // Discord ids are u64 snowflakes; an entry or a sender that does not parse
+            // is never a match (the runner drops unparsable entries the same way).
+            let allowed: Vec<u64> = list("discord")
+                .iter()
+                .filter_map(|e| e.parse().ok())
+                .collect();
+            event
+                .sender_id
+                .parse::<u64>()
+                .is_ok_and(|id| crate::discord::discord_whitelist_allows(&allowed, id))
+        }
+        Platform::Slack => crate::slack::slack_whitelist_allows(list("slack"), &event.sender_id),
+        Platform::Buzz => {
+            let allowed = list("buzz");
+            !allowed.is_empty() && allowed.iter().any(|w| w == &event.sender_id)
+        }
+        // Webhook and the REST gateway authenticate by signature/key, not by a sender
+        // allowlist, and `/yolo` is refused for them outright. Every other platform has
+        // no gateway allowlist, so no sender on it can be vouched for.
+        _ => false,
     }
 }
 
@@ -4051,6 +5197,64 @@ mod tests {
         }
     }
 
+    /// Phase 57 D-22: the sender allowlist is the platform's own list, an empty list
+    /// denies everyone, a Discord id that is not a number is never a match, and a
+    /// platform with no allowlist concept can never be whitelisted.
+    #[test]
+    fn sender_is_whitelisted_dispatches_per_platform() {
+        let mut config = Config::default();
+        for (name, list) in [
+            ("telegram", "tg-1"),
+            ("discord", "42"),
+            ("slack", "U1"),
+            ("buzz", "abc123"),
+        ] {
+            config
+                .gateway
+                .platforms
+                .entry(name.to_string())
+                .or_default()
+                .whitelist = vec![list.to_string()];
+        }
+        let ev = |platform, sender: &str| approval_test_event(platform, "dm", "chat", sender);
+        let ok = |platform, sender: &str| sender_is_whitelisted(&config, &ev(platform, sender));
+
+        assert!(ok(Platform::Telegram, "tg-1"));
+        assert!(!ok(Platform::Telegram, "tg-2"));
+        assert!(ok(Platform::Discord, "42"));
+        assert!(!ok(Platform::Discord, "43"));
+        assert!(!ok(Platform::Discord, "not-a-number"));
+        assert!(ok(Platform::Slack, "U1"));
+        assert!(!ok(Platform::Slack, "U2"));
+        assert!(ok(Platform::Buzz, "abc123"));
+        assert!(!ok(Platform::Buzz, "abc124"));
+
+        // A sender id cannot borrow another platform's list.
+        assert!(!ok(Platform::Telegram, "42"));
+
+        // Empty list: deny all (D-12), on every platform.
+        let empty = Config::default();
+        for platform in [
+            Platform::Telegram,
+            Platform::Discord,
+            Platform::Slack,
+            Platform::Buzz,
+        ] {
+            assert!(!sender_is_whitelisted(&empty, &ev(platform, "tg-1")));
+        }
+
+        // Platforms with no allowlist: never.
+        for platform in [
+            Platform::Webhook,
+            Platform::ApiServer,
+            Platform::Web,
+            Platform::Local,
+            Platform::Whatsapp,
+        ] {
+            assert!(!ok(platform, "tg-1"));
+        }
+    }
+
     #[test]
     fn approval_target_for_telegram_is_the_chat_id() {
         let channel = approval_test_event(Platform::Telegram, "channel", "chat-1", "user-1");
@@ -4228,6 +5432,21 @@ mod tests {
              channel — every member would see it and any of them could answer it: \
              {recorded:?}"
         );
+    }
+
+    /// Discord and Slack approvals are DM-only: whether the turn started in a channel or
+    /// in a DM, the key is the requester's own id, never the channel/chat id.
+    #[test]
+    fn approval_target_for_discord_and_slack_is_the_requester() {
+        for (platform, channel, dm) in [
+            (Platform::Discord, "900", "800"),
+            (Platform::Slack, "C0CHANNEL", "D0DMCHAT"),
+        ] {
+            let from_channel = approval_test_event(platform.clone(), "group", channel, "user-1");
+            assert_eq!(approval_target_for(&from_channel), "user-1");
+            let from_dm = approval_test_event(platform.clone(), "dm", dm, "user-1");
+            assert_eq!(approval_target_for(&from_dm), "user-1");
+        }
     }
 
     #[test]
@@ -4419,5 +5638,181 @@ mod tests {
             notice.contains("https://example.com/x.png"),
             "notice must name the URL source: {notice}"
         );
+    }
+}
+
+#[cfg(test)]
+mod turn_deadline_tests {
+    //! Phase 54.8 D-07 — `with_turn_deadline` / `TurnBudgets` unit behaviors.
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[tokio::test]
+    async fn deadline_returns_inner_result_when_fast() {
+        let cancel = CancellationToken::new();
+        let out = with_turn_deadline(
+            async { Ok::<_, anyhow::Error>(7) },
+            &cancel,
+            Some(Duration::from_secs(1)),
+            ms(50),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, 7);
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn deadline_times_out_pending_future() {
+        let cancel = CancellationToken::new();
+        let start = Instant::now();
+        let err = with_turn_deadline(
+            std::future::pending::<Result<()>>(),
+            &cancel,
+            Some(ms(50)),
+            ms(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<TurnTimedOut>().is_some());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn deadline_bounds_grace_for_uncancellable_future() {
+        // Ignores cancellation entirely: only the bounded grace saves us.
+        let cancel = CancellationToken::new();
+        let start = Instant::now();
+        let err = with_turn_deadline(
+            async {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                Ok::<_, anyhow::Error>(())
+            },
+            &cancel,
+            Some(ms(50)),
+            ms(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<TurnTimedOut>().is_some());
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn deadline_reports_timeout_even_when_unwinding_cleanly() {
+        let cancel = CancellationToken::new();
+        let observed = cancel.clone();
+        let err = with_turn_deadline(
+            async move {
+                observed.cancelled().await;
+                Ok::<_, anyhow::Error>(1)
+            },
+            &cancel,
+            Some(ms(50)),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.downcast_ref::<TurnTimedOut>().is_some(),
+            "a clean unwind after expiry still reports the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_disabled_when_none() {
+        let cancel = CancellationToken::new();
+        let out = with_turn_deadline(
+            async {
+                tokio::time::sleep(ms(100)).await;
+                Ok::<_, anyhow::Error>("done")
+            },
+            &cancel,
+            None,
+            ms(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "done");
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn turn_budgets_from_config_and_ceiling() {
+        let cfg = ironhermes_core::config::GatewayConfig::default();
+        let b = TurnBudgets::from_gateway_config(&cfg);
+        assert_eq!(b.deadline, Some(Duration::from_secs(1800)));
+        assert_eq!(b.cancel_grace, Duration::from_secs(10));
+        assert_eq!(b.drain, Duration::from_secs(30));
+        assert_eq!(b.notice, Duration::from_secs(15));
+        assert_eq!(b.slack, Duration::from_secs(15));
+        assert_eq!(
+            b.handler_ceiling(),
+            Some(Duration::from_secs(1800 + 10 + 30 + 15 + 15))
+        );
+
+        let off = ironhermes_core::config::GatewayConfig {
+            turn_timeout_secs: 0,
+            ..cfg
+        };
+        let b = TurnBudgets::from_gateway_config(&off);
+        assert_eq!(b.deadline, None);
+        assert_eq!(b.handler_ceiling(), None);
+    }
+
+    #[test]
+    fn turn_timeout_notice_names_limit_and_key() {
+        let n = turn_timeout_notice(Duration::from_secs(1800));
+        assert!(n.contains(TURN_TIMEOUT_NOTICE_PREFIX));
+        assert!(n.contains("30 min"));
+        assert!(n.contains("gateway.turn_timeout_secs"));
+        // Rounds up, minimum 1.
+        assert!(turn_timeout_notice(Duration::from_secs(1)).contains("1 min"));
+        assert!(turn_timeout_notice(Duration::from_secs(61)).contains("2 min"));
+    }
+
+    #[test]
+    fn goal_runner_call_site_is_wrapped() {
+        // Needle built from fragments so this test never matches itself.
+        let needle = [".run_turn(", "request).await"].concat();
+        let src = include_str!("handler.rs");
+        assert!(
+            !src.contains(&needle),
+            "every run_turn await must go through with_turn_deadline"
+        );
+        assert!(
+            src.matches("with_turn_deadline(").count() >= 3,
+            "definition + normal path + /goal path"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mcp_paste_tests {
+    use super::{MCP_PASTE_TTL, pending_expired};
+    use std::time::{Duration, Instant};
+
+    /// Phase 54.8 D-15: the TTL decision is a pure function of three instants.
+    #[test]
+    fn pending_expired_is_a_pure_ttl_decision() {
+        let now = Instant::now();
+        let ttl = MCP_PASTE_TTL;
+        assert!(!pending_expired(now, now, ttl), "a fresh entry is live");
+        if let Some(old) = now.checked_sub(ttl + Duration::from_secs(1)) {
+            assert!(pending_expired(old, now, ttl), "older than the TTL expires");
+        }
+        if let Some(edge) = now.checked_sub(ttl) {
+            assert!(
+                !pending_expired(edge, now, ttl),
+                "exactly the TTL is still live"
+            );
+        }
+        // A creation time in the future (clock oddity) never counts as expired.
+        assert!(!pending_expired(now + Duration::from_secs(5), now, ttl));
     }
 }

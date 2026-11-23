@@ -47,71 +47,11 @@ use crate::server::tools_config_api::ConfigScope;
 use crate::server::webhook_route_api::{self, WebhookRouteView};
 use dioxus::prelude::*;
 
-use super::webhook_wizard::RouteEditorModal;
-
 // `WebhookRouteView::signature`/`deliver` are already plain, human-readable
 // `snake_case` strings (`"generic_v2"`, `"url"`, ...) — no enum <-> label
 // mapping is needed here; `ironhermes_core::webhook_route`'s typed enums
 // are native-only (`webhook_route_api.rs`'s module doc) and unavailable on
 // this file's wasm compile target anyway.
-
-#[component]
-pub fn WebhookRouteCards(scope: ReadSignal<ConfigScope>, refresh_tick: Signal<u32>) -> Element {
-    // ALL hooks register unconditionally on every render (Pattern E).
-    let routes_resource = use_resource(move || {
-        let scope_value = scope();
-        let _tick = refresh_tick();
-        async move { webhook_route_api::list_webhook_routes(scope_value).await }
-    });
-    // E4 empty/error: an in-flight or failed fetch renders zero extra
-    // cards (covered by the parent grid's own skeleton/fallback, E4
-    // loading/error rows) — never a broken/blank card of its own.
-    let routes: Vec<WebhookRouteView> = match routes_resource() {
-        Some(Ok(list)) => list,
-        _ => Vec::new(),
-    };
-
-    // CONFIGURE target — `None` means no editor is open. Local to this
-    // component (see module doc's "CONFIGURE reuses RouteEditorModal"
-    // section).
-    let mut editing_route: Signal<Option<WebhookRouteView>> = use_signal(|| None);
-    // REMOVE ROUTE confirm — the route NAME pending destructive
-    // confirmation, or `None`.
-    let confirm_remove: Signal<Option<String>> = use_signal(|| None);
-    let remove_error: Signal<Option<String>> = use_signal(|| None);
-
-    let editing_val = editing_route.read().clone();
-    let confirm_remove_val = confirm_remove.read().clone();
-
-    rsx! {
-        for route in routes.iter() {
-            WebhookRouteCard {
-                key: "{route.name}",
-                route: route.clone(),
-                editing_route,
-                confirm_remove,
-            }
-        }
-        if let Some(name) = confirm_remove_val {
-            RemoveRouteConfirm {
-                name,
-                scope,
-                refresh_tick,
-                confirm_remove,
-                remove_error,
-            }
-        }
-        if let Some(route) = editing_val {
-            RouteEditorModal {
-                initial: route,
-                is_new: false,
-                scope,
-                refresh_tick,
-                on_close: move |_| editing_route.set(None),
-            }
-        }
-    }
-}
 
 /// One route's grid card. `.plat-name`/path subtitle each carry a native
 /// `title` attribute holding the untruncated value plus an inline
@@ -122,7 +62,7 @@ pub fn WebhookRouteCards(scope: ReadSignal<ConfigScope>, refresh_tick: Signal<u3
 /// a configured webhook route has no chat-count/connection concept, the
 /// same as the stub's disconnected pattern).
 #[component]
-fn WebhookRouteCard(
+pub(super) fn WebhookRouteCard(
     route: WebhookRouteView,
     mut editing_route: Signal<Option<WebhookRouteView>>,
     mut confirm_remove: Signal<Option<String>>,
@@ -176,7 +116,7 @@ fn WebhookRouteCard(
 /// REMOVE ROUTE destructive confirm — Copywriting Contract's exact copy,
 /// naming the route and its path.
 #[component]
-fn RemoveRouteConfirm(
+pub(super) fn RemoveRouteConfirm(
     name: String,
     scope: ReadSignal<ConfigScope>,
     mut refresh_tick: Signal<u32>,

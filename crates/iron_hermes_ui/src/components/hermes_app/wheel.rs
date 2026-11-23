@@ -2,21 +2,47 @@
 //!
 //! Ports `crates/iron_hermes_ui/filestoimport/ironhermes-design-system/project/wheel-v2.js`
 //! into a self-contained Dioxus 0.7 component. Renders a draggable, resizable
-//! 11-wedge SVG wheel with hover/click navigation. Geometry constants match
-//! `wheel-v2.js` lines 26-37 byte-for-byte for the original 10 wedges; the
-//! 11th wedge (`Kanban`) was added in Phase 36.3.7.11 Plan 04 per D-02.
+//! 10-wedge SVG wheel with hover/click navigation. Geometry constants match
+//! `wheel-v2.js` lines 26-37 byte-for-byte. (Phase 54.4 removed the 11th
+//! `Kanban` wedge; the header KANBAN shortcut button covers it.)
 //!
-//! Canonical 11-wedge order — 10 from `wheel-v2.js` DEFAULT_SECTIONS
-//! (CONTEXT D-10) + `Kanban` (Phase 36.3.7.11 D-02):
+//! Canonical 10-wedge order from `wheel-v2.js` DEFAULT_SECTIONS
+//! (CONTEXT D-10):
 //!   chat, agents, models, tools, skills, memory, sessions, providers,
-//!   gateway, settings, kanban
+//!   gateway, settings
+//!
+//! Phase 54.4 Plan 01 (D-05, D-26): the wheel is now DOCKED in the persistent
+//! header (`header::Header`, grid column 1) via `Wheel { docked: true }`. A
+//! docked wheel is fixed at `--ih-wheel-size` and stays the full 10-wedge
+//! launcher, but it has no rim drag, no resize ring, no `DRAG TO MOVE`
+//! tooltip and no inline `left`/`top`; a stored `ih.ui.wheel` `WheelState`
+//! position/size is ignored (never read for layout, never rewritten). It also
+//! has NO hover/focus magnify, scale or transform (D-26): the wheel box is
+//! taller than the banner and simply overhangs it by layout. The floating
+//! (drag/resize) path below is kept behind `docked == false` and `WheelState`
+//! is retained, so a future "undock" option is a one-prop change.
+//!
+//! Phase 57 R9b: while any approval card waits on the operator (or has a decision in
+//! flight), the CHAT wedge — the only Chat nav item — carries one small amber badge
+//! (`wheel-approval-badge`, an SVG circle with `aria-label` "Approval pending" and no text)
+//! so an operator on another screen is not denied silently by the approval timeout. It is
+//! read from `ApprovalCardsCtx`, clears when every card has resolved or the socket drops,
+//! and plays no sound and writes no notice.
+//!
+//! Colours: the wheel's colours live in `wheel.css` on theme variables plus
+//! `--wheel-accent` / `--wheel-accent-bright` (Phase 54.4 Plan 12, G-54.4-3);
+//! the render code below carries class names only, never a colour attribute.
 //!
 //! Interactions (CONTEXT D-11 / wheel-v2.js parity):
 //! - Hover wedge → set `WheelState.active_wedge`
 //! - Click wedge → set wedge AND `active_screen = wedge.to_screen()`
 //! - Click hub → launch currently-active wedge
-//! - Drag rim → translate `WheelState.position` (window-level pointermove)
+//! - Drag rim → translate `WheelState.position` (window-level pointermove;
+//!   floating mode only)
 //! - Drag resize ring → rescale `WheelState.size` clamped [MIN_SIZE, MAX_SIZE]
+//!   (floating mode only)
+//! - Every wedge carries an SVG `title`, an `aria-label`, `role="link"` and
+//!   `tabindex="0"`; Enter / Space navigate exactly like a click.
 //!
 //! Window-level pointermove + pointerup listeners are installed via the
 //! `listener_slot: Signal<Option<Closure>>` + `use_drop` idiom mirrored from
@@ -38,7 +64,11 @@
 //! scopes every ~4s. See the doc comment on the window-listener block below
 //! for the full mechanism.
 
-use crate::state::{Screen, WheelState, WheelWedge};
+use crate::components::hermes_app::screens::chat::approval_card::{
+    any_approval_pending, ApprovalCardsCtx,
+};
+use crate::menu_layout::{catalog_entry, MenuLayout};
+use crate::state::{Screen, WheelState};
 #[cfg(target_arch = "wasm32")]
 use dioxus::core::use_drop;
 use dioxus::html::input_data::MouseButton;
@@ -56,13 +86,13 @@ pub const SIZE: f64 = 380.0;
 pub const R_OUTER: f64 = 190.0;
 /// Inner hub radius.
 #[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
-pub const R_INNER: f64 = 78.0;
+pub const R_INNER: f64 = 68.0;
 /// Radius of label text ring.
 #[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
-pub const R_LABEL: f64 = 148.0;
+pub const R_LABEL: f64 = 152.0;
 /// Radius of glyph ring.
 #[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
-pub const R_GLYPH: f64 = 118.0;
+pub const R_GLYPH: f64 = 112.0;
 /// Gap between rim and the floating resize ring.
 #[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const RING_GAP: f64 = 14.0;
@@ -75,11 +105,14 @@ pub const PAD: f64 = 22.0;
 /// Total viewBox extent — `SIZE + PAD * 2`.
 #[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const VB: f64 = SIZE + PAD * 2.0;
+/// Shipped-default wedge count. The docked wheel's live count is the configured wheel
+/// list length (6..=11, Phase 54.9 D-04); this constant is the default and the pinned
+/// 54.4 parity value.
+///
 /// Number of wedges — 10 canonical (CONTEXT D-10 / wheel-v2.js DEFAULT_SECTIONS:
-/// chat, agents, models, tools, skills, memory, sessions, providers, gateway, settings)
-/// plus `kanban` (Phase 36.3.7.11 D-02 wheel-nav addition).
+/// chat, agents, models, tools, skills, memory, sessions, providers, gateway, settings).
 #[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
-pub const N: usize = 11;
+pub const N: usize = 10;
 /// Per-wedge angular step — `360 / N`.
 #[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const STEP: f64 = 360.0 / N as f64;
@@ -125,6 +158,100 @@ pub fn wedge_path(ang_a: f64, ang_b: f64, r_inner: f64, r_outer: f64) -> String 
 }
 
 // ---------------------------------------------------------------------------
+// Phase 54.4 Plan 01 — docked-mode pure helpers.
+// ---------------------------------------------------------------------------
+
+/// Class list of the `wheel-shell` div. The `--docked` modifier switches the
+/// shell from `position: fixed` to an in-flow header-grid child.
+pub(crate) fn wheel_shell_class(docked: bool) -> &'static str {
+    if docked {
+        "wheel-shell wheel-shell--docked"
+    } else {
+        "wheel-shell"
+    }
+}
+
+/// Inline `style` of the `wheel-shell` div. Docked: size comes from the
+/// `--ih-wheel-size` token and NO `left`/`top` is emitted (the stored
+/// `WheelState` position/size is ignored — T-54.4-01). Floating: today's
+/// string.
+pub(crate) fn wheel_shell_style(docked: bool, size: f64, px: f64, py: f64) -> String {
+    if docked {
+        "--wheel-size: var(--ih-wheel-size);".to_string()
+    } else {
+        format!("--wheel-size: {size}px; left: {px}px; top: {py}px;")
+    }
+}
+
+/// Whether `key` activates a wedge from the keyboard (Enter or Space), the
+/// same way a click does.
+pub(crate) fn is_wedge_activation_key(key: &Key) -> bool {
+    match key {
+        Key::Enter => true,
+        Key::Character(c) => c == " ",
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 54.9 (D-04) — n-driven geometry and the configured wheel list.
+// ---------------------------------------------------------------------------
+
+/// Per-wedge angular step for an `n`-section wheel.
+pub fn step(n: usize) -> f64 {
+    360.0 / n as f64
+}
+
+/// Wedge label font-size: 15.5 up to ten sections, 13.5 at eleven so a nine-character
+/// label still fits the narrower chord.
+pub(crate) fn label_font_size(n: usize) -> &'static str {
+    if n <= 10 {
+        "15.5"
+    } else {
+        "13.5"
+    }
+}
+
+/// One resolved wedge: the screen it opens, its (uppercased) label, and the catalog
+/// glyph and hub sub-line, which never change with a rename (D-02).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WheelItem {
+    pub screen: Screen,
+    pub label: String,
+    pub glyph: &'static str,
+    pub sub: &'static str,
+    pub is_chat: bool,
+}
+
+/// Resolve the configured wheel list through the catalog. Unknown ids are skipped
+/// (a validated layout has none).
+pub(crate) fn wheel_items(layout: &MenuLayout) -> Vec<WheelItem> {
+    layout
+        .wheel
+        .iter()
+        .filter_map(|e| {
+            let c = catalog_entry(&e.screen)?;
+            Some(WheelItem {
+                screen: c.screen,
+                label: e.label.to_uppercase(),
+                glyph: c.glyph,
+                sub: c.sub,
+                is_chat: c.screen == Screen::Chat,
+            })
+        })
+        .collect()
+}
+
+/// A persisted active index that no longer exists after an edit falls back to Chat.
+pub(crate) fn clamp_active(active: usize, items: &[WheelItem]) -> usize {
+    if active < items.len() {
+        active
+    } else {
+        items.iter().position(|i| i.is_chat).unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Drag / resize internal state types.
 // ---------------------------------------------------------------------------
 
@@ -162,13 +289,29 @@ struct ResizeState {
 // Wheel component — the SVG primitive itself.
 // ---------------------------------------------------------------------------
 
-/// The wheel SVG primitive — 11 wedges + 60 ticks + hub + resize ring +
+/// The wheel SVG primitive — 10 wedges + 60 ticks + hub + resize ring +
 /// floating tooltip. Reads/writes `Signal<WheelState>` and `Signal<Screen>`
 /// from context (Plan 03 root provides both).
+///
+/// `docked: true` (Phase 54.4, D-05) mounts it fixed in the header grid:
+/// no drag, no resize ring, no tooltip, no inline position.
 #[component]
-pub fn Wheel() -> Element {
+pub fn Wheel(#[props(default)] docked: bool) -> Element {
     let mut wheel = use_context::<Signal<WheelState>>();
     let mut active_screen = use_context::<Signal<Screen>>();
+    // Phase 57 R9b: the approval-card map, provided at the HermesApp root. Snapshotted into an
+    // owned bool before the rsx tree; reading it here subscribes the wheel, so the badge
+    // appears and clears as cards change state.
+    let approval_cards = use_context::<ApprovalCardsCtx>().0;
+    let approval_pending = any_approval_pending(&approval_cards.read());
+    // Phase 54.9 (D-04, D-06): the configured wheel list; `.read()` so an edit re-renders.
+    let menu = use_context::<crate::components::hermes_app::MenuCtx>();
+    let mut items: Vec<WheelItem> = wheel_items(&menu.layout.read());
+    if items.is_empty() {
+        items = wheel_items(&crate::menu_layout::default_layout());
+    }
+    let n = items.len();
+    let wedge_step = step(n);
 
     // Local gesture state (UAT round 2 fix B). Deliberately a plain
     // `Rc<Cell<...>>`, NOT a `Signal` — see the fix-B doc comment on the
@@ -193,7 +336,12 @@ pub fn Wheel() -> Element {
     // emit `wheel.write()` mutations inside event handlers below).
     let (px, py, size, active) = {
         let s = wheel.read();
-        (s.position.0, s.position.1, s.size, s.active_wedge.index())
+        (
+            s.position.0,
+            s.position.1,
+            s.size,
+            clamp_active(s.active_index, &items),
+        )
     };
     let viewbox_min = -(R_OUTER + PAD);
     let viewbox = format!("{viewbox_min} {viewbox_min} {VB} {VB}");
@@ -388,15 +536,19 @@ pub fn Wheel() -> Element {
     let tt_xform = format!("translate({tx}px, {ty}px)");
 
     // Hub label / sub from the currently-active wedge.
-    let active_wedge = WheelWedge::from_index(active);
-    let hub_label_text = active_wedge.label();
-    let hub_sub_text = active_wedge.sub();
+    let hub_label_text = items[active].label.clone();
+    let hub_sub_text = items[active].sub;
+    let hub_screen = items[active].screen;
+    let font_size = label_font_size(n);
+
+    let shell_class = wheel_shell_class(docked);
+    let shell_style = wheel_shell_style(docked, size, px, py);
 
     rsx! {
         div {
-            class: "wheel-shell",
+            class: "{shell_class}",
             id: "wheel-shell",
-            style: "--wheel-size: {size}px; left: {px}px; top: {py}px;",
+            style: "{shell_style}",
 
             svg {
                 class: "wheel-svg",
@@ -407,17 +559,18 @@ pub fn Wheel() -> Element {
                     radialGradient {
                         id: "hub-grad",
                         cx: "40%", cy: "40%", r: "70%",
-                        stop { offset: "0%",  "stop-color": "#1f2934" }
-                        stop { offset: "55%", "stop-color": "#121820" }
-                        stop { offset: "100%", "stop-color": "#070b10" }
+                        stop { offset: "0%",  class: "hub-stop hub-stop--hi" }
+                        stop { offset: "55%", class: "hub-stop hub-stop--mid" }
+                        stop { offset: "100%", class: "hub-stop hub-stop--lo" }
                     }
-                    radialGradient {
-                        id: "hub-grad-hover",
-                        cx: "40%", cy: "40%", r: "70%",
-                        stop { offset: "0%",  "stop-color": "#1d3a44" }
-                        stop { offset: "55%", "stop-color": "#0c2329" }
-                        stop { offset: "100%", "stop-color": "#06141a" }
-                    }
+                }
+
+                // ── Opaque backing disc (G-54.4-3): wedges paint on the theme
+                // card surface, never on scrolled content behind the wheel ──
+                circle {
+                    class: "wheel-backing",
+                    cx: "0", cy: "0", r: "{R_OUTER}",
+                    "pointer-events": "none",
                 }
 
                 // ── Rim decoration rings (static) ──
@@ -447,17 +600,17 @@ pub fn Wheel() -> Element {
                             let r2 = R_OUTER - if i % 5 == 0 { 22.0 } else { 18.0 };
                             let (x1f, y1f) = (ang.cos() * r1, ang.sin() * r1);
                             let (x2f, y2f) = (ang.cos() * r2, ang.sin() * r2);
-                            let color = if i % 5 == 0 {
-                                "rgba(57,197,207,0.55)"
+                            let tick_cls = if i % 5 == 0 {
+                                "wheel-tick wheel-tick--major"
                             } else {
-                                "rgba(110,118,129,0.35)"
+                                "wheel-tick wheel-tick--minor"
                             };
                             rsx! {
                                 line {
                                     key: "{i}",
                                     x1: "{x1f}", y1: "{y1f}",
                                     x2: "{x2f}", y2: "{y2f}",
-                                    stroke: "{color}", "stroke-width": "1",
+                                    class: "{tick_cls}", "stroke-width": "1",
                                 }
                             }
                         }
@@ -482,7 +635,6 @@ pub fn Wheel() -> Element {
                         path {
                             id: "wheel-rim",
                             class: "wheel-rim",
-                            fill: "rgba(57,197,207,0.001)",
                             "fill-rule": "evenodd",
                             d: "{d}",
                             onpointerdown: {
@@ -493,6 +645,10 @@ pub fn Wheel() -> Element {
                                 // `Signal`.
                                 let drag_state = drag_state.clone();
                                 move |e| {
+                                    // Docked wheel (D-05): the rim is inert.
+                                    if docked {
+                                        return;
+                                    }
                                     // Begin drag-rim translate. Per wheel-v2.js
                                     // line 391: only primary mouse button.
                                     if e.trigger_button() != Some(MouseButton::Primary) {
@@ -529,17 +685,29 @@ pub fn Wheel() -> Element {
                     }
                 }
 
-                // ── Wedges (N=11) — reactive is-active class ──
+                // ── Wedges (n from the layout) — reactive is-active class ──
                 g { id: "wheel-wedges",
-                    for i in 0..N {
+                    for i in 0..n {
                         {
-                            let ang_a = (i as f64) * STEP - STEP / 2.0;
-                            let ang_b = ((i + 1) as f64) * STEP - STEP / 2.0;
+                            let ang_a = (i as f64) * wedge_step - wedge_step / 2.0;
+                            let ang_b = ((i + 1) as f64) * wedge_step - wedge_step / 2.0;
                             let d = wedge_path(ang_a, ang_b, R_INNER + 8.0, R_OUTER - 30.0);
                             let cls = if i == active {
                                 "wheel-wedge is-active"
                             } else {
                                 "wheel-wedge"
+                            };
+                            let wedge_label = items[i].label.clone();
+                            let target = items[i].screen;
+                            // Shared by click and Enter/Space so keyboard
+                            // navigation is byte-for-byte the click path.
+                            let mut activate = move || {
+                                // Pitfall 6 ordering: write wedge first, compute
+                                // target from the new value, set screen.
+                                wheel.with_mut(|s| {
+                                    s.active_index = i;
+                                });
+                                active_screen.set(target);
                             };
                             rsx! {
                                 path {
@@ -547,32 +715,38 @@ pub fn Wheel() -> Element {
                                     class: "{cls}",
                                     "data-i": "{i}",
                                     d: "{d}",
+                                    // Docked wedges are too small for a legible
+                                    // label (D-26), so each carries its screen
+                                    // name as an SVG title + aria-label and is a
+                                    // keyboard stop.
+                                    role: "link",
+                                    "aria-label": "{wedge_label}",
+                                    tabindex: "0",
                                     onmouseenter: move |_| {
                                         // Pitfall 6 ordering: write wedge first.
                                         wheel.with_mut(|s| {
-                                            s.active_wedge = WheelWedge::from_index(i);
+                                            s.active_index = i;
                                         });
                                     },
-                                    onclick: move |_| {
-                                        // Pitfall 6 ordering: write wedge first, compute
-                                        // target from the new value, set screen.
-                                        wheel.with_mut(|s| {
-                                            s.active_wedge = WheelWedge::from_index(i);
-                                        });
-                                        let target = WheelWedge::from_index(i).to_screen();
-                                        active_screen.set(target);
+                                    onclick: move |_| activate(),
+                                    onkeydown: move |e: KeyboardEvent| {
+                                        if is_wedge_activation_key(&e.key()) {
+                                            e.prevent_default();
+                                            activate();
+                                        }
                                     },
+                                    title { "{wedge_label}" }
                                 }
                             }
                         }
                     }
                 }
 
-                // ── Separators (N=11 lines, non-interactive) ──
+                // ── Separators (n lines, non-interactive) ──
                 g { id: "wheel-seps", "pointer-events": "none",
-                    for i in 0..N {
+                    for i in 0..n {
                         {
-                            let ang_a = (i as f64) * STEP - STEP / 2.0;
+                            let ang_a = (i as f64) * wedge_step - wedge_step / 2.0;
                             let (sx, sy) = polar(ang_a, R_INNER + 8.0);
                             let (ex, ey) = polar(ang_a, R_OUTER - 30.0);
                             rsx! {
@@ -580,7 +754,7 @@ pub fn Wheel() -> Element {
                                     key: "{i}",
                                     x1: "{sx}", y1: "{sy}",
                                     x2: "{ex}", y2: "{ey}",
-                                    stroke: "rgba(57,197,207,0.22)",
+                                    class: "wheel-sep",
                                     "stroke-width": "1",
                                 }
                             }
@@ -588,12 +762,12 @@ pub fn Wheel() -> Element {
                     }
                 }
 
-                // ── Glyph + label texts (22 nodes: 11 wedges × 2 text per wedge) ──
+                // ── Glyph + label texts (20 nodes: 10 wedges × 2 text per wedge) ──
                 g { id: "wheel-text", "pointer-events": "none",
-                    for i in 0..N {
+                    for i in 0..n {
                         {
-                            let mid = (i as f64) * STEP;
-                            let wedge = WheelWedge::from_index(i);
+                            let mid = (i as f64) * wedge_step;
+                            let wedge = &items[i];
                             let (gx, gy) = polar(mid, R_GLYPH);
                             let (lx, ly) = polar(mid, R_LABEL);
                             let g_cls = if i == active {
@@ -608,17 +782,22 @@ pub fn Wheel() -> Element {
                             };
                             let g_xform = format!("rotate({mid} {gx} {gy})");
                             let l_xform = format!("rotate({mid} {lx} {ly})");
-                            let gy5 = gy + 5.0;
-                            let ly3 = ly + 3.0;
-                            let glyph_text = wedge.glyph();
-                            let label_text = wedge.label();
+                            let gy5 = gy + 9.0;
+                            let ly3 = ly + 5.0;
+                            let glyph_text = wedge.glyph;
+                            let label_text = wedge.label.clone();
+                            // Phase 57 R9b: the pending-approval badge sits up and to the
+                            // right of the CHAT glyph (the only Chat nav item), inside the
+                            // viewBox. Bare circle: no text, no sound, no notice.
+                            let show_badge = approval_pending && wedge.is_chat;
+                            let badge_cx = gx + 16.0;
+                            let badge_cy = gy - 14.0;
                             rsx! {
                                 text {
                                     key: "{i}",
                                     x: "{gx}", y: "{gy5}",
                                     "text-anchor": "middle",
-                                    "font-size": "15",
-                                    fill: "rgba(57,197,207,0.65)",
+                                    "font-size": "28",
                                     class: "{g_cls}",
                                     "data-i": "{i}",
                                     transform: "{g_xform}",
@@ -628,14 +807,21 @@ pub fn Wheel() -> Element {
                                     x: "{lx}", y: "{ly3}",
                                     "text-anchor": "middle",
                                     "font-family": "JetBrains Mono, monospace",
-                                    "font-size": "9",
+                                    "font-size": "{font_size}",
                                     "font-weight": "700",
-                                    "letter-spacing": "2",
-                                    fill: "#9aa4ad",
+                                    "letter-spacing": "0.5",
                                     class: "{l_cls}",
                                     "data-i": "{i}",
                                     transform: "{l_xform}",
                                     "{label_text}"
+                                }
+                                if show_badge {
+                                    circle {
+                                        class: "wheel-approval-badge",
+                                        cx: "{badge_cx}", cy: "{badge_cy}", r: "6",
+                                        role: "img",
+                                        "aria-label": "Approval pending",
+                                    }
                                 }
                             }
                         }
@@ -648,7 +834,8 @@ pub fn Wheel() -> Element {
                     rsx! {
                         circle {
                             cx: "0", cy: "0", r: "{r_inner_plus_6}",
-                            fill: "none", stroke: "rgba(57,197,207,0.22)",
+                            class: "wheel-inner-ring",
+                            fill: "none",
                             "stroke-width": "1", "pointer-events": "none",
                         }
                     }
@@ -666,73 +853,65 @@ pub fn Wheel() -> Element {
                             onclick: move |_| {
                                 // Snapshot target before signal write to avoid
                                 // holding the read borrow across .set().
-                                let target = {
-                                    let s = wheel.read();
-                                    s.active_wedge.to_screen()
-                                };
-                                active_screen.set(target);
+                                active_screen.set(hub_screen);
                             },
                             circle {
                                 id: "hub-bg",
                                 cx: "0", cy: "0", r: "{R_INNER}",
                                 fill: "url(#hub-grad)",
-                                stroke: "rgba(57,197,207,0.55)",
                                 "stroke-width": "1",
                             }
                             circle {
                                 cx: "0", cy: "0", r: "{r_inner_minus_6}",
-                                fill: "none", stroke: "rgba(57,197,207,0.18)",
+                                class: "hub-ring hub-ring--inner",
+                                fill: "none",
                             }
                             circle {
                                 cx: "0", cy: "0", r: "{r_inner_minus_14}",
-                                fill: "none", stroke: "rgba(57,197,207,0.10)",
+                                class: "hub-ring hub-ring--dashed",
+                                fill: "none",
                                 "stroke-dasharray": "2 3",
                             }
                             circle {
                                 id: "hub-aura",
                                 cx: "0", cy: "0", r: "{r_inner_minus_4}",
-                                fill: "rgba(57,197,207,0.0)",
                             }
 
                             text {
                                 id: "hub-glyph",
-                                x: "0", y: "-22",
+                                x: "0", y: "-26",
                                 "text-anchor": "middle",
                                 "font-family": "JetBrains Mono, monospace",
-                                "font-size": "16",
-                                fill: "#56d4dd",
+                                "font-size": "18",
                                 "▶"
                             }
                             text {
                                 id: "hub-label",
-                                x: "0", y: "-2",
+                                x: "0", y: "-4",
                                 "text-anchor": "middle",
                                 "font-family": "JetBrains Mono, monospace",
-                                "font-size": "13",
+                                "font-size": "16",
                                 "font-weight": "700",
-                                fill: "#e6edf3",
-                                "letter-spacing": "2.5",
+                                "letter-spacing": "1",
                                 "{hub_label_text}"
                             }
                             text {
                                 id: "hub-sub",
-                                x: "0", y: "14",
+                                x: "0", y: "11",
                                 "text-anchor": "middle",
                                 "font-family": "JetBrains Mono, monospace",
-                                "font-size": "6.5",
-                                fill: "#6e7681",
-                                "letter-spacing": "3",
+                                "font-size": "9",
+                                "letter-spacing": "0.6",
                                 "{hub_sub_text}"
                             }
                             text {
                                 id: "hub-cta",
-                                x: "0", y: "30",
+                                x: "0", y: "28",
                                 "text-anchor": "middle",
                                 "font-family": "JetBrains Mono, monospace",
-                                "font-size": "7",
+                                "font-size": "9",
                                 "font-weight": "700",
-                                fill: "#39c5cf",
-                                "letter-spacing": "3",
+                                "letter-spacing": "1.5",
                                 "▸ LAUNCH"
                             }
                         }
@@ -747,7 +926,6 @@ pub fn Wheel() -> Element {
                     rsx! {
                         polygon {
                             points: "{points}",
-                            fill: "#39c5cf",
                             id: "hub-arrow",
                             "pointer-events": "none",
                         }
@@ -755,7 +933,9 @@ pub fn Wheel() -> Element {
                 }
 
                 // ── Resize ring (3 nested circles) + 4 orbit nodes ──
-                {
+                // Floating mode only: a docked wheel is not resizable (D-05).
+                if !docked {
+                  {
                     let r_resize = R_OUTER + RING_GAP;
                     let r_orbit = R_OUTER + RING_GAP + 7.0;
                     let glow_width = RING_W + 6.0;
@@ -764,14 +944,14 @@ pub fn Wheel() -> Element {
                         circle {
                             id: "resize-glow",
                             cx: "0", cy: "0", r: "{r_resize}",
-                            fill: "none", stroke: "rgba(255,166,87,0.0)",
+                            fill: "none",
                             "stroke-width": "{glow_width}",
                             "pointer-events": "none",
                         }
                         circle {
                             id: "resize-orbit",
                             cx: "0", cy: "0", r: "{r_orbit}",
-                            fill: "none", stroke: "rgba(255,166,87,0.30)",
+                            fill: "none",
                             "stroke-width": "1",
                             "stroke-dasharray": "1 6",
                             "pointer-events": "none",
@@ -780,7 +960,7 @@ pub fn Wheel() -> Element {
                             id: "resize-ring",
                             class: "resize-ring",
                             cx: "0", cy: "0", r: "{r_resize}",
-                            fill: "none", stroke: "rgba(255,166,87,0.55)",
+                            fill: "none",
                             "stroke-width": "{RING_W}",
                             "pointer-events": "stroke",
                             onpointerdown: {
@@ -821,23 +1001,27 @@ pub fn Wheel() -> Element {
                             },
                         }
                         g { id: "resize-nodes", "pointer-events": "none",
-                            circle { cx: "{r_resize}",     cy: "0",            r: "3", fill: "#ffa657" }
-                            circle { cx: "{neg_r_resize}", cy: "0",            r: "3", fill: "#ffa657" }
-                            circle { cx: "0",              cy: "{r_resize}",   r: "3", fill: "#ffa657" }
-                            circle { cx: "0",              cy: "{neg_r_resize}", r: "3", fill: "#ffa657" }
+                            circle { cx: "{r_resize}",     cy: "0",            r: "3" }
+                            circle { cx: "{neg_r_resize}", cy: "0",            r: "3" }
+                            circle { cx: "0",              cy: "{r_resize}",   r: "3" }
+                            circle { cx: "0",              cy: "{neg_r_resize}", r: "3" }
                         }
                     }
+                  }
                 }
             }
 
             // ── Floating tooltip (Pattern 2 tooltip block) ──
-            div {
-                class: "{tt_cls}",
-                id: "wheel-tooltip",
-                "aria-hidden": "true",
-                style: "transform: {tt_xform};",
-                span { class: "wheel-tooltip-glyph", "{tt_glyph}" }
-                span { class: "wheel-tooltip-label", "{tt_label}" }
+            // Floating mode only: the docked wheel has no "DRAG TO MOVE" hint.
+            if !docked {
+                div {
+                    class: "{tt_cls}",
+                    id: "wheel-tooltip",
+                    "aria-hidden": "true",
+                    style: "transform: {tt_xform};",
+                    span { class: "wheel-tooltip-glyph", "{tt_glyph}" }
+                    span { class: "wheel-tooltip-label", "{tt_label}" }
+                }
             }
         }
     }
@@ -857,20 +1041,19 @@ mod tests {
         // wheel-v2.js lines 26-37 — exact values.
         assert_eq!(SIZE, 380.0);
         assert_eq!(R_OUTER, 190.0);
-        assert_eq!(R_INNER, 78.0);
-        assert_eq!(R_LABEL, 148.0);
-        assert_eq!(R_GLYPH, 118.0);
+        assert_eq!(R_INNER, 68.0);
+        assert_eq!(R_LABEL, 152.0);
+        assert_eq!(R_GLYPH, 112.0);
         assert_eq!(RING_GAP, 14.0);
         assert_eq!(RING_W, 4.0);
         assert_eq!(PAD, 22.0);
         assert_eq!(VB, 424.0);
-        // CONTEXT D-10 + Phase 36.3.7.11 D-02: 11 wedges total (10 from
-        // wheel-v2.js DEFAULT_SECTIONS + Kanban).
-        assert_eq!(N, 11);
-        let expected_step = 360.0_f64 / 11.0;
+        // CONTEXT D-10 (Phase 54.4: Kanban wedge removed): 10 wedges total.
+        assert_eq!(N, 10);
+        let expected_step = 360.0_f64 / 10.0;
         assert!(
             (STEP - expected_step).abs() < 1e-9,
-            "STEP={STEP} expected={expected_step} (11 wedges)"
+            "STEP={STEP} expected={expected_step} (10 wedges)"
         );
         // wheel-v2.js lines 426-427 + Pitfall 4 floor.
         assert_eq!(MIN_SIZE, 240.0);
@@ -911,8 +1094,7 @@ mod tests {
 
     #[test]
     fn wedge_path_renders_all_wedges() {
-        // Smoke: every wedge index produces a non-empty path. N=11 after
-        // Phase 36.3.7.11 D-02 added the Kanban wedge.
+        // Smoke: every wedge index produces a non-empty path. N=10.
         for i in 0..N {
             let ang_a = (i as f64) * STEP - STEP / 2.0;
             let ang_b = ((i + 1) as f64) * STEP - STEP / 2.0;
@@ -952,17 +1134,344 @@ mod tests {
 
     #[test]
     fn step_tiles_full_circle() {
-        // CONTEXT D-10 + Phase 36.3.7.11 D-02: 11 wedges exactly tile the
-        // circle, so STEP = 360 / N ≈ 32.727°. The float STEP must equal
-        // 360.0 / 11.0 to within 1e-9.
-        let expected = 360.0_f64 / 11.0;
+        // CONTEXT D-10: 10 wedges exactly tile the circle, so
+        // STEP = 360 / N = 36°. The float STEP must equal 360.0 / 10.0 to
+        // within 1e-9.
+        let expected = 360.0_f64 / 10.0;
         assert!(
             (STEP - expected).abs() < 1e-9,
             "STEP={STEP} expected={expected}"
         );
         assert!(
             (STEP * N as f64 - 360.0).abs() < 1e-9,
-            "11 wedges × STEP must exactly tile 360°"
+            "10 wedges × STEP must exactly tile 360°"
+        );
+    }
+
+    #[test]
+    fn wedge_activation_keys_are_enter_and_space_only() {
+        assert!(is_wedge_activation_key(&Key::Enter));
+        assert!(is_wedge_activation_key(&Key::Character(" ".to_string())));
+        assert!(!is_wedge_activation_key(&Key::Character("a".to_string())));
+        assert!(!is_wedge_activation_key(&Key::Escape));
+        assert!(!is_wedge_activation_key(&Key::Tab));
+    }
+
+    #[test]
+    fn longest_label_fits_inside_its_wedge_at_label_radius() {
+        // Label letter-spacing 0.5, JetBrains Mono advance 0.6em. The text is
+        // tangential, so a nine-character label must fit the chord of an
+        // n-section wedge at the label's INNER edge, for every allowed n.
+        use crate::menu_layout::{WHEEL_MAX, WHEEL_MIN};
+        let spacing = 0.5_f64;
+        let r = |v: f64| std::hint::black_box(v);
+        for n in WHEEL_MIN..=WHEEL_MAX {
+            let font: f64 = label_font_size(n).parse().unwrap();
+            let longest = 9.0_f64;
+            let width = longest * (font * 0.6) + (longest - 1.0) * spacing;
+            let inner_edge = R_LABEL - font * 0.37;
+            let chord = 2.0 * inner_edge * (step(n) / 2.0).to_radians().sin();
+            assert!(
+                width < chord,
+                "n={n}: label width {width} must fit chord {chord}"
+            );
+            assert!(
+                r(R_LABEL) + font * 0.37 <= r(R_OUTER) - 30.0,
+                "label clips the wedge band"
+            );
+        }
+        // Glyph ring sits between the hub edge and the label.
+        assert!(r(R_GLYPH) - 14.0 > r(R_INNER) + 8.0 && r(R_GLYPH) + 14.0 < r(R_LABEL) - 6.0);
+    }
+
+    #[test]
+    fn label_font_steps_down_only_at_eleven() {
+        assert_eq!(label_font_size(6), "15.5");
+        assert_eq!(label_font_size(10), "15.5");
+        assert_eq!(label_font_size(11), "13.5");
+    }
+
+    #[test]
+    fn step_of_n_tiles_full_circle() {
+        for n in 6..=11 {
+            assert!((step(n) * n as f64 - 360.0).abs() < 1e-9, "n={n}");
+        }
+    }
+
+    fn layout_of(ids: &[&str]) -> crate::menu_layout::MenuLayout {
+        let mut l = crate::menu_layout::default_layout();
+        l.wheel = ids
+            .iter()
+            .map(|id| crate::menu_layout::MenuEntry {
+                screen: (*id).to_string(),
+                label: catalog_entry(id).unwrap().name.to_string(),
+            })
+            .collect();
+        l
+    }
+
+    #[test]
+    fn docked_wheel_renders_configured_count() {
+        let layout = layout_of(&["chat", "agents", "models", "tools", "skills", "settings"]);
+        let html = render_wheel_with(vec![], layout);
+        assert_eq!(html.matches("class=\"wheel-wedge").count(), 6, "{html}");
+        assert_eq!(html.matches("wheel-sep\"").count(), 6, "{html}");
+        let labels: Vec<String> = html
+            .split("class=\"wheel-label")
+            .skip(1)
+            .map(|p| {
+                let body = &p[p.find('>').unwrap() + 1..];
+                body[..body.find('<').unwrap()].to_string()
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["CHAT", "AGENTS", "MODELS", "TOOLS", "SKILLS", "SETTINGS"]
+        );
+    }
+
+    #[test]
+    fn docked_wheel_eleven_sections_use_small_font() {
+        let layout = layout_of(&[
+            "chat",
+            "agents",
+            "models",
+            "tools",
+            "skills",
+            "memory",
+            "sessions",
+            "providers",
+            "gateway",
+            "settings",
+            "kanban",
+        ]);
+        let html = render_wheel_with(vec![], layout);
+        assert_eq!(html.matches("class=\"wheel-wedge").count(), 11);
+        assert_eq!(html.matches("font-size=\"13.5\"").count(), 11, "{html}");
+        assert!(!html.contains("font-size=\"15.5\""));
+    }
+
+    #[test]
+    fn renamed_label_drives_title_hub_and_uppercase() {
+        let mut layout = crate::menu_layout::default_layout();
+        layout.wheel[0].label = "talk".to_string();
+        let html = render_wheel_with(vec![], layout);
+        assert!(html.contains("aria-label=\"TALK\""), "{html}");
+        assert!(html.contains("<title>TALK</title>"), "{html}");
+        let hub = html.split("id=\"hub-label\"").nth(1).unwrap();
+        assert!(
+            hub[..hub.find("</text>").unwrap()].ends_with(">TALK"),
+            "{hub}"
+        );
+        assert!(html.contains("▓"), "chat glyph unchanged");
+    }
+
+    #[test]
+    fn header_origin_screen_on_wheel_uses_catalog_glyph() {
+        let layout = layout_of(&["chat", "agents", "models", "tools", "skills", "kanban"]);
+        let html = render_wheel_with(vec![], layout.clone());
+        assert!(html.contains("▦"), "{html}");
+        let items = wheel_items(&layout);
+        assert_eq!(items[5].screen, Screen::Kanban);
+        assert_eq!(items[5].glyph, "▦");
+        assert_eq!(items[5].sub, "TASK BOARD");
+    }
+
+    #[test]
+    fn approval_badge_follows_chat_position() {
+        let layout = layout_of(&["agents", "models", "tools", "chat", "skills", "settings"]);
+        let html = render_wheel_with(vec![pending_state()], layout);
+        assert_eq!(html.matches("wheel-approval-badge").count(), 1, "{html}");
+        let before = &html[..html.find("wheel-approval-badge").unwrap()];
+        let last_glyph = before.rfind("class=\"wheel-glyph").unwrap();
+        assert!(
+            before[last_glyph..].contains("data-i=\"3\""),
+            "{}",
+            &before[last_glyph..]
+        );
+    }
+
+    #[test]
+    fn clamp_active_falls_back_to_chat() {
+        let items = wheel_items(&layout_of(&[
+            "agents", "models", "chat", "tools", "skills", "settings",
+        ]));
+        assert_eq!(clamp_active(10, &items), 2);
+        assert_eq!(clamp_active(4, &items), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 57 UI-SPEC R9b — the pending-approval badge on the CHAT wedge.
+    // -----------------------------------------------------------------------
+
+    use crate::components::hermes_app::screens::chat::approval_card::{
+        any_approval_pending, ApprovalCardModel, ApprovalCardOutcome, ApprovalCardState,
+        ApprovalCards, ApprovalCardsCtx,
+    };
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BADGE_STATES: RefCell<Vec<ApprovalCardState>> = const { RefCell::new(Vec::new()) };
+        static WHEEL_LAYOUT: RefCell<crate::menu_layout::MenuLayout> =
+            RefCell::new(crate::menu_layout::default_layout());
+    }
+
+    fn cards_of(states: &[ApprovalCardState]) -> ApprovalCards {
+        states
+            .iter()
+            .enumerate()
+            .map(|(i, state)| {
+                (
+                    format!("a{i}"),
+                    ApprovalCardModel {
+                        session_id: "s".into(),
+                        tool: "terminal".into(),
+                        reason: "r".into(),
+                        state: state.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn render_docked_wheel(states: Vec<ApprovalCardState>) -> String {
+        render_wheel_with(states, crate::menu_layout::default_layout())
+    }
+
+    fn render_wheel_with(
+        states: Vec<ApprovalCardState>,
+        layout: crate::menu_layout::MenuLayout,
+    ) -> String {
+        BADGE_STATES.with(|s| *s.borrow_mut() = states);
+        WHEEL_LAYOUT.with(|l| *l.borrow_mut() = layout);
+        fn root() -> Element {
+            let screen = use_signal(|| Screen::Chat);
+            use_context_provider(|| screen);
+            let wheel = use_signal(WheelState::default);
+            use_context_provider(|| wheel);
+            let cards = use_signal(|| BADGE_STATES.with(|s| cards_of(&s.borrow())));
+            use_context_provider(|| ApprovalCardsCtx(cards));
+            let layout = use_signal(|| WHEEL_LAYOUT.with(|l| l.borrow().clone()));
+            let notice = use_signal(|| None::<String>);
+            let write = use_signal(|| false);
+            let save = crate::components::hermes_app::screens::settings_menu::use_save_queue();
+            use_context_provider(|| crate::components::hermes_app::MenuCtx {
+                layout,
+                notice,
+                write_enabled: write,
+                save,
+            });
+            rsx! { Wheel { docked: true } }
+        }
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus::ssr::render(&dom)
+    }
+
+    fn pending_state() -> ApprovalCardState {
+        ApprovalCardState::Pending { error: false }
+    }
+
+    #[test]
+    fn chat_nav_badge_tracks_pending_approval() {
+        let resolved = ApprovalCardState::Resolved {
+            outcome: ApprovalCardOutcome::Denied,
+        };
+        let err = ApprovalCardState::Pending { error: true };
+        let submitted = ApprovalCardState::Submitted { approved: true };
+        assert!(!any_approval_pending(&ApprovalCards::new()));
+        assert!(any_approval_pending(&cards_of(&[pending_state()])));
+        assert!(any_approval_pending(&cards_of(&[
+            resolved.clone(),
+            submitted.clone()
+        ])));
+        assert!(!any_approval_pending(&cards_of(&[
+            err.clone(),
+            resolved.clone()
+        ])));
+
+        let html = render_docked_wheel(vec![pending_state()]);
+        assert_eq!(
+            html.matches("wheel-approval-badge").count(),
+            1,
+            "exactly one badge: {html}"
+        );
+        assert!(html.contains("aria-label=\"Approval pending\""), "{html}");
+        let at = html.find("wheel-approval-badge").unwrap();
+        let open = html[..at].rfind('<').unwrap();
+        assert!(
+            html[open..].starts_with("<circle"),
+            "the badge is one SVG circle: {}",
+            &html[open..at]
+        );
+        let tag_end = at + html[at..].find('>').unwrap();
+        assert!(
+            html[tag_end..].starts_with("></circle>"),
+            "the badge has no text child: {}",
+            &html[open..tag_end + 12]
+        );
+
+        for states in [vec![resolved.clone()], vec![err], vec![]] {
+            assert!(
+                !render_docked_wheel(states).contains("wheel-approval-badge"),
+                "no badge without a card that waits on the operator"
+            );
+        }
+        assert!(
+            render_docked_wheel(vec![submitted]).contains("wheel-approval-badge"),
+            "a decision in flight keeps the badge lit"
+        );
+
+        // Structural contracts a browser alone could observe.
+        const WHEEL_RS: &str = include_str!("wheel.rs");
+        const MOD_RS: &str = include_str!("mod.rs");
+        const WHEEL_CSS: &str = include_str!("../../../assets/wheel.css");
+        let code = |s: &str| {
+            s.lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let wheel_code = code(&WHEEL_RS[..WHEEL_RS.rfind(concat!("#[cfg(", "test)]")).unwrap()]);
+        for banned in [
+            concat!("Html", "AudioElement"),
+            concat!("audio", " {"),
+            concat!("Agent", "NoticeCtx"),
+        ] {
+            assert!(!wheel_code.contains(banned), "wheel.rs contains `{banned}`");
+        }
+        assert!(
+            code(MOD_RS).matches(concat!("apply_disconnect", "(")).count() >= 3,
+            "the failed-connect, Close and Err socket-down paths each apply the disconnect"
+        );
+        let css: String = WHEEL_CSS.split("/*").enumerate().map(|(i, part)| {
+            if i == 0 { part } else { part.split_once("*/").map_or("", |x| x.1) }
+        }).collect();
+        let rule = css
+            .split('}')
+            .find(|c| c.contains(".wheel-approval-badge"))
+            .expect("wheel.css needs a .wheel-approval-badge rule");
+        assert!(rule.contains("fill: var(--amber)"), "{rule}");
+        assert!(!rule.contains('#'), "theme variables only: {rule}");
+    }
+
+    /// D-04: the shipped-default docked wheel is byte-identical to the golden captured
+    /// before the n-driven refactor. `WHEEL_GOLDEN_UPDATE=1` rewrites the file.
+    #[test]
+    fn docked_default_wheel_matches_golden() {
+        const GOLDEN: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/components/hermes_app/wheel_docked_default.golden.html"
+        );
+        let html = render_docked_wheel(vec![]);
+        if std::env::var_os("WHEEL_GOLDEN_UPDATE").is_some() {
+            std::fs::write(GOLDEN, &html).expect("write golden");
+            return;
+        }
+        let golden = std::fs::read_to_string(GOLDEN).expect("read golden");
+        assert!(
+            html == golden,
+            "docked default wheel drifted from the golden"
         );
     }
 
@@ -974,7 +1483,6 @@ mod tests {
     }
 }
 
-// Canonical 11-wedge order documented for grep lock-down (CONTEXT D-10 +
-// Phase 36.3.7.11 D-02):
+// Canonical 10-wedge order documented for grep lock-down (CONTEXT D-10):
 // chat, agents, models, tools, skills, memory, sessions, providers, gateway,
-// settings, kanban
+// settings

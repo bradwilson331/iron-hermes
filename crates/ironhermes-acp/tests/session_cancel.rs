@@ -21,7 +21,7 @@ use ironhermes_acp::session_manager::AcpSessionManager;
 use ironhermes_core::{Config, ModelsCache, ProviderConfig, ProviderResolver};
 use ironhermes_state::StateStore;
 use tokio::sync::Mutex as TokioMutex;
-use wiremock::matchers::any;
+use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn build_config_and_resolver() -> (Arc<Config>, Arc<ProviderResolver>) {
@@ -80,11 +80,8 @@ async fn unknown_session_returns_error() {
     )));
 
     let cancel_tokens = manager.lock().await.cancel_tokens();
-    let result = handle_session_cancel(
-        CancelNotification::new("acp_does_not_exist"),
-        cancel_tokens,
-    )
-    .await;
+    let result =
+        handle_session_cancel(CancelNotification::new("acp_does_not_exist"), cancel_tokens).await;
 
     assert!(
         result.is_err(),
@@ -147,7 +144,7 @@ async fn in_flight_turn_is_cancelled_and_session_recovers_for_next_prompt() {
     let server = MockServer::start().await;
     // First turn: deliberately slow (5s) so the cancel — sent immediately after — wins
     // the `tokio::select!` race deterministically, not via a timing coincidence.
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -158,7 +155,7 @@ async fn in_flight_turn_is_cancelled_and_session_recovers_for_next_prompt() {
         .mount(&server)
         .await;
     // Second turn (after cancel + recovery): fast, normal response.
-    Mock::given(any())
+    Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")

@@ -200,6 +200,14 @@ function resolveToken(canvas, prop, fallback) {
   }
 }
 
+// A light theme's ink tokens are color-mix() values, which THREE.Color.setStyle
+// cannot parse; only hex / rgb() / hsl() pass, anything else gets the fallback
+// (the colour the light themes already read).
+function resolveColorToken(canvas, prop, fallback) {
+  const v = resolveToken(canvas, prop, fallback);
+  return /^(#|rgba?\(|hsla?\()/i.test(v) ? v : fallback;
+}
+
 function onResize(canvas) {
   if (!renderer || !camera) return;
   const w = canvas.clientWidth  || canvas.offsetWidth  || 300;
@@ -550,10 +558,10 @@ window.ironHermesAvatar = {
     const motionPref = resolveToken(canvas, '--orb-motion', 'full');
     reducedMotion = (motionPref === 'none');
 
-    stateColors.idle      = resolveToken(canvas, '--accent-primary', STATE_COLOR_FALLBACKS.idle);
-    stateColors.listening = resolveToken(canvas, '--danger',         STATE_COLOR_FALLBACKS.listening);
-    stateColors.thinking  = resolveToken(canvas, '--warn',           STATE_COLOR_FALLBACKS.thinking);
-    stateColors.speaking  = resolveToken(canvas, '--success',        STATE_COLOR_FALLBACKS.speaking);
+    stateColors.idle      = resolveColorToken(canvas, '--accent-primary', STATE_COLOR_FALLBACKS.idle);
+    stateColors.listening = resolveColorToken(canvas, '--danger',         STATE_COLOR_FALLBACKS.listening);
+    stateColors.thinking  = resolveColorToken(canvas, '--warn',           STATE_COLOR_FALLBACKS.thinking);
+    stateColors.speaking  = resolveColorToken(canvas, '--success',        STATE_COLOR_FALLBACKS.speaking);
 
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

@@ -5,17 +5,18 @@
 //! CSS slide-up animation (defined in the bundle's `components.css`) — this
 //! matches the prototype pattern and avoids signal teardown on close.
 //!
-//! Controls write back through three context signals:
-//!   - `Signal<UiPrefs>` — accent, wheel_size, breadcrumb,
-//!     footer, density, rail (each `with_mut` write)
+//! Controls write back through two context signals:
+//!   - `Signal<UiPrefs>` — accent, footer, density (each `with_mut` write)
 //!   - `ThemeContext.0`  — the active theme slug (`Signal<String>`)
-//!   - `Signal<WheelState>` — wheel_size slider mirrors UiPrefs.wheel_size
-//!     onto WheelState.size (must_have #5)
+//!
+//! Phase 54.4 Plan 02 (D-05/D-07/D-26): the wheel-size slider, Breadcrumb
+//! toggle and Chat rail toggle are retired — the docked header wheel is pinned
+//! by `--ih-wheel-size`, the status strip is permanent and `WheelRail` is gone.
 //!
 //! Persistence is owned by Plan 03's hydration-gated effects — TweaksPanel
 //! does NOT touch localStorage directly.
 
-use crate::state::{ThemeContext, WheelState};
+use crate::state::ThemeContext;
 use crate::ui_prefs::{AccentColor, Density, UiPrefs};
 use dioxus::prelude::*;
 
@@ -28,7 +29,6 @@ use dioxus::prelude::*;
 pub fn TweaksPanel() -> Element {
     let mut prefs = use_context::<Signal<UiPrefs>>();
     let mut theme = use_context::<ThemeContext>().0;
-    let mut wheel_state = use_context::<Signal<WheelState>>();
 
     // Local open/closed flag — not in shared context (D-26 / D-16).
     let mut open = use_signal(|| false);
@@ -56,10 +56,7 @@ pub fn TweaksPanel() -> Element {
     // RSX builder runs (signal-borrow safety per clippy.toml).
     let current_theme = theme.read().clone();
     let current_accent = prefs.read().accent;
-    let current_wheel_size = prefs.read().wheel_size;
-    let current_breadcrumb = prefs.read().breadcrumb;
     let current_footer = prefs.read().footer;
-    let current_rail = prefs.read().rail;
     let current_density = prefs.read().density;
     let is_open = *open.read();
 
@@ -129,28 +126,6 @@ pub fn TweaksPanel() -> Element {
                     }
                 }
 
-                // ---- Wheel size slider (240..=640 in steps of 20) ----
-                div { class: "tweaks-section",
-                    div { class: "tweaks-label",
-                        "Wheel size "
-                        span { class: "val", "{current_wheel_size}" }
-                    }
-                    div { class: "tweaks-row",
-                        input {
-                            r#type: "range",
-                            min: "240",
-                            max: "640",
-                            step: "20",
-                            value: "{current_wheel_size}",
-                            oninput: move |evt| {
-                                let val: f64 = evt.value().parse().unwrap_or(240.0);
-                                prefs.with_mut(|p| p.wheel_size = val);
-                                wheel_state.with_mut(|ws| ws.size = val);
-                            }
-                        }
-                    }
-                }
-
                 // ---- Density (Comfy / Dense) ----
                 div { class: "tweaks-section",
                     div { class: "tweaks-label", "Density" }
@@ -174,20 +149,9 @@ pub fn TweaksPanel() -> Element {
                     }
                 }
 
-                // ---- Chrome toggles (breadcrumb / footer / rail) ----
+                // ---- Chrome toggles (footer ticker only) ----
                 div { class: "tweaks-section",
                     div { class: "tweaks-label", "Chrome" }
-                    div { class: "tweaks-row",
-                        span { class: "lbl", "Breadcrumb" }
-                        button {
-                            class: "tweaks-toggle",
-                            class: if current_breadcrumb { "is-on" },
-                            onclick: move |_| {
-                                prefs.with_mut(|p| p.breadcrumb = !p.breadcrumb);
-                            },
-                            if current_breadcrumb { "ON" } else { "OFF" }
-                        }
-                    }
                     div { class: "tweaks-row",
                         span { class: "lbl", "Footer ticker" }
                         button {
@@ -199,19 +163,34 @@ pub fn TweaksPanel() -> Element {
                             if current_footer { "ON" } else { "OFF" }
                         }
                     }
-                    div { class: "tweaks-row",
-                        span { class: "lbl", "Chat rail" }
-                        button {
-                            class: "tweaks-toggle",
-                            class: if current_rail { "is-on" },
-                            onclick: move |_| {
-                                prefs.with_mut(|p| p.rail = !p.rail);
-                            },
-                            if current_rail { "ON" } else { "OFF" }
-                        }
-                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Phase 54.4 Plan 02 (D-05/D-07/D-26): the wheel-size slider, Chat rail
+    //! and Breadcrumb controls are retired because the docked header makes
+    //! them dead. Source-text assertions; needles are assembled from fragments
+    //! so the test cannot match its own source.
+
+    const TWEAKS_PANEL_RS: &str = include_str!("tweaks_panel.rs");
+
+    #[test]
+    fn tweaks_panel_has_no_retired_chrome_controls() {
+        for field in ["rail", "breadcrumb", "wheel_size"] {
+            let needle = ["p.", field].concat();
+            assert!(
+                !TWEAKS_PANEL_RS.contains(&needle),
+                "tweaks_panel.rs still references retired control accessor `{needle}`"
+            );
+        }
+        let kept = ["p.", "footer"].concat();
+        assert!(
+            TWEAKS_PANEL_RS.contains(&kept),
+            "tweaks_panel.rs must keep the footer ticker control (`{kept}`)"
+        );
     }
 }

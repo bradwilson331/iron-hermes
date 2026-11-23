@@ -719,6 +719,7 @@ async fn upsert_webhook_route_impl(
         return Err(errors);
     }
 
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
     check_webhook_write_gate().map_err(|e| vec![e])?;
@@ -784,6 +785,7 @@ async fn upsert_webhook_route_impl(
         .platforms
         .insert(WEBHOOK_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+    drop(_root_write);
 
     let (reread, _reread_target) =
         crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
@@ -802,6 +804,7 @@ async fn upsert_webhook_route_impl(
 /// crate) -> atomic save.
 #[cfg(not(target_arch = "wasm32"))]
 async fn delete_webhook_route_impl(scope: ConfigScope, name: String) -> Result<(), String> {
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     check_webhook_write_gate()?;
 
@@ -809,6 +812,7 @@ async fn delete_webhook_route_impl(scope: ConfigScope, name: String) -> Result<(
         platform.routes.retain(|r| r.name != name);
     }
     crate::server::tools_config_api::save_scoped(&config, &target)?;
+    drop(_root_write);
     Ok(())
 }
 

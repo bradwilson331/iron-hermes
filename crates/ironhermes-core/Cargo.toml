@@ -9,6 +9,7 @@ description = "Core types and configuration for IronHermes"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_ignored = { workspace = true }
 serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -59,3 +60,11 @@ serde_json = { workspace = true }
 # already depends on ironhermes-core (regular dep), so Cargo handles this dev-dep
 # without forming a build cycle (dev-deps are excluded from the lib's link graph).
 ironhermes-kanban = { path = "../ironhermes-kanban" }
+# Phase 54 Plan 05 (D-19): tracing-test with `no-env-filter` so
+# `#[traced_test]` captures the RateLimitConfig::clamp_and_warn WARN
+# regardless of the default `{crate}=trace` env filter. This is a
+# direct-dependency declaration for an already-resolved, already-pinned
+# workspace crate used by five other crates in this workspace, not a new
+# package entering the dependency graph — same precedent as the
+# `hmac`/`sha2`/`hex` block in `crates/ironhermes-gateway/Cargo.toml`.
+tracing-test = { workspace = true, features = ["no-env-filter"] }

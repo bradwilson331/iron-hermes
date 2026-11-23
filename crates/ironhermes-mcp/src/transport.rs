@@ -175,10 +175,14 @@ pub async fn connect_http(
     RunningService<RoleClient, ()>,
     Option<tokio::process::Child>,
 )> {
+    // D-18 / T-54.8-06: an unset `${VAR}` must fail before any network call.
+    crate::config::ensure_placeholders_resolved(config)?;
     let url = config
         .url
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("HTTP transport requires 'url' field"))?;
+    // Phase 57 D-04(d): the sidecar screens the resolved endpoint before any network I/O.
+    crate::security::screen_endpoint_url(url)?;
 
     use rmcp::transport::StreamableHttpClientTransport;
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -329,6 +333,12 @@ pub async fn connect_http_oauth(
     RunningService<RoleClient, ()>,
     Option<tokio::process::Child>,
 )> {
+    crate::config::ensure_placeholders_resolved(config)?;
+    // Phase 57 D-04(d): screen the resolved endpoint before the issuer check or any
+    // discovery call. A config with no url falls through to the existing error.
+    if let Some(url) = config.url.as_deref() {
+        crate::security::screen_endpoint_url(url)?;
+    }
     use rmcp::transport::StreamableHttpClientTransport;
     use rmcp::transport::auth::AuthorizationSession;
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -503,6 +513,11 @@ pub async fn begin_oauth_web(
     global_additive_issuers: &[String],
     redirect_uri: &str,
 ) -> Result<rmcp::transport::auth::AuthorizationSession> {
+    crate::config::ensure_placeholders_resolved(config)?;
+    // Phase 57 D-04(d): screen the resolved endpoint before any discovery call.
+    if let Some(url) = config.url.as_deref() {
+        crate::security::screen_endpoint_url(url)?;
+    }
     use rmcp::transport::auth::AuthorizationSession;
 
     let (mut auth_mgr, _url) =
@@ -707,7 +722,10 @@ mod tests {
             ..Default::default()
         };
         let (_, has_auth) = super::build_custom_headers(&config).expect("must build");
-        assert!(has_auth, "an Authorization header (any casing) must set the flag");
+        assert!(
+            has_auth,
+            "an Authorization header (any casing) must set the flag"
+        );
 
         config.headers = [("AUTHORIZATION".to_string(), "Bearer x".to_string())].into();
         let (_, has_auth) = super::build_custom_headers(&config).expect("must build");
@@ -716,7 +734,10 @@ mod tests {
         // A map without it does not.
         config.headers = [("X-Custom".to_string(), "value".to_string())].into();
         let (_, has_auth) = super::build_custom_headers(&config).expect("must build");
-        assert!(!has_auth, "a non-Authorization header must not set the flag");
+        assert!(
+            !has_auth,
+            "a non-Authorization header must not set the flag"
+        );
 
         // A map whose key is a reserved name returns Err.
         config.headers = [("Mcp-Session-Id".to_string(), "x".to_string())].into();
@@ -947,5 +968,162 @@ mod tests {
              through build_oauth_manager — it must not call AuthorizationManager::new itself. \
              body={code_only}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 57 plan 08 (D-04d): MCP endpoint URLs are screened before connect.
+    // The screen is a scripted fake; `ScreenTestGuard` serializes the globals.
+    // -----------------------------------------------------------------------
+
+    use crate::security::test_support::{ScreenTestGuard, ScriptFake, block_always, high};
+    use std::time::Duration;
+
+    fn http_config(url: &str) -> crate::config::McpServerConfig {
+        crate::config::McpServerConfig {
+            url: Some(url.to_string()),
+            connect_timeout: 1,
+            ..Default::default()
+        }
+    }
+
+    /// `connect_http` result as an error string, bounded so a screen that failed
+    /// to stop a connect to a non-routable address cannot hang the suite.
+    async fn connect_err(url: &str) -> String {
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            super::connect_http(&http_config(url)),
+        )
+        .await
+        .expect("connect_http must return promptly");
+        match outcome {
+            Ok(_) => panic!("connect to {url} unexpectedly succeeded"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_endpoint_refused() {
+        let guard = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("169.254.169.254", "MetadataEndpoint", block_always);
+        guard.install(&fake);
+
+        let started = std::time::Instant::now();
+        let err = connect_err("http://169.254.169.254/latest/meta-data/?token=sekret").await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "refusal happens before any socket is opened (a connect to 169.254.169.254 would hang)"
+        );
+        assert!(err.contains("MetadataEndpoint"), "names the rule id: {err}");
+        assert!(
+            !err.contains("sekret") && !err.contains("latest/meta-data"),
+            "no path or query in the message: {err}"
+        );
+        assert_eq!(
+            fake.seen.lock().unwrap().clone(),
+            vec!["curl 'http://169.254.169.254/latest/meta-data/?token=sekret'".to_string()],
+            "the screened text is the resolved URL as a quoted curl command"
+        );
+    }
+
+    #[tokio::test]
+    async fn punycode_endpoint_warns_or_blocks_by_level() {
+        let guard = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("xn--", "PunycodeDomain", high);
+        guard.install(&fake);
+
+        // Level 3: High is Block -> refused with the rule id.
+        let err = connect_err("https://xn--pple-43d.invalid/login").await;
+        assert!(err.contains("PunycodeDomain"), "{err}");
+        assert_eq!(fake.seen_count(), 1);
+
+        // Level 5: High is Warn and a bypass level -> proceeds past the screen; the
+        // failure is a network error (the .invalid TLD never resolves).
+        guard.set_level(5);
+        let err = connect_err("https://xn--pple-43d.invalid/login").await;
+        assert!(
+            !err.contains("PunycodeDomain") && !err.contains("security screen"),
+            "past the screen the error is a network error, got: {err}"
+        );
+        assert_eq!(fake.seen_count(), 2, "the screen was consulted again");
+        let rows = guard.audit_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["kind"], "security_verdict");
+        assert_eq!(rows[0]["tool"], "mcp_endpoint");
+        assert_eq!(rows[0]["decision"], "warned");
+    }
+
+    /// OBSERVED (plan 57-08): the MCP connect paths in this crate enforce NO SSRF
+    /// guard today; none of the core SSRF helpers is called from this file.
+    /// tirith is not an SSRF guard either: it reports nothing for
+    /// `localhost` or loopback. So a private-host MCP endpoint that the screen allows
+    /// reaches the network exactly as before. This test pins that behaviour (the
+    /// connection is attempted and refused by the OS, not by a policy) and the
+    /// SUMMARY records it for the accepted-risk list. No SSRF logic is added here.
+    #[tokio::test]
+    async fn ssrf_still_refuses_private_hosts() {
+        let guard = ScreenTestGuard::new();
+        let fake = ScriptFake::new();
+        guard.install(&fake);
+
+        let err = connect_err("http://127.0.0.1:9/mcp").await;
+        assert_eq!(fake.seen_count(), 1, "the endpoint was screened");
+        assert!(
+            !err.contains("security screen") && !err.contains("refused by"),
+            "loopback is neither refused by the screen nor by a (non-existent) SSRF guard: {err}"
+        );
+        // Needles are built with concat! so this test's own text never matches.
+        let src = include_str!("transport.rs");
+        assert!(
+            !src.contains(concat!("is_safe", "_url"))
+                && !src.contains(concat!("resolve_safe", "_addrs")),
+            "if MCP connect starts enforcing SSRF, this test must be rewritten to assert the \
+             refusal instead of pinning its absence"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_screen_installed_connects_as_before() {
+        let guard = ScreenTestGuard::new();
+        let err = connect_err("http://127.0.0.1:9/mcp").await;
+        assert!(!err.contains("security screen"), "{err}");
+        assert!(guard.audit_rows().is_empty(), "no screen, no audit rows");
+    }
+
+    #[tokio::test]
+    async fn screen_is_called_after_placeholder_resolution() {
+        let guard = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("example", "AnyRule", block_always);
+        guard.install(&fake);
+
+        let err = connect_err("https://${IH_TEST_5708_UNSET_HOST}.example.com/mcp").await;
+        assert!(
+            err.contains("references unset environment variable IH_TEST_5708_UNSET_HOST"),
+            "the 54.8 D-18 placeholder error comes first: {err}"
+        );
+        assert_eq!(fake.seen_count(), 0, "an unresolved URL is never screened");
+    }
+
+    #[test]
+    fn every_http_connect_path_screens_its_endpoint() {
+        let src = include_str!("transport.rs");
+        for name in [
+            "pub async fn connect_http(",
+            "pub async fn connect_http_oauth(",
+            "pub async fn begin_oauth_web(",
+        ] {
+            let start = src.find(name).unwrap_or_else(|| panic!("{name} exists"));
+            let rest = &src[start..];
+            let body = &rest[..rest.find("\n}\n").expect("fn end")];
+            let resolved = body
+                .find("ensure_placeholders_resolved(config)?")
+                .unwrap_or_else(|| panic!("{name} resolves placeholders"));
+            let screened = body
+                .find("screen_endpoint_url(")
+                .unwrap_or_else(|| panic!("{name} must screen its endpoint"));
+            assert!(
+                resolved < screened,
+                "{name}: the endpoint screen comes after placeholder resolution"
+            );
+        }
     }
 }

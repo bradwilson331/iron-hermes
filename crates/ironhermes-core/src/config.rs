@@ -45,7 +45,7 @@ pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
 // Reserved role names (D-05, Phase 26)
 // =============================================================================
 
-/// The nine reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12).
+/// The ten reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12 + Phase 58.2 D-16).
 ///
 /// Used by `model.roles:` map keys and `auxiliary` per-task overrides.
 /// Unknown role names must be rejected at config load (Phase 26 anti-pattern
@@ -60,13 +60,14 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
     "curator",       // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
     "kanban_decomposer", // Phase 36.3.7.10 — bridges to auxiliary.kanban_decomposer config key (reference.md §449-451)
     "kanban_judge",      // Phase 36.3.7.12 D-05 — auxiliary judge for the goal-mode worker loop
+    "memory",            // Phase 58.2 D-16 — Tier 2 claim extraction + dreams (model.roles.memory)
 ];
 
-/// Validate that a role name is one of the nine reserved helper-task roles.
+/// Validate that a role name is one of the ten reserved helper-task roles.
 ///
 /// Valid: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`,
-/// `summarization`, `curator`, `kanban_decomposer`, `kanban_judge`
-/// (Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12).
+/// `summarization`, `curator`, `kanban_decomposer`, `kanban_judge`, `memory`
+/// (Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12 + Phase 58.2 D-16).
 ///
 /// # Errors
 /// Returns an error if `name` is not in `RESERVED_ROLE_NAMES`.
@@ -523,6 +524,11 @@ pub struct Config {
     /// Pre-25.1 configs parse cleanly via #[serde(default)].
     #[serde(default)]
     pub browser: BrowserConfig,
+    /// Phase 49.8 D-14: ROS 2 rosbridge configuration block (bridge URL, write
+    /// allowlists, safety caps, ROSPider defaults). Pre-49.8 configs parse
+    /// cleanly via #[serde(default)].
+    #[serde(default)]
+    pub ros2: Ros2Config,
     /// Phase 25.2 D-22: web_extract configuration block.
     /// `#[serde(default)]` makes this field optional in YAML — pre-25.2 configs parse cleanly.
     #[serde(default)]
@@ -562,6 +568,11 @@ pub struct Config {
     /// Pre-36.17.8 configs parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub voice: VoiceConfig,
+    /// Phase 54.7 (D-13/D-20): top-level realtime endpoint/model/voice block.
+    /// Server home config only. Pre-54.7 configs parse cleanly via
+    /// `#[serde(default)]`; legacy `voice.realtime_*` keys fold in at load.
+    #[serde(default)]
+    pub realtime: RealtimeConfig,
     /// Phase 36.17.7 D-02-d: audio cache lifecycle policy.
     /// Controls GC of `$IRONHERMES_HOME/audio_cache/` files produced by
     /// `text_to_speech` + `send_audio` (web replay surface).
@@ -727,6 +738,46 @@ pub struct Config {
     /// `#[serde(default)]`.
     #[serde(default)]
     pub secrets_source: Option<String>,
+    /// Phase 54.8 (D-20): site projects the bot may edit and deploy from chat.
+    ///
+    /// Stored as raw YAML values (same pattern as `mcp_servers`) so one
+    /// mistyped entry can never make `Config::load` fail and take the gateway
+    /// down. Read through [`Config::validated_sites`], which parses and
+    /// validates each entry and reports bad ones by name and field. Absent
+    /// configs parse cleanly and serialize without a `sites:` key.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sites: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// Phase 54.9 (D-07/D-08): web UI settings. Today only `ui.menu`, the
+    /// operator's wheel/header layout.
+    ///
+    /// Raw on purpose: a typed screen list would make one unknown screen id
+    /// fail `Config::load` and take the gateway down. It is still a MODELLED
+    /// field so a typed `load -> save` round-trip by any other writer (the
+    /// activation-record writer does exactly this) keeps it instead of erasing
+    /// it. Absent configs serialize without a `ui:` key. Validated by
+    /// `iron_hermes_ui::menu_layout::validate`.
+    #[serde(default, skip_serializing_if = "UiConfig::is_empty")]
+    pub ui: UiConfig,
+}
+
+/// Phase 54.9 (D-07): the `ui:` config block. See [`Config::ui`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Raw `ui.menu` value (`Null` when absent).
+    #[serde(skip_serializing_if = "serde_yaml::Value::is_null")]
+    pub menu: serde_yaml::Value,
+    /// Phase 54.9 WR-04: server-side switch for the OpenUI screen's Thesys hosted Gateway.
+    /// Off by default; while false the server never contacts the Gateway, whatever the client asks.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub openui_gateway_enabled: bool,
+}
+
+impl UiConfig {
+    /// True when no `ui.*` key is set, so the block is omitted on save.
+    pub fn is_empty(&self) -> bool {
+        self.menu.is_null() && !self.openui_gateway_enabled
+    }
 }
 
 /// Phase 46.9 Plan 11 (GAP-4/GAP-5): footer clock display configuration.
@@ -1960,6 +2011,80 @@ impl Default for OpenAiTtsConfig {
     }
 }
 
+/// Phase 54.7 (D-01/D-02/D-03): OpenAI-compatible TTS endpoint.
+///
+/// A distinct provider (`tts.provider: openai_compatible`) for any server that
+/// speaks the OpenAI `/audio/speech` shape (Kokoro, Piper gateways, LocalAI, ...).
+/// Real OpenAI stays on [`OpenAiTtsConfig`] pointed at api.openai.com (D-01);
+/// this block is the ONLY TTS block that carries a `base_url` (D-05).
+///
+/// `api_key_ref` is a REFERENCE NAME only — a `VOICE_KEY_*` environment variable
+/// or a `secret/voice/*` vault entry (D-02, T-54.7-70). No secret value is ever
+/// stored in config.yaml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenAiCompatibleTtsConfig {
+    /// Server base URL including any `/v1` segment, e.g. `http://tts.lan:8880/v1`.
+    pub base_url: String,
+    /// Optional endpoint path override; `None` means `/audio/speech` (D-03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Key REFERENCE name (never a value); `None` sends no Authorization header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_ref: Option<String>,
+    /// Model id sent in the request body (default: `"tts-1"`).
+    pub model: String,
+    /// Voice id sent in the request body (default: `"alloy"`).
+    pub voice: String,
+    /// Audio output format (default: `"mp3"`).
+    pub format: String,
+}
+
+impl Default for OpenAiCompatibleTtsConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            path: None,
+            api_key_ref: None,
+            model: "tts-1".to_string(),
+            voice: "alloy".to_string(),
+            format: "mp3".to_string(),
+        }
+    }
+}
+
+/// Phase 54.7 (D-01/D-02/D-03): OpenAI-compatible STT endpoint.
+///
+/// A distinct provider (`stt.provider: openai_compatible`) for servers speaking
+/// the OpenAI `/audio/transcriptions` shape (whisper.cpp, faster-whisper-server,
+/// ...). `path` overrides the default for servers with a different route, e.g.
+/// whisper.cpp's `/inference`. `api_key_ref` is a reference name only (D-02).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenAiCompatibleSttConfig {
+    /// Server base URL, e.g. `http://stt.lan:8178`.
+    pub base_url: String,
+    /// Optional endpoint path override; `None` means `/audio/transcriptions` (D-03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Key REFERENCE name (never a value); `None` sends no Authorization header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_ref: Option<String>,
+    /// Model id sent in the multipart form (default: `"whisper-1"`).
+    pub model: String,
+}
+
+impl Default for OpenAiCompatibleSttConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            path: None,
+            api_key_ref: None,
+            model: "whisper-1".to_string(),
+        }
+    }
+}
+
 // =============================================================================
 // Phase 40.5 identity schema (D-08/D-09/D-11/D-13/D-16/D-17)
 // =============================================================================
@@ -2002,6 +2127,19 @@ pub struct IdentityVoiceProfile {
     pub free_mode_tts_voice: Option<String>,
     /// Override OpenAI Realtime API voice (D-09). `None` = inherit global.
     pub realtime_voice: Option<String>,
+    /// Phase 54.7 (D-16): override the free-mode TTS model. Applied to the
+    /// matching provider block (openai, elevenlabs, openai_compatible; Edge has
+    /// no model). `None` = inherit the global block's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_mode_tts_model: Option<String>,
+    /// Phase 54.7 (D-16): override the free-mode TTS output format. `None` =
+    /// inherit the global block's format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_mode_tts_format: Option<String>,
+    /// Phase 54.7 (D-16): override the realtime model. `None` = inherit
+    /// `realtime.model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_model: Option<String>,
 }
 
 /// Phase 40.5 (D-17): One identity record — appearance (orb) + voice (free/realtime).
@@ -2046,6 +2184,7 @@ pub fn default_seed_identities() -> std::collections::HashMap<String, IdentityRe
                 free_mode_tts_provider: Some("elevenlabs".to_string()),
                 free_mode_tts_voice: Some("pNInz6obpgDQGcFmaJgB".to_string()), // Adam
                 realtime_voice: Some("shimmer".to_string()),
+                ..Default::default()
             },
         },
     );
@@ -2060,6 +2199,7 @@ pub fn default_seed_identities() -> std::collections::HashMap<String, IdentityRe
                 free_mode_tts_provider: Some("elevenlabs".to_string()),
                 free_mode_tts_voice: Some("21m00Tcm4TlvDq8ikWAM".to_string()), // Rachel
                 realtime_voice: Some("nova".to_string()),
+                ..Default::default()
             },
         },
     );
@@ -2141,6 +2281,9 @@ pub struct TtsConfig {
     /// Phase 40.5 (D-10): OpenAI TTS provider configuration.
     /// Pre-40.5 configs parse cleanly via `#[serde(default)]`.
     pub openai: OpenAiTtsConfig,
+    /// Phase 54.7 (D-01/D-03): OpenAI-compatible TTS endpoint (custom `base_url`).
+    /// Pre-54.7 configs parse cleanly via `#[serde(default)]`.
+    pub openai_compatible: OpenAiCompatibleTtsConfig,
 }
 
 impl Default for TtsConfig {
@@ -2151,6 +2294,7 @@ impl Default for TtsConfig {
             edge: EdgeTtsConfig::default(),
             elevenlabs: ElevenLabsConfig::default(),
             openai: OpenAiTtsConfig::default(),
+            openai_compatible: OpenAiCompatibleTtsConfig::default(),
         }
     }
 }
@@ -2213,6 +2357,9 @@ pub struct SttConfig {
     pub groq: GroqSttConfig,
     /// OpenAI STT provider configuration.
     pub openai: OpenAiSttConfig,
+    /// Phase 54.7 (D-01/D-03): OpenAI-compatible STT endpoint (custom `base_url`).
+    /// Pre-54.7 configs parse cleanly via `#[serde(default)]`.
+    pub openai_compatible: OpenAiCompatibleSttConfig,
 }
 
 impl Default for SttConfig {
@@ -2221,6 +2368,7 @@ impl Default for SttConfig {
             provider: "auto".to_string(),
             groq: GroqSttConfig::default(),
             openai: OpenAiSttConfig::default(),
+            openai_compatible: OpenAiCompatibleSttConfig::default(),
         }
     }
 }
@@ -2248,6 +2396,128 @@ pub enum BargeInMode {
     HalfDuplex,
     /// (deferred, D-08) Open-mic: both directions active simultaneously.
     OpenMic,
+}
+
+/// Phase 54.7 (D-15): which voice family runs.
+///
+/// `voice.service` replaces `barge_in_mode == open_mic` as the family selector.
+/// The old meaning survives only as a load-time migration input, see
+/// [`VoiceConfig::effective_service`]. Serializes as `realtime` / `turn_based`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceService {
+    /// Full-duplex realtime session (OpenAI Realtime wire shape).
+    Realtime,
+    /// Record, transcribe, think, synthesize (STT -> agent -> TTS).
+    #[default]
+    TurnBased,
+}
+
+impl VoiceService {
+    /// The serialized spelling: `"realtime"` or `"turn_based"`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::TurnBased => "turn_based",
+        }
+    }
+}
+
+/// Phase 54.7 (D-13): default realtime endpoint (the implicit OpenAI default).
+pub const REALTIME_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+/// Phase 54.7 (D-13): default realtime model.
+pub const REALTIME_DEFAULT_MODEL: &str = "gpt-realtime";
+/// Phase 54.7 (D-13): default realtime agent voice.
+pub const REALTIME_DEFAULT_VOICE: &str = "shimmer";
+/// Phase 54.7 (D-13): default realtime input-transcription model.
+pub const REALTIME_DEFAULT_TRANSCRIPTION: &str = "gpt-4o-mini-transcribe";
+/// Phase 54.7 (D-13): default realtime provider name.
+pub const REALTIME_DEFAULT_PROVIDER: &str = "openai_compatible";
+
+/// Phase 54.7 (D-13): top-level `realtime:` block — the realtime session's
+/// endpoint, model, voice and input transcription. Server home config only
+/// (D-20). `api_key_ref` is a reference name (`VOICE_KEY_*` env var or
+/// `secret/voice/*` vault entry), never a value (D-02).
+///
+/// `None` model/voice/transcription fields mean "unset": the accessors return
+/// the default constants, and [`RealtimeConfig::fold_legacy`] may fill them from
+/// the legacy `voice.realtime_*` keys at load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RealtimeConfig {
+    /// Provider name (default `"openai_compatible"`).
+    pub provider: String,
+    /// Realtime server base URL (default `https://api.openai.com/v1`).
+    pub base_url: String,
+    /// Key REFERENCE name; `None` means the implicit OpenAI key for the default URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_ref: Option<String>,
+    /// Realtime model id; `None` = [`REALTIME_DEFAULT_MODEL`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Realtime agent voice; `None` = [`REALTIME_DEFAULT_VOICE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Input transcription model (or `"off"`); `None` = [`REALTIME_DEFAULT_TRANSCRIPTION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription_model: Option<String>,
+}
+
+impl Default for RealtimeConfig {
+    fn default() -> Self {
+        Self {
+            provider: REALTIME_DEFAULT_PROVIDER.to_string(),
+            base_url: REALTIME_DEFAULT_BASE_URL.to_string(),
+            api_key_ref: None,
+            model: None,
+            voice: None,
+            transcription_model: None,
+        }
+    }
+}
+
+impl RealtimeConfig {
+    /// Effective realtime model: the configured value or the default.
+    pub fn model(&self) -> &str {
+        self.model.as_deref().unwrap_or(REALTIME_DEFAULT_MODEL)
+    }
+
+    /// Effective realtime voice: the configured value or the default.
+    pub fn voice(&self) -> &str {
+        self.voice.as_deref().unwrap_or(REALTIME_DEFAULT_VOICE)
+    }
+
+    /// Effective input-transcription model: the configured value or the default.
+    pub fn transcription_model(&self) -> &str {
+        self.transcription_model
+            .as_deref()
+            .unwrap_or(REALTIME_DEFAULT_TRANSCRIPTION)
+    }
+
+    /// True when `base_url` is the implicit OpenAI default (surrounding
+    /// whitespace and a trailing `/` are ignored).
+    pub fn is_openai_default_base_url(&self) -> bool {
+        self.base_url.trim().trim_end_matches('/') == REALTIME_DEFAULT_BASE_URL
+    }
+
+    /// One-way legacy fold (D-13): copy each legacy `voice.realtime_*` value
+    /// into the matching UNSET field of this block.
+    ///
+    /// Precedence: a value set in the new `realtime:` block wins; a present
+    /// legacy value fills only an unset new field; defaults (the accessor
+    /// constants) fill the rest. Environment variables and profiles cannot
+    /// override this (D-20, server home config only).
+    pub fn fold_legacy(&mut self, voice: &VoiceConfig) {
+        if self.model.is_none() {
+            self.model = voice.realtime_model.clone();
+        }
+        if self.voice.is_none() {
+            self.voice = voice.realtime_voice.clone();
+        }
+        if self.transcription_model.is_none() {
+            self.transcription_model = voice.realtime_transcription_model.clone();
+        }
+    }
 }
 
 /// Phase 36.17.9 (D-10/D-11/D-12): Wake-word configuration.
@@ -2312,28 +2582,28 @@ pub struct VoiceConfig {
     /// Used by voice_loop.rs vad_params::RMS_THRESHOLD on the web path only.
     #[serde(default = "default_web_silence_threshold_rms")]
     pub web_silence_threshold_rms: f32,
-    /// Phase 36.17.12 (BUG 3 fix): OpenAI Realtime API model name for the open-mic
-    /// WebRTC path. The GA production model is `"gpt-realtime"` (as of 2026).
-    /// Whitelist-validated in `issue_realtime_token` before any network call (T-V5).
-    /// Changing this field to an unlisted name will trigger the D-07 fallback to
-    /// turn-based voice (no crash, graceful degradation).
-    /// Default: `"gpt-realtime"`.
-    #[serde(default = "default_realtime_model")]
-    pub realtime_model: String,
-    /// Phase 36.17.12: OpenAI Realtime agent voice for the open-mic WebRTC path,
-    /// sent as `session.audio.output.voice` / passed to the ephemeral-token request.
-    /// Server-resolved and whitelist-validated (alloy/shimmer/echo/verse/ash/ballad/
-    /// coral/sage); an unlisted value triggers the D-07 fallback. Default: `"shimmer"`.
-    #[serde(default = "default_realtime_voice")]
-    pub realtime_voice: String,
-    /// Phase 36.17.12: OpenAI Realtime input-audio transcription model. When set,
-    /// the provider transcribes the USER's speech and emits
-    /// `conversation.item.input_audio_transcription.completed` events, which the
-    /// web UI shows in the transcript card. One of `"gpt-4o-mini-transcribe"`
-    /// (default), `"gpt-4o-transcribe"`, `"whisper-1"`, or `"off"` to disable
-    /// (sends `transcription: null`). Sent as `session.audio.input.transcription.model`.
-    #[serde(default = "default_realtime_transcription_model")]
-    pub realtime_transcription_model: String,
+    /// Phase 54.7 (D-15): which voice family runs — `realtime` or `turn_based`.
+    /// `None` means "not set explicitly": [`VoiceConfig::effective_service`] then
+    /// derives it from the legacy `barge_in_mode == open_mic` (load-time
+    /// migration input only). An explicit value always wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<VoiceService>,
+    /// LEGACY (D-13): former OpenAI Realtime model key. Read as a fallback for
+    /// the top-level `realtime:` block ([`RealtimeConfig::fold_legacy`]), never
+    /// written by the web panel. Superseded by `realtime.model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_model: Option<String>,
+    /// LEGACY (D-13): former OpenAI Realtime voice key. Read as a fallback for
+    /// the top-level `realtime:` block, never written by the web panel.
+    /// Superseded by `realtime.voice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_voice: Option<String>,
+    /// LEGACY (D-13): former Realtime input-transcription model key (including
+    /// the `"off"` sentinel). Read as a fallback for the top-level `realtime:`
+    /// block, never written by the web panel. Superseded by
+    /// `realtime.transcription_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_transcription_model: Option<String>,
     /// Phase 36.17.12 (BUG 5 fix): OpenAI Realtime input noise-reduction profile,
     /// sent as `session.audio.input.noise_reduction`. Filters mic audio BEFORE VAD
     /// and the model, sharply reducing false triggers from background noise.
@@ -2372,24 +2642,6 @@ fn default_web_silence_threshold_rms() -> f32 {
     5.0
 }
 
-/// Serde default helper for `VoiceConfig::realtime_model`.
-/// The GA OpenAI Realtime API model name (2026). A field-level
-/// `#[serde(default = "...")]` is used so pre-36.17.12 configs that lack this
-/// key parse cleanly and get the correct default (not an empty string).
-fn default_realtime_model() -> String {
-    "gpt-realtime".to_string()
-}
-
-/// Serde default helper for `VoiceConfig::realtime_voice` (OpenAI Realtime agent voice).
-fn default_realtime_voice() -> String {
-    "shimmer".to_string()
-}
-
-/// Serde default helper for `VoiceConfig::realtime_transcription_model`.
-fn default_realtime_transcription_model() -> String {
-    "gpt-4o-mini-transcribe".to_string()
-}
-
 /// Serde default helpers for the Phase 36.17.12 BUG 5 realtime VAD/noise fields.
 /// Field-level defaults so pre-BUG-5 configs that lack these keys parse cleanly.
 fn default_realtime_noise_reduction() -> String {
@@ -2408,6 +2660,29 @@ fn default_realtime_vad_prefix_ms() -> u32 {
     300
 }
 
+impl VoiceConfig {
+    /// Effective voice family (D-15): an explicit `service` wins; otherwise the
+    /// legacy `barge_in_mode: open_mic` maps to `Realtime` and anything else to
+    /// `TurnBased`.
+    pub fn effective_service(&self) -> VoiceService {
+        match self.service {
+            Some(explicit) => explicit,
+            None if self.barge_in_mode == BargeInMode::OpenMic => VoiceService::Realtime,
+            None => VoiceService::TurnBased,
+        }
+    }
+
+    /// True while the config still carries pre-54.7 realtime state: any legacy
+    /// `realtime_*` key is set, or `service` is unset and `barge_in_mode` is
+    /// `open_mic`. The web panel uses this to offer the one-way migration save.
+    pub fn legacy_realtime_keys_present(&self) -> bool {
+        self.realtime_model.is_some()
+            || self.realtime_voice.is_some()
+            || self.realtime_transcription_model.is_some()
+            || (self.service.is_none() && self.barge_in_mode == BargeInMode::OpenMic)
+    }
+}
+
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
@@ -2420,9 +2695,10 @@ impl Default for VoiceConfig {
             barge_in_mode: BargeInMode::default(),
             wake_word: WakeWordConfig::default(),
             web_silence_threshold_rms: 5.0,
-            realtime_model: "gpt-realtime".to_string(),
-            realtime_voice: "shimmer".to_string(),
-            realtime_transcription_model: "gpt-4o-mini-transcribe".to_string(),
+            service: None,
+            realtime_model: None,
+            realtime_voice: None,
+            realtime_transcription_model: None,
             realtime_noise_reduction: "far_field".to_string(),
             realtime_vad_mode: "semantic_vad".to_string(),
             realtime_vad_threshold: 0.5,
@@ -2446,6 +2722,10 @@ impl Default for VoiceConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutonomousConfig {
+    /// DEPRECATED alias (Phase 57 D-08) for the DEFCON dial: `true` reads as
+    /// level 5, `false` as level 3. Never stored as a separate yolo state;
+    /// resolve through [`Config::effective_defcon_level`].
+    ///
     /// When true, skip dangerous-command approval prompts. Budget 100% /
     /// fatal error / user interrupt remain unskippable (G-01/G-04/G-09).
     pub yolo: bool,
@@ -2475,6 +2755,10 @@ pub struct CompressionConfig {
     pub protect_last_tokens: usize,
     pub tool_pair_shift_tokens: usize,
     pub protect_first_n: usize,
+    /// Hermes-shaped per-model compression trigger, e.g. `qwen2.5-7b: 0.35`
+    /// (Phase 58.3.1 D-15). Keys match case-insensitively as substrings of the
+    /// model id; the longest matching key wins.
+    pub model_thresholds: HashMap<String, f32>,
 }
 
 impl Default for CompressionConfig {
@@ -2483,6 +2767,27 @@ impl Default for CompressionConfig {
             protect_last_tokens: 20_000,
             tool_pair_shift_tokens: 500,
             protect_first_n: 3,
+            model_thresholds: HashMap::new(),
+        }
+    }
+}
+
+impl CompressionConfig {
+    /// Per-model compression threshold override (longest case-insensitive
+    /// substring key wins). Values that are not finite or not strictly inside
+    /// (0, 1) are ignored with a warning.
+    pub fn threshold_for_model(&self, model: &str) -> Option<f32> {
+        let model = model.to_lowercase();
+        let (key, value) = self
+            .model_thresholds
+            .iter()
+            .filter(|(k, _)| model.contains(&k.to_lowercase()))
+            .max_by_key(|(k, _)| k.len())?;
+        if value.is_finite() && *value > 0.0 && *value < 1.0 {
+            Some(*value)
+        } else {
+            tracing::warn!(key = %key, value = %value, "ignoring out-of-range compression.model_thresholds value");
+            None
         }
     }
 }
@@ -2602,6 +2907,68 @@ pub struct MemoryConfig {
     /// synthetic 1.0/0.5 scores; any floor <= 1.0 is a no-op there).
     #[serde(default = "default_recall_min_score")]
     pub recall_min_score: f64,
+    /// 58.2 D-02: master switch for Tier 2 semantic memory (ADR-0008). Requires memory_enabled.
+    #[serde(default)]
+    pub tier2_enabled: bool,
+    /// 58.2 D-02: ADR-0008 consolidation flag (claim extraction from sessions). Default off.
+    #[serde(default)]
+    pub consolidation_enabled: bool,
+    /// 58.2 D-02: ADR-0008 dreams flag (offline reflection passes). Default off.
+    #[serde(default)]
+    pub dreams_enabled: bool,
+    /// 58.2 D-02: ADR-0008 forgetting flag (decay/tombstone sweeps). Default off.
+    #[serde(default)]
+    pub forgetting_enabled: bool,
+    /// 58.2 D-30: the hourly consolidation promotes durable user facts into USER.md / MEMORY.md
+    /// through the Tier 1 add path. Default off; needs `consolidation_enabled`.
+    #[serde(default)]
+    pub promotion_enabled: bool,
+    /// 58.2 D-04/D-08/D-25: embedding endpoint settings for Tier 2.
+    #[serde(default)]
+    pub embeddings: EmbeddingsConfig,
+}
+
+/// `memory.embeddings` (58.2 D-04, D-06, D-08, D-25).
+///
+/// - D-04: when `base_url` is set it overrides the built-in model with an OpenAI-compatible endpoint.
+/// - D-08/D-25: `api_key_env` is an env var NAME read from the process env only this phase (no vault
+///   lookup); a key value is never stored here.
+/// - D-06: without `base_url`, `model` must be one of `tier2::TIER2_BUILTIN_MODELS_384`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmbeddingsConfig {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key_env: Option<String>,
+}
+
+impl MemoryConfig {
+    /// Validate the Tier 2 settings (58.2 D-06, D-08, D-25). Callers disable only Tier 2 on error.
+    ///
+    /// # Errors
+    /// `base_url` not http(s), `api_key_env` not an env var name, or (with no `base_url`) a
+    /// built-in `model` outside the 384-dim allowlist.
+    pub fn validate_tier2(&self) -> anyhow::Result<()> {
+        let e = &self.embeddings;
+        if let Some(url) = &e.base_url
+            && !(url.starts_with("http://") || url.starts_with("https://"))
+        {
+            anyhow::bail!("memory.embeddings.base_url '{url}' must start with http:// or https://");
+        }
+        if let Some(k) = &e.api_key_env {
+            validate_api_key_env(k)?;
+        }
+        if e.base_url.is_none()
+            && let Some(m) = &e.model
+            && !crate::tier2::TIER2_BUILTIN_MODELS_384.contains(&m.as_str())
+        {
+            anyhow::bail!(
+                "memory.embeddings.model '{m}' is not a built-in 384-dim model (allowed: {});                  set memory.embeddings.base_url to use another model. Tier 2 refuses to start",
+                crate::tier2::TIER2_BUILTIN_MODELS_384.join(", ")
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for MemoryConfig {
@@ -2614,6 +2981,12 @@ impl Default for MemoryConfig {
             nudge_interval: 10,
             skill_creation_guidance: true,
             recall_min_score: default_recall_min_score(),
+            tier2_enabled: false,
+            consolidation_enabled: false,
+            dreams_enabled: false,
+            forgetting_enabled: false,
+            promotion_enabled: false,
+            embeddings: EmbeddingsConfig::default(),
         }
     }
 }
@@ -2699,6 +3072,21 @@ pub struct AgentConfig {
     /// ephemeral Timestamp slot (slot 7), never the cached prefix.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// Phase 58.3.1 D-02: force switch for the compact prompt/tool profile
+    /// (key `agent.compact_profile`). `auto` (default) turns it on when the full
+    /// prompt floor exceeds half the resolved window.
+    #[serde(default)]
+    pub compact_profile: CompactProfileMode,
+}
+
+/// Phase 58.3.1 D-02: `agent.compact_profile` — `on`, `off` or `auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompactProfileMode {
+    #[default]
+    Auto,
+    On,
+    Off,
 }
 
 impl AgentConfig {
@@ -2738,6 +3126,7 @@ impl Default for AgentConfig {
             max_iterations: default_agent_max_iterations(),
             clarify_timeout_secs: default_clarify_timeout_secs(),
             timezone: None,
+            compact_profile: CompactProfileMode::default(),
         }
     }
 }
@@ -3087,6 +3476,8 @@ pub struct BrowserConfig {
     /// D-02: run browser with a visible window (true) or headless (false, default).
     pub headed: bool,
     /// D-02: allow `--no-sandbox` flag (required on Docker/restricted envs). Default false.
+    /// The `IRONHERMES_BROWSER_NO_SANDBOX` env var (set to 1 in the container
+    /// image) takes precedence over this key in both directions.
     pub no_sandbox: bool,
     /// D-15: domain allowlist for browser_navigate. Empty = allow all hosts.
     /// Exact hostname match — subdomains are NOT covered by the apex entry.
@@ -3149,6 +3540,168 @@ impl Default for BrowserConfig {
             obscura_port: None,
             obscura_stealth: false,
             obscura_allow_private_network: false,
+        }
+    }
+}
+
+// =============================================================================
+// Ros2Config (Phase 49.8 D-14)
+// =============================================================================
+
+/// Phase 49.8 D-14: `ros2:` config block — rosbridge WebSocket URL, per-write-kind
+/// allowlists, physical safety caps, and the ROSPider's default topic/service names.
+/// All fields `#[serde(default)]` for backward compat — pre-49.8 YAML configs parse
+/// cleanly with ros2 entirely absent (see `ros2_config_absent_block_is_default`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Ros2Config {
+    /// D-14/D-02: rosbridge WebSocket URL. `None` (no config value AND no
+    /// `IRONHERMES_ROS2_BRIDGE_URL` override) means both `ros2` and `rospider`
+    /// report `is_available() == false` — mirrors `HEXAPOD_IP`'s hidden-when-unset
+    /// behavior. Moving the robot from the LAN to `ws://localhost:9090` is a URL
+    /// change only (D-02).
+    pub bridge_url: Option<String>,
+    /// D-04: allowlisted `publish` targets. **Empty means nothing is permitted** —
+    /// this deliberately INVERTS `BrowserConfig.allowed_domains`, whose empty list
+    /// means allow-all. Writes default to nothing allowed until the operator
+    /// declares entries; declaring an entry also declares the exact message type
+    /// that must match before a publish is permitted.
+    pub publish: Vec<Ros2AllowEntry>,
+    /// D-04: allowlisted `call_service` targets. Same empty = deny-all semantics
+    /// as `publish` (consumed starting 49.8-02).
+    pub services: Vec<Ros2AllowEntry>,
+    /// D-04: allowlisted `send_goal` action targets. Same empty = deny-all
+    /// semantics as `publish` (consumed starting 49.8-07).
+    pub actions: Vec<Ros2AllowEntry>,
+    /// D-08/D-09: physical safety caps, clamped in-tool and never relaxed by
+    /// `--yolo`/`autonomous.yolo` (D-11).
+    pub caps: Ros2Caps,
+    /// D-14/D-15: the Hiwonder ROSPider's own default topic/service/servo names.
+    /// Every value is config-overridable so on-robot names can be corrected
+    /// without a code change (consumed starting 49.8-09).
+    pub rospider: RospiderConfig,
+}
+
+/// Phase 49.8 D-04/D-14: one allowlisted write target — a topic, service, or
+/// action name paired with its declared message/service/action type and any
+/// dotted-path numeric clamps (consumed by 49.8-04's timed-motion engine).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Ros2AllowEntry {
+    /// The exact topic/service/action name (e.g. `/controller/cmd_vel`). Matched
+    /// by exact string equality — no globbing (D-04).
+    pub name: String,
+    /// The declared message/service/action type (e.g. `geometry_msgs/msg/Twist`).
+    /// Spelled `type:` in YAML — the same key operators and rosbridge itself use.
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    /// Dotted-path numeric clamps (e.g. `linear.x: [-0.1, 0.1]`), consumed by
+    /// 49.8-04's timed-motion engine. Empty for entries with no per-field clamp.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub limits: BTreeMap<String, [f64; 2]>,
+}
+
+/// Phase 49.8 D-08/D-09: physical safety caps enforced in-tool. Never relaxed by
+/// `--yolo`/`autonomous.yolo` (D-11) — these are physical safety, not a budget gate.
+/// A key absent from YAML takes this struct's `Default` value through the
+/// struct-level `#[serde(default)]` below. A present value is resolved by
+/// `ironhermes_tools::ros2::safety::EffectiveCaps::from_config` (49.8-12 D-08
+/// gap closure): the field types stay `f64`/`u32` — an absent key and an
+/// explicit `0`/`0.0` are already distinguishable at this struct, so no field
+/// is promoted to `Option`. No field's effective value can ever exceed its
+/// hard code ceiling, whatever the configured value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Ros2Caps {
+    /// m/s, default 0.10, hard ceiling 0.5. An explicit `0` is honored — it
+    /// disables linear motion (every linear component publishes as 0.0). A
+    /// negative or non-finite value falls back to the default.
+    pub max_linear_velocity: f64,
+    /// rad/s, default 0.5, hard ceiling 1.5. An explicit `0` is honored — it
+    /// disables angular motion (every angular component publishes as 0.0). A
+    /// negative or non-finite value falls back to the default.
+    pub max_angular_velocity: f64,
+    /// Seconds, default 5.0, hard ceiling 5.0. Not usable at `0` (a
+    /// zero-length motion) — a non-positive or non-finite value falls back
+    /// to the default.
+    pub max_motion_duration_secs: f64,
+    /// Hz, default 10.0, clamped into `[2.0, 20.0]`. Not usable at `0`
+    /// (divide-by-zero rate) — a non-positive or non-finite value falls back
+    /// to the default.
+    pub motion_publish_hz: f64,
+    /// Messages, default 20, hard ceiling 20. An explicit `0` is honored — it
+    /// disables sampling entirely: `subscribe` and every sensor/camera read
+    /// answer "is not permitted" before any bridge connection opens.
+    pub max_subscribe_messages: u32,
+    /// Seconds, default 10.0, hard ceiling 10.0. Not usable at `0` (an empty
+    /// window) — a non-positive or non-finite value falls back to the
+    /// default.
+    pub max_subscribe_secs: f64,
+    /// Seconds, default 120.0, hard ceiling 300.0. Not usable at `0` (an
+    /// instant watchdog) — a non-positive or non-finite value falls back to
+    /// the default.
+    pub max_goal_secs: f64,
+}
+
+impl Default for Ros2Caps {
+    fn default() -> Self {
+        Self {
+            max_linear_velocity: 0.10,
+            max_angular_velocity: 0.5,
+            max_motion_duration_secs: 5.0,
+            motion_publish_hz: 10.0,
+            max_subscribe_messages: 20,
+            max_subscribe_secs: 10.0,
+            max_goal_secs: 120.0,
+        }
+    }
+}
+
+/// Phase 49.8 D-14/D-15: the Hiwonder ROSPider's default topic/service/servo
+/// names, source-derived from the `Jetson_Nano_ROS2` branch (see
+/// 49.8-RESEARCH.md's ROSPider Inventory). Every value is config-overridable so
+/// an on-robot name that differs from this default can be corrected without a
+/// code change.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RospiderConfig {
+    pub cmd_vel_topic: String,
+    /// ROSPider gait-0 rest-stop target (Phase 49.8 Plan 13, G-49.8-2b): a
+    /// `kinematics_msgs/msg/Traveling` message with `gait: 0` is the real
+    /// stop on ROSPider firmware — `move_controller.set_traveling_callback`
+    /// routes it to `step_controller.stop_running()`, which finishes the
+    /// current step and holds pose. A zero Twist on `cmd_vel_topic` alone
+    /// leaves the legs stepping in place indefinitely; this is published
+    /// strictly after that zero-Twist burst. Empty disables the rest stop.
+    pub traveling_topic: String,
+    pub pose_topic: String,
+    pub gait_topic: String,
+    pub builtin_pose_service: String,
+    pub servo_topic: String,
+    pub camera_pan_servo_id: u16,
+    pub camera_compressed_topic: String,
+    pub camera_raw_topic: String,
+    pub imu_topic: String,
+    pub battery_topic: String,
+    pub odom_topic: String,
+    pub scan_topic: String,
+}
+
+impl Default for RospiderConfig {
+    fn default() -> Self {
+        Self {
+            cmd_vel_topic: "/controller/cmd_vel".to_string(),
+            traveling_topic: "/controller/traveling".to_string(),
+            pose_topic: "/controller/set_pose_euler".to_string(),
+            gait_topic: "/step_controller/cmd_param".to_string(),
+            builtin_pose_service: "/controller/set_pose_1".to_string(),
+            servo_topic: "/servo_controller".to_string(),
+            camera_pan_servo_id: 19,
+            camera_compressed_topic: "/depth_cam/rgb/image_compressed".to_string(),
+            camera_raw_topic: "/depth_cam/rgb/image_raw".to_string(),
+            imu_topic: "/imu".to_string(),
+            battery_topic: "/ros_robot_controller/battery".to_string(),
+            odom_topic: "/odom".to_string(),
+            scan_topic: "/scan".to_string(),
         }
     }
 }
@@ -3229,6 +3782,30 @@ pub struct GatewayConfig {
     /// to `true`; set `false` to restore the legacy stateless behavior (D-02).
     #[serde(default = "default_true")]
     pub persist_sessions: bool,
+    /// Phase 54.8 D-07: per-turn deadline in seconds. A gateway turn whose
+    /// `run_turn` has not finished by then is cancelled, given a bounded
+    /// grace to unwind, then dropped, and the chat gets a distinct timeout
+    /// notice. `<= 0` disables the deadline. Default 1800 covers a site-deploy
+    /// turn that includes two `/approve` waits, an npm build and two deploys.
+    #[serde(default = "default_turn_timeout_secs")]
+    pub turn_timeout_secs: i64,
+}
+
+fn default_turn_timeout_secs() -> i64 {
+    1800
+}
+
+impl GatewayConfig {
+    /// The configured per-turn deadline, or `None` when disabled (`<= 0`).
+    pub fn turn_deadline(&self) -> Option<std::time::Duration> {
+        if self.turn_timeout_secs > 0 {
+            Some(std::time::Duration::from_secs(
+                self.turn_timeout_secs as u64,
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for GatewayConfig {
@@ -3238,6 +3815,7 @@ impl Default for GatewayConfig {
             context_engine: default_gateway_engine(),
             compression_threshold: default_gateway_threshold(),
             persist_sessions: true,
+            turn_timeout_secs: default_turn_timeout_secs(),
         }
     }
 }
@@ -3467,6 +4045,24 @@ pub struct SecurityConfig {
     /// they can only see and stop jobs belonging to the asking chat, so they
     /// grant no capability this flag would need to withhold.
     pub remote_loop_enabled: bool,
+    /// Phase 57 (D-11): the canonical DEFCON strictness key (1 strictest ..
+    /// 5 most permissive). When absent, [`Config::effective_defcon_level`]
+    /// falls back to the deprecated aliases (`skills.defcon_level`, then
+    /// `autonomous.yolo`) and finally to level 3 (D-21).
+    ///
+    /// This is the process-wide DEFAULT. A per-session `/yolo <N>` override
+    /// lives in `crate::defcon::session_defcon()` and is never written back to
+    /// `config.yaml` (D-09).
+    pub defcon_level: Option<DefconLevel>,
+    /// Phase 57 (D-22): a FIFTH, independent opt-in — separate from the four
+    /// flags above — that authorizes a remote surface (chat platforms and the
+    /// web UI, anything that is not `Platform::Local`) to change a session's
+    /// DEFCON level with `/yolo <N>`. Defaults `false` (closed). Changing how
+    /// strict every gate is for a session is a different capability from
+    /// scheduling a job or writing config, so none of the other flags imply
+    /// it. TUI and CLI (`Platform::Local`) are local trusted surfaces and are
+    /// ungated regardless of this flag.
+    pub defcon_remote_change_enabled: bool,
 }
 // Phase 49.1 Plan 07 Task 4: the manual `impl Default for SecurityConfig` this
 // struct carried while `redact_secrets: true` was a field (a non-derivable
@@ -3490,6 +4086,76 @@ impl Default for RateLimitConfig {
         Self {
             messages_per_minute: 10,
             burst_size: 3,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    /// Phase 54 Plan 05 (D-19, Finding 6 of ADR-0005): config-validation floor
+    /// for the rate-limiter fields, not a product decision. These bounds come
+    /// from the ADR's own proposed mitigation range (54-RESEARCH.md Open
+    /// Question 2). An operator who genuinely needs a value outside this
+    /// range should raise the bound deliberately (i.e. change this constant)
+    /// rather than have an out-of-range value silently accepted.
+    pub const MIN_MESSAGES_PER_MINUTE: u32 = 1;
+    /// See [`Self::MIN_MESSAGES_PER_MINUTE`].
+    pub const MAX_MESSAGES_PER_MINUTE: u32 = 1000;
+    /// See [`Self::MIN_MESSAGES_PER_MINUTE`].
+    pub const MIN_BURST_SIZE: u32 = 1;
+    /// See [`Self::MIN_MESSAGES_PER_MINUTE`].
+    pub const MAX_BURST_SIZE: u32 = 100;
+
+    /// Clamp out-of-range rate-limit values to the nearest bound and emit a
+    /// WARN naming the field, the supplied value and the clamped value (D-19).
+    ///
+    /// Mirrors [`AgentConfig::normalize`]'s shape: mutates `self`, returns
+    /// `()`, and never fails — the gateway must always start even when the
+    /// operator's config is out of range (D-19's explicit design: reject
+    /// nothing). The accepted downside is that a silently clamped value is a
+    /// config the operator believes is in effect and is not; the WARN below
+    /// is the sole compensating control for that gap, which is why it is
+    /// asserted independently of the clamped value in this module's tests.
+    ///
+    /// Emits nothing when both fields are already within bounds.
+    pub fn clamp_and_warn(&mut self) {
+        if self.messages_per_minute < Self::MIN_MESSAGES_PER_MINUTE
+            || self.messages_per_minute > Self::MAX_MESSAGES_PER_MINUTE
+        {
+            let supplied = self.messages_per_minute;
+            let clamped = supplied.clamp(
+                Self::MIN_MESSAGES_PER_MINUTE,
+                Self::MAX_MESSAGES_PER_MINUTE,
+            );
+            tracing::warn!(
+                target: "ironhermes_core::config::rate_limit_clamp",
+                field = "messages_per_minute",
+                supplied,
+                clamped,
+                "rate_limit.messages_per_minute is out of bounds ({}..={}); clamping {} to {} — \
+                 the supplied value is NOT in effect",
+                Self::MIN_MESSAGES_PER_MINUTE,
+                Self::MAX_MESSAGES_PER_MINUTE,
+                supplied,
+                clamped
+            );
+            self.messages_per_minute = clamped;
+        }
+        if self.burst_size < Self::MIN_BURST_SIZE || self.burst_size > Self::MAX_BURST_SIZE {
+            let supplied = self.burst_size;
+            let clamped = supplied.clamp(Self::MIN_BURST_SIZE, Self::MAX_BURST_SIZE);
+            tracing::warn!(
+                target: "ironhermes_core::config::rate_limit_clamp",
+                field = "burst_size",
+                supplied,
+                clamped,
+                "rate_limit.burst_size is out of bounds ({}..={}); clamping {} to {} — the \
+                 supplied value is NOT in effect",
+                Self::MIN_BURST_SIZE,
+                Self::MAX_BURST_SIZE,
+                supplied,
+                clamped
+            );
+            self.burst_size = clamped;
         }
     }
 }
@@ -3541,21 +4207,36 @@ impl HubConfig {
 /// 5 = least restrictive (permissive warnings only).
 /// 1 = most restrictive (hard-reject any suspicious path).
 ///
-/// Defaults to `5` so existing deployments are unaffected.
-/// Operators can tighten to `1` in `config.yaml` under `skills.defcon_level`.
+/// The canonical config key is `security.defcon_level` (Phase 57 D-11); read
+/// the RESOLVED level through [`Config::effective_defcon_level`], whose default
+/// when nothing is configured is 3 (D-21). `DefconLevel::default()` below is the
+/// raw type default (5) and is not the resolved default; production code must
+/// not call it to decide strictness.
 ///
-/// Used today to gate CR-01 symlink-bypass enforcement in `SkillRegistry`:
-///   DEFCON 1-2 → hard-reject skill paths that escape their declared root.
+/// Gates read from this tier:
+///   DEFCON 1-2 → hard-reject skill paths that escape their declared root
+///                (CR-01) and confirm new MCP OAuth issuers.
 ///   DEFCON 3-5 → warn-but-load (backward-compatible).
+///   DEFCON 4-5 → [`DefconLevel::yolo_bypass_active`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
 pub struct DefconLevel(u8);
 
 impl DefconLevel {
-    /// DEFCON 5 — least restrictive, the default.
+    /// DEFCON 5 — least restrictive.
     pub const FIVE: Self = Self(5);
+    /// DEFCON 3 — the resolved default when no key is configured (D-21):
+    /// today's "needs approval" behaviour.
+    pub const THREE: Self = Self(3);
     /// DEFCON 1 — most restrictive.
     pub const ONE: Self = Self(1);
+
+    /// True only at levels 4 and 5 (D-21). Bypass and level are separate
+    /// concepts: levels 1-3 always reach a real approval, so an install with no
+    /// keys (resolved level 3) is never bypass-active.
+    pub fn yolo_bypass_active(self) -> bool {
+        self.0 >= 4
+    }
 
     /// Returns the numeric level (1–5).
     pub fn level(self) -> u8 {
@@ -3570,6 +4251,9 @@ impl DefconLevel {
 }
 
 impl Default for DefconLevel {
+    /// The RAW type default (5), kept for the legacy
+    /// `SkillRegistry::load_with_paths` helpers. Not the resolved default:
+    /// that is [`Config::effective_defcon_level`] (3, D-21).
     fn default() -> Self {
         Self::FIVE
     }
@@ -3633,20 +4317,29 @@ pub struct SkillsConfig {
     #[serde(default)]
     pub hub: HubConfig,
     /// Phase 26.7.3 D-06 — opt-out list; names present here are explicitly
-    /// disabled. All other skills are on by default. Cross-surface: agent
-    /// loop, web UI, and TUI all read this field. `#[serde(default)]`
+    /// disabled. All other skills are on by default. `#[serde(default)]`
     /// ensures existing config.yaml files without this key still parse.
+    ///
+    /// Phase 54.1 D-12: the real consumer set, corrected. This field is
+    /// captured once (lowercased) by `SkillRegistry::load_with_config` into
+    /// `SkillRegistry::disabled_names`, and consumed by
+    /// `SkillRegistry::filtered_catalog_text` — the prompt catalog a
+    /// disabled name is elided from. It is also read by `iron_hermes_ui`
+    /// for the Skills screen's enabled/disabled display. It is NOT an
+    /// activation gate: `crates/ironhermes-tools/src/skills_tool.rs` never
+    /// consults it, so a disabled skill stays fully activatable through the
+    /// `skills` tool and remains listed by the untiered `catalog_text()`
+    /// (the `/skills` command).
     #[serde(default)]
     pub disabled: Vec<String>,
-    /// CR-01 / DEFCON tier for skills symlink-bypass enforcement.
-    ///
-    /// DEFCON 1–2: hard-reject any skill whose canonicalized path escapes its
-    /// declared search root (symlink bypass attempt).
-    /// DEFCON 3–5 (default 5): warn-but-load (backward-compatible).
+    /// DEPRECATED alias (Phase 57 D-11) for `security.defcon_level`. Read only
+    /// when `security.defcon_level` is absent; it wins over the
+    /// `autonomous.yolo` alias. Consumers must read
+    /// [`Config::effective_defcon_level`], never this field directly.
     ///
     /// Set in `config.yaml` as `skills.defcon_level: 2` (integer 1–5).
     #[serde(default)]
-    pub defcon_level: DefconLevel,
+    pub defcon_level: Option<DefconLevel>,
     /// Number of leading search-path roots (in the order documented on this
     /// struct: the 3 hardcoded defaults, then `extra_paths`) whose skills get
     /// a full `- name: description` line in the rendered catalog
@@ -3686,7 +4379,7 @@ impl Default for SkillsConfig {
             config: HashMap::new(),
             hub: HubConfig::default(),
             disabled: Vec::new(),
-            defcon_level: DefconLevel::default(),
+            defcon_level: None,
             catalog_priority_root_count: default_catalog_priority_root_count(),
         }
     }
@@ -3798,6 +4491,75 @@ impl Default for SubagentConfig {
     }
 }
 
+/// A problem found by [`Config::validate_yaml_str`], with a 1-based position
+/// when the parser gave one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YamlIssue {
+    pub message: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+}
+
+impl Config {
+    /// Validate raw `config.yaml` text against the real [`Config`] without
+    /// touching disk or the process (D-03). Returns the sorted dotted paths of
+    /// keys `Config` does not read (warnings, not errors; D-06), or the first
+    /// blocking issue.
+    ///
+    /// Never exits the process: the legacy `subagent:` key is reported as a
+    /// [`YamlIssue`] here, unlike [`Config::load_from`], which exits.
+    pub fn validate_yaml_str(text: &str) -> Result<Vec<String>, YamlIssue> {
+        if let Some(msg) = detect_legacy_subagent_key(text) {
+            let line = text
+                .lines()
+                .position(|l| l.trim_start().starts_with("subagent:"))
+                .map(|i| i + 1);
+            // The loader's text ends "... in your config.yaml."; the editor
+            // already says which file, so end it at the rename instruction.
+            let message = match msg.strip_suffix(" in your config.yaml.") {
+                Some(head) => format!("{head}."),
+                None => msg,
+            };
+            return Err(YamlIssue {
+                message,
+                line,
+                column: Some(1),
+            });
+        }
+        let mut unknown: Vec<String> = Vec::new();
+        let de = serde_yaml::Deserializer::from_str(text);
+        match serde_ignored::deserialize::<_, _, Config>(de, |path| unknown.push(path.to_string()))
+        {
+            Ok(_) => {
+                unknown.sort();
+                unknown.dedup();
+                Ok(unknown)
+            }
+            Err(e) => {
+                let (line, column) = match e.location() {
+                    Some(loc) => (Some(loc.line()), Some(loc.column())),
+                    None => (None, None),
+                };
+                let mut message = e.to_string();
+                // serde_yaml appends " at line L column C"; the UI prints the
+                // position once, so drop it when it is the reported location.
+                // Flow-sequence errors carry two positions and keep their text.
+                if let (Some(l), Some(c)) = (line, column) {
+                    let suffix = format!(" at line {l} column {c}");
+                    if let Some(head) = message.strip_suffix(&suffix) {
+                        message = head.to_string();
+                    }
+                }
+                Err(YamlIssue {
+                    message,
+                    line,
+                    column,
+                })
+            }
+        }
+    }
+}
+
 /// Detect the legacy `subagent:` YAML key in raw config file content.
 ///
 /// Returns `Some(message)` when a line beginning with `subagent:` is found
@@ -3868,6 +4630,88 @@ impl Config {
         Self::load_from(&config_path)
     }
 
+    /// The single resolved DEFCON level for this config (Phase 57 D-08/D-11/D-21).
+    ///
+    /// Precedence: `security.defcon_level`, then the deprecated
+    /// `skills.defcon_level`, then `autonomous.yolo` (`true` -> 5), and finally
+    /// level 3 when nothing is set (D-21: today's "needs approval" behaviour).
+    /// Pure: no I/O and no warnings (see `resolve_defcon_aliases` for those).
+    pub fn effective_defcon_level(&self) -> DefconLevel {
+        if let Some(level) = self.security.defcon_level {
+            level
+        } else if let Some(level) = self.skills.defcon_level {
+            level
+        } else if self.autonomous.yolo {
+            DefconLevel::FIVE
+        } else {
+            DefconLevel::THREE
+        }
+    }
+
+    /// Every deprecation message that applies to this config's DEFCON keys
+    /// (Phase 57 D-08/D-11). Pure: it does not gate on "already warned".
+    pub fn defcon_alias_warnings(&self) -> Vec<String> {
+        let (yolo, skills) = self.defcon_alias_warning_pair();
+        yolo.into_iter().chain(skills).collect()
+    }
+
+    /// `(yolo alias message, skills alias message)`, each present only when
+    /// that deprecated key is in play. `autonomous.yolo: false` equals an
+    /// absent key (both resolve to 3), so it never warns.
+    fn defcon_alias_warning_pair(&self) -> (Option<String>, Option<String>) {
+        let resolved = self.effective_defcon_level().level();
+        let yolo = (self.autonomous.yolo && self.security.defcon_level.is_none()).then(|| {
+            format!(
+                "[config] autonomous.yolo is deprecated: set security.defcon_level: {resolved} \
+                 instead (autonomous.yolo: true is read as DEFCON 5, false as DEFCON 3)"
+            )
+        });
+        let skills = self.skills.defcon_level.map(|_| {
+            format!(
+                "[config] skills.defcon_level is deprecated: move it to \
+                 security.defcon_level: {resolved} (it is read only when security.defcon_level \
+                 is absent)"
+            )
+        });
+        (yolo, skills)
+    }
+
+    /// The messages from [`Self::defcon_alias_warnings`] not yet emitted,
+    /// flipping each alias's own `warned` flag so a reload stays silent.
+    fn take_defcon_alias_warnings(
+        &self,
+        yolo_warned: &std::sync::atomic::AtomicBool,
+        skills_warned: &std::sync::atomic::AtomicBool,
+    ) -> Vec<String> {
+        use std::sync::atomic::Ordering;
+        let (yolo, skills) = self.defcon_alias_warning_pair();
+        let mut out = Vec::new();
+        if let Some(msg) = yolo
+            && !yolo_warned.swap(true, Ordering::SeqCst)
+        {
+            out.push(msg);
+        }
+        if let Some(msg) = skills
+            && !skills_warned.swap(true, Ordering::SeqCst)
+        {
+            out.push(msg);
+        }
+        out
+    }
+
+    /// Emit the deprecation warnings once per process (D-08, D-11). Called from
+    /// `load_from`'s normalization block.
+    fn resolve_defcon_aliases(&self) {
+        static YOLO_WARNED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static SKILLS_WARNED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        for msg in self.take_defcon_alias_warnings(&YOLO_WARNED, &SKILLS_WARNED) {
+            tracing::warn!("{msg}");
+            eprintln!("{msg}");
+        }
+    }
+
     /// Load config from a specific path, falling back to defaults.
     ///
     /// Phase 26 D-02: if `custom_providers:` entries exist and have no matching
@@ -3912,6 +4756,19 @@ impl Config {
             // Collapse the deprecated agent.max_turns alias into the single
             // canonical agent.max_iterations cap (AgentRuntime unification).
             config.agent.normalize();
+            // Phase 54.7 (D-13): fold the legacy voice.realtime_* keys into the
+            // top-level realtime: block (new value wins, legacy fills unset).
+            let legacy_voice = config.voice.clone();
+            config.realtime.fold_legacy(&legacy_voice);
+            // Phase 54 Plan 05 (D-19): clamp out-of-range rate-limit values to
+            // the nearest bound and WARN, in the same load-path position as
+            // the agent normalize call above — so every current and future
+            // consumer of config.rate_limit receives clamped values, not only
+            // the gateway's limiter construction site (54-RESEARCH.md
+            // Pitfall 4).
+            config.rate_limit.clamp_and_warn();
+            // Phase 57 (D-08, D-11): announce the deprecated DEFCON aliases once.
+            config.resolve_defcon_aliases();
             // Phase 40.5 (D-16): backfill missing shipped seed personas into a
             // partial operator-supplied identities section. `#[serde(default =
             // "default_seed_identities")]` only fires when the `identities:` key
@@ -3925,6 +4782,23 @@ impl Config {
         } else {
             Ok(Config::default())
         }
+    }
+
+    /// Phase 54.8 (D-20): parse and validate every `sites:` entry.
+    ///
+    /// A parse or validation failure never fails the call: it becomes an `Err`
+    /// for that entry only (field `entry` for a parse failure), so the rest of
+    /// the registry — and the gateway boot — are unaffected.
+    pub fn validated_sites(
+        &self,
+    ) -> Vec<(
+        String,
+        Result<crate::sites::SiteProject, crate::sites::SiteConfigError>,
+    )> {
+        self.sites
+            .iter()
+            .map(|(name, value)| (name.clone(), crate::sites::parse_site_entry(name, value)))
+            .collect()
     }
 
     /// Save config to the IronHermes home directory.
@@ -3981,15 +4855,19 @@ impl Config {
         (self.tts.provider.clone(), None)
     }
 
-    /// Phase 40.5 (D-11): Build a `TtsConfig` with the identity's overrides applied.
+    /// Phase 40.5 (D-11) / Phase 54.7 (D-16): Build a `TtsConfig` with the
+    /// identity's overrides applied.
     ///
-    /// Clones `self.tts` and, when `identity_slug` names a known identity with a
-    /// `free_mode_tts_provider` or `free_mode_tts_voice`, applies those values onto
-    /// the clone's matching provider sub-config:
+    /// Clones `self.tts` and, when `identity_slug` names a known identity, applies
+    /// its provider, model, voice and format onto the clone's matching provider
+    /// sub-config:
     ///
-    /// - `"edge"` → `clone.edge.voice = voice`
-    /// - `"elevenlabs"` → `clone.elevenlabs.voice_id = voice`
-    /// - `"openai"` → `clone.openai.voice = voice`
+    /// - `"edge"` → `edge.voice`, `edge.output_format` (no model)
+    /// - `"elevenlabs"` → `elevenlabs.model_id` / `voice_id` / `output_format`
+    /// - `"openai"` → `openai.model` / `voice` / `format`
+    /// - `"openai_compatible"` → `openai_compatible.model` / `voice` / `format`
+    ///
+    /// An unknown provider leaves every sub-config unchanged.
     ///
     /// The caller (Plan 08's `auto_speak_reply`) feeds the returned `TtsConfig` to
     /// `build_tts_registry` and then calls `provider.synthesize(text, path)` unchanged
@@ -4004,15 +4882,57 @@ impl Config {
             if let Some(ref prov) = record.voice.free_mode_tts_provider {
                 effective.provider = prov.clone();
             }
-            // Wire the voice into the matching provider sub-config so that
-            // the existing voiceless synthesize(text, path) trait is honoured.
-            if let Some(ref voice) = record.voice.free_mode_tts_voice {
-                match effective.provider.as_str() {
-                    "edge" => effective.edge.voice = voice.clone(),
-                    "elevenlabs" => effective.elevenlabs.voice_id = voice.clone(),
-                    "openai" => effective.openai.voice = voice.clone(),
-                    _ => {} // unknown provider — leave sub-config unchanged
+            // Phase 54.7 (D-16): wire model, voice and format into the matching
+            // provider sub-config so the existing voiceless
+            // synthesize(text, path) trait is honoured.
+            let profile = &record.voice;
+            let model = profile.free_mode_tts_model.as_ref();
+            let voice = profile.free_mode_tts_voice.as_ref();
+            let format = profile.free_mode_tts_format.as_ref();
+            match effective.provider.as_str() {
+                // Edge has no model block.
+                "edge" => {
+                    if let Some(v) = voice {
+                        effective.edge.voice = v.clone();
+                    }
+                    if let Some(f) = format {
+                        effective.edge.output_format = f.clone();
+                    }
                 }
+                "elevenlabs" => {
+                    if let Some(m) = model {
+                        effective.elevenlabs.model_id = m.clone();
+                    }
+                    if let Some(v) = voice {
+                        effective.elevenlabs.voice_id = v.clone();
+                    }
+                    if let Some(f) = format {
+                        effective.elevenlabs.output_format = f.clone();
+                    }
+                }
+                "openai" => {
+                    if let Some(m) = model {
+                        effective.openai.model = m.clone();
+                    }
+                    if let Some(v) = voice {
+                        effective.openai.voice = v.clone();
+                    }
+                    if let Some(f) = format {
+                        effective.openai.format = f.clone();
+                    }
+                }
+                "openai_compatible" => {
+                    if let Some(m) = model {
+                        effective.openai_compatible.model = m.clone();
+                    }
+                    if let Some(v) = voice {
+                        effective.openai_compatible.voice = v.clone();
+                    }
+                    if let Some(f) = format {
+                        effective.openai_compatible.format = f.clone();
+                    }
+                }
+                _ => {} // unknown provider — leave every sub-config unchanged
             }
         }
         effective
@@ -4090,6 +5010,73 @@ web:
         let c: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(c.browser.timeout_seconds, 30);
         assert!(!c.browser.headed);
+    }
+
+    // =========================================================================
+    // Phase 49.8 Plan 01: Ros2Config tests (D-04/D-14)
+    // =========================================================================
+
+    #[test]
+    fn ros2_config_defaults_deny_all_writes() {
+        let rc = Ros2Config::default();
+        assert_eq!(rc.bridge_url, None);
+        assert!(
+            rc.publish.is_empty() && rc.services.is_empty() && rc.actions.is_empty(),
+            "D-04: ros2 write allowlists must default to empty (deny-all) — the \
+             inverse of BrowserConfig.allowed_domains' empty-means-allow-all default"
+        );
+        assert_eq!(rc.caps.max_linear_velocity, 0.10);
+        assert_eq!(rc.caps.max_angular_velocity, 0.5);
+        assert_eq!(rc.caps.max_motion_duration_secs, 5.0);
+        assert_eq!(rc.caps.motion_publish_hz, 10.0);
+        assert_eq!(rc.caps.max_subscribe_messages, 20);
+        assert_eq!(rc.caps.max_subscribe_secs, 10.0);
+        assert_eq!(rc.caps.max_goal_secs, 120.0);
+        assert_eq!(rc.rospider.cmd_vel_topic, "/controller/cmd_vel");
+        assert_eq!(rc.rospider.traveling_topic, "/controller/traveling");
+    }
+
+    #[test]
+    fn ros2_config_parses_yaml_block() {
+        let yaml = r#"
+ros2:
+  bridge_url: "ws://127.0.0.1:9090"
+  publish:
+    - name: "/chatter"
+      type: "std_msgs/msg/String"
+      limits:
+        linear.x: [-0.1, 0.1]
+  caps:
+    max_linear_velocity: 0.2
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            c.ros2.bridge_url.as_deref(),
+            Some("ws://127.0.0.1:9090")
+        );
+        assert_eq!(c.ros2.publish.len(), 1);
+        assert_eq!(c.ros2.publish[0].name, "/chatter");
+        assert_eq!(c.ros2.publish[0].msg_type, "std_msgs/msg/String");
+        assert_eq!(
+            c.ros2.publish[0].limits.get("linear.x"),
+            Some(&[-0.1, 0.1])
+        );
+        assert!(c.ros2.services.is_empty());
+        assert!(c.ros2.actions.is_empty());
+        assert_eq!(c.ros2.caps.max_linear_velocity, 0.2);
+        // Untouched caps fields still carry their own defaults.
+        assert_eq!(c.ros2.caps.max_motion_duration_secs, 5.0);
+    }
+
+    #[test]
+    fn ros2_config_absent_block_is_default() {
+        // Phase 49.8 D-14 backward compat: pre-49.8 configs have no ros2: block.
+        let yaml = r#"
+web:
+  backend: "firecrawl"
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(c.ros2, Ros2Config::default());
     }
 
     // =========================================================================
@@ -4766,6 +5753,50 @@ model:
     }
 
     #[test]
+    fn model_thresholds_longest_substring_wins() {
+        let mut c = CompressionConfig::default();
+        c.model_thresholds.insert("qwen".into(), 0.4);
+        c.model_thresholds.insert("qwen2.5-7b".into(), 0.3);
+        assert_eq!(c.threshold_for_model("Qwen2.5-7B-Instruct"), Some(0.3));
+        assert_eq!(c.threshold_for_model("qwen3"), Some(0.4));
+        assert_eq!(c.threshold_for_model("llama"), None);
+    }
+
+    #[test]
+    fn model_thresholds_out_of_range_ignored() {
+        for v in [0.0_f32, -1.0, 1.0, 1.5, f32::NAN] {
+            let mut c = CompressionConfig::default();
+            c.model_thresholds.insert("m".into(), v);
+            assert_eq!(c.threshold_for_model("m"), None, "value {v}");
+        }
+    }
+
+    #[test]
+    fn model_thresholds_absent_key_loads() {
+        let c: Config = serde_yaml::from_str("compression:\n  protect_last_tokens: 1000\n")
+            .expect("must parse");
+        assert!(c.compression.model_thresholds.is_empty());
+        assert_eq!(c.compression.protect_last_tokens, 1000);
+    }
+
+    #[test]
+    fn compact_profile_defaults_auto_and_parses() {
+        assert_eq!(
+            AgentConfig::default().compact_profile,
+            CompactProfileMode::Auto
+        );
+        for (word, want) in [
+            ("on", CompactProfileMode::On),
+            ("off", CompactProfileMode::Off),
+            ("auto", CompactProfileMode::Auto),
+        ] {
+            let c: Config = serde_yaml::from_str(&format!("agent:\n  compact_profile: {word}\n"))
+                .expect("must parse");
+            assert_eq!(c.agent.compact_profile, want);
+        }
+    }
+
+    #[test]
     fn config_context_engine_selection() {
         let yaml = r#"
 agent:
@@ -4881,6 +5912,29 @@ mcp_servers:
         let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.mcp_servers.len(), 1);
         assert!(reparsed.mcp_servers.contains_key("myserver"));
+    }
+
+    #[test]
+    fn ui_menu_garbage_value_still_loads() {
+        let config: Config = serde_yaml::from_str("ui:\n  menu: [1, {x: y}, \"z\"]\n").unwrap();
+        assert!(!config.ui.menu.is_null());
+    }
+
+    #[test]
+    fn ui_menu_survives_typed_round_trip() {
+        let yaml =
+            "ui:\n  menu:\n    version: 1\n    wheel:\n      - {screen: chat, label: CHAT}\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let reparsed: Config =
+            serde_yaml::from_str(&serde_yaml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(reparsed.ui.menu, config.ui.menu);
+        assert!(!reparsed.ui.menu.is_null());
+    }
+
+    #[test]
+    fn ui_menu_absent_writes_no_ui_key() {
+        let out = serde_yaml::to_string(&Config::default()).unwrap();
+        assert!(!out.lines().any(|l| l.starts_with("ui:")), "{out}");
     }
 
     // =========================================================================
@@ -5356,10 +6410,15 @@ model:
             "Phase 33 LEARN-03..05: DEFAULT_TOOLSETS must contain 'learning' \
              (autonomous skill creation via skill_manage; no external prereqs)"
         );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"ros2"),
+            "Phase 49.8 D-07: DEFAULT_TOOLSETS must contain 'ros2' \
+             (Ros2Tool/RospiderTool gate on bridge_url via is_available(), same as robotics)"
+        );
         assert_eq!(
             DEFAULT_TOOLSETS.len(),
-            6,
-            "DEFAULT_TOOLSETS must contain exactly 6 entries (memory, session, agent, skills, robotics, learning)"
+            7,
+            "DEFAULT_TOOLSETS must contain exactly 7 entries (memory, session, agent, skills, robotics, learning, ros2)"
         );
     }
 
@@ -5602,16 +6661,15 @@ custom_providers:
     // Phase 26 Plan 01 Task 2: validate_role_name + RESERVED_ROLE_NAMES (D-05)
     // =========================================================================
 
-    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12:
-    /// RESERVED_ROLE_NAMES must hold exactly the nine roles (5 from Phase 26 +
-    /// summarization from Phase 25.2 + curator from Phase 25.3 + kanban_decomposer
-    /// from Phase 36.3.7.10 + kanban_judge from Phase 36.3.7.12).
+    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12 +
+    /// Phase 58.2 D-16: RESERVED_ROLE_NAMES must hold exactly the ten roles (the nine
+    /// earlier ones plus `memory` from Phase 58.2).
     #[test]
-    fn reserved_role_names_contains_all_nine_roles_with_kanban_judge() {
+    fn reserved_role_names_contains_all_ten_roles_with_memory() {
         assert_eq!(
             RESERVED_ROLE_NAMES.len(),
-            9,
-            "Phase 36.3.7.12 adds kanban_judge as the 9th reserved role"
+            10,
+            "Phase 58.2 D-16 adds memory as the 10th reserved role"
         );
         for required in &[
             "vision",
@@ -5623,6 +6681,7 @@ custom_providers:
             "curator",
             "kanban_decomposer",
             "kanban_judge",
+            "memory",
         ] {
             assert!(
                 RESERVED_ROLE_NAMES.contains(required),
@@ -5630,10 +6689,107 @@ custom_providers:
                 required
             );
         }
-        // Phase 36.3.7.12 — explicit "WHY the count went up" anchor.
+    }
+
+    // ---- Phase 58.2 D-01/D-02/D-06/D-08/D-25: Tier 2 memory config surface ----
+
+    #[test]
+    fn memory_config_tier2_flags_default_false() {
+        let c = MemoryConfig::default();
+        assert!(!c.tier2_enabled);
+        assert!(!c.consolidation_enabled);
+        assert!(!c.dreams_enabled);
+        assert!(!c.forgetting_enabled);
+        assert!(!c.promotion_enabled);
+        assert!(c.embeddings.base_url.is_none());
+        assert!(c.embeddings.model.is_none());
+        assert!(c.embeddings.api_key_env.is_none());
+    }
+
+    #[test]
+    fn memory_config_tier2_pre_582_yaml_parses() {
+        let c: MemoryConfig =
+            serde_yaml::from_str("provider: file\nmemory_enabled: true\n").unwrap();
+        assert!(!c.tier2_enabled);
+        assert!(!c.consolidation_enabled);
+        assert!(!c.dreams_enabled);
+        assert!(!c.forgetting_enabled);
+        assert!(c.validate_tier2().is_ok());
+    }
+
+    #[test]
+    fn memory_config_tier2_embeddings_has_no_secret_field() {
+        let v = serde_json::to_value(EmbeddingsConfig::default()).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["api_key_env", "base_url", "model"]);
+    }
+
+    fn tier2_cfg(
+        base_url: Option<&str>,
+        model: Option<&str>,
+        key_env: Option<&str>,
+    ) -> MemoryConfig {
+        MemoryConfig {
+            embeddings: EmbeddingsConfig {
+                base_url: base_url.map(str::to_string),
+                model: model.map(str::to_string),
+                api_key_env: key_env.map(str::to_string),
+            },
+            ..MemoryConfig::default()
+        }
+    }
+
+    #[test]
+    fn memory_config_tier2_validate_rejects_non_384_builtin() {
+        let err = tier2_cfg(None, Some("text-embedding-3-large"), None)
+            .validate_tier2()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("text-embedding-3-large"), "{err}");
+        assert!(err.contains("all-MiniLM-L6-v2"), "{err}");
         assert!(
-            RESERVED_ROLE_NAMES.contains(&"kanban_judge"),
-            "Phase 36.3.7.12 D-05 requires kanban_judge in RESERVED_ROLE_NAMES"
+            tier2_cfg(None, Some("all-MiniLM-L6-v2"), None)
+                .validate_tier2()
+                .is_ok()
+        );
+        assert!(tier2_cfg(None, None, None).validate_tier2().is_ok());
+    }
+
+    #[test]
+    fn memory_config_tier2_validate_rejects_bad_api_key_env() {
+        assert!(
+            tier2_cfg(None, None, Some("lowercase"))
+                .validate_tier2()
+                .is_err()
+        );
+        assert!(
+            tier2_cfg(None, None, Some("EMBED_KEY"))
+                .validate_tier2()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn memory_config_tier2_validate_accepts_http_endpoint_any_model() {
+        assert!(
+            tier2_cfg(
+                Some("http://127.0.0.1:8081"),
+                Some("nomic-embed-text"),
+                None
+            )
+            .validate_tier2()
+            .is_ok()
+        );
+        assert!(
+            tier2_cfg(Some("https://api.example.com/v1"), Some("x"), None)
+                .validate_tier2()
+                .is_ok()
+        );
+        assert!(
+            tier2_cfg(Some("ftp://x"), None, None)
+                .validate_tier2()
+                .is_err()
         );
     }
 
@@ -7005,5 +8161,619 @@ display:
         assert_eq!(cfg.catchup_lookback_minutes, 0);
         assert_eq!(cfg.max_parallel, 2);
         assert!(cfg.wrap_response);
+    }
+
+    // =========================================================================
+    // Phase 54 Plan 05 (D-19, ADR-0005 Finding 6): RateLimitConfig::clamp_and_warn
+    // =========================================================================
+    //
+    // Every fixture is loaded through the real `Config::load_from` against a
+    // temp file, not by constructing `RateLimitConfig` directly and calling
+    // `clamp_and_warn` by hand — constructing the struct directly would not
+    // prove the load path actually calls the clamp, which is the entire point
+    // of avoiding 54-RESEARCH.md Pitfall 4.
+
+    /// An over-bound `messages_per_minute` loads clamped to the upper bound,
+    /// and the captured logs contain a WARN naming the field. Asserts BOTH
+    /// halves: asserting only the clamped value would stay green even if the
+    /// WARN were removed, and the WARN is the sole mitigation for D-19's
+    /// accepted downside (a silently clamped value the operator believes is
+    /// in effect and is not).
+    #[test]
+    #[tracing_test::traced_test]
+    fn rate_limit_clamp_upper_bound_warns() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.yaml");
+        let yaml = "rate_limit:\n  messages_per_minute: 5000000\n  burst_size: 3\n";
+        std::fs::write(&config_path, yaml).expect("write");
+
+        let config = Config::load_from(&config_path).expect("load");
+        assert_eq!(
+            config.rate_limit.messages_per_minute,
+            RateLimitConfig::MAX_MESSAGES_PER_MINUTE,
+            "an over-bound messages_per_minute must be clamped to the upper bound"
+        );
+        assert!(
+            logs_contain("messages_per_minute"),
+            "WARN must name the clamped field"
+        );
+        assert!(
+            logs_contain("5000000"),
+            "WARN must name the supplied (out-of-range) value"
+        );
+    }
+
+    /// A zero `burst_size` loads clamped to the lower bound, with a WARN.
+    /// Zero burst is fail-closed rather than a bypass (it refuses every
+    /// legitimate user), but D-19 treats it as a misconfiguration worth
+    /// clamping regardless, and the operator must be told either way.
+    #[test]
+    #[tracing_test::traced_test]
+    fn rate_limit_clamp_zero_burst_warns() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.yaml");
+        let yaml = "rate_limit:\n  messages_per_minute: 10\n  burst_size: 0\n";
+        std::fs::write(&config_path, yaml).expect("write");
+
+        let config = Config::load_from(&config_path).expect("load");
+        assert_eq!(
+            config.rate_limit.burst_size,
+            RateLimitConfig::MIN_BURST_SIZE,
+            "a zero burst_size must be clamped to the lower bound"
+        );
+        assert!(
+            logs_contain("burst_size"),
+            "WARN must name the clamped field"
+        );
+    }
+
+    /// A config whose values are already inside the bounds is returned
+    /// unchanged, and NO warn is emitted from the clamp's target. This is the
+    /// selectivity companion to the two tests above: without it, a clamp
+    /// that unconditionally rewrote every value would still pass both.
+    #[test]
+    #[tracing_test::traced_test]
+    fn rate_limit_in_range_unchanged_and_silent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.yaml");
+        let yaml = "rate_limit:\n  messages_per_minute: 42\n  burst_size: 7\n";
+        std::fs::write(&config_path, yaml).expect("write");
+
+        let config = Config::load_from(&config_path).expect("load");
+        assert_eq!(config.rate_limit.messages_per_minute, 42);
+        assert_eq!(config.rate_limit.burst_size, 7);
+        assert!(
+            !logs_contain("ironhermes_core::config::rate_limit_clamp"),
+            "an in-range config must emit no WARN from the clamp's target"
+        );
+    }
+
+    /// The shipped `Default` impl's values must satisfy the four bounds
+    /// constants, so a future default change cannot silently make every
+    /// startup emit a WARN. Also proves a config with no `rate_limit:`
+    /// section at all yields the untouched defaults, silently.
+    #[test]
+    #[tracing_test::traced_test]
+    fn rate_limit_defaults_are_within_bounds() {
+        let defaults = RateLimitConfig::default();
+        assert!(defaults.messages_per_minute >= RateLimitConfig::MIN_MESSAGES_PER_MINUTE);
+        assert!(defaults.messages_per_minute <= RateLimitConfig::MAX_MESSAGES_PER_MINUTE);
+        assert!(defaults.burst_size >= RateLimitConfig::MIN_BURST_SIZE);
+        assert!(defaults.burst_size <= RateLimitConfig::MAX_BURST_SIZE);
+
+        // A config with no rate_limit section at all must load the defaults
+        // unchanged and silent.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(&config_path, "web:\n  backend: \"firecrawl\"\n").expect("write");
+
+        let config = Config::load_from(&config_path).expect("load");
+        assert_eq!(
+            config.rate_limit.messages_per_minute,
+            defaults.messages_per_minute
+        );
+        assert_eq!(config.rate_limit.burst_size, defaults.burst_size);
+        assert!(
+            !logs_contain("ironhermes_core::config::rate_limit_clamp"),
+            "defaults inside bounds must emit no WARN"
+        );
+    }
+}
+
+// =============================================================================
+// Phase 54.7 Plan 01 — openai_compatible TTS/STT blocks (D-01/D-03/D-05)
+// =============================================================================
+#[cfg(test)]
+mod voice_547_tests {
+    use super::*;
+    use crate::voice_endpoint::{STT_DEFAULT_PATH, TTS_DEFAULT_PATH, join_endpoint};
+
+    #[test]
+    fn oc_tts_block_parses_and_joins_default_path() {
+        let yaml = r#"
+tts:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: http://tts.lan:8880/v1
+    model: mlx-community/Kokoro-82M-bf16
+    voice: af_heart
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(c.tts.provider, "openai_compatible");
+        let oc = &c.tts.openai_compatible;
+        assert_eq!(oc.base_url, "http://tts.lan:8880/v1");
+        assert_eq!(oc.model, "mlx-community/Kokoro-82M-bf16");
+        assert_eq!(oc.voice, "af_heart");
+        assert_eq!(oc.path, None);
+        let url = join_endpoint(&oc.base_url, oc.path.as_deref(), TTS_DEFAULT_PATH).unwrap();
+        assert_eq!(url.as_str(), "http://tts.lan:8880/v1/audio/speech");
+    }
+
+    #[test]
+    fn oc_stt_block_parses_and_joins_path_override() {
+        let yaml = r#"
+stt:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: http://stt.lan:8178
+    path: /inference
+    model: whisper-large-v3
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        let oc = &c.stt.openai_compatible;
+        assert_eq!(oc.base_url, "http://stt.lan:8178");
+        assert_eq!(oc.path.as_deref(), Some("/inference"));
+        assert_eq!(oc.model, "whisper-large-v3");
+        let url = join_endpoint(&oc.base_url, oc.path.as_deref(), STT_DEFAULT_PATH).unwrap();
+        assert_eq!(url.as_str(), "http://stt.lan:8178/inference");
+    }
+
+    #[test]
+    fn pre_547_yaml_without_oc_blocks_parses() {
+        let yaml = r#"
+tts:
+  provider: edge
+  openai:
+    model: tts-1
+stt:
+  provider: auto
+  groq:
+    model: whisper-large-v3-turbo
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        let tts_d = OpenAiCompatibleTtsConfig::default();
+        let stt_d = OpenAiCompatibleSttConfig::default();
+        assert_eq!(c.tts.openai_compatible.base_url, tts_d.base_url);
+        assert_eq!(c.tts.openai_compatible.model, tts_d.model);
+        assert_eq!(c.tts.openai_compatible.voice, tts_d.voice);
+        assert_eq!(c.tts.openai_compatible.format, tts_d.format);
+        assert_eq!(c.stt.openai_compatible.base_url, stt_d.base_url);
+        assert_eq!(c.stt.openai_compatible.model, stt_d.model);
+        assert!(c.tts.openai_compatible.base_url.is_empty());
+    }
+
+    #[test]
+    fn d05_only_openai_compatible_blocks_carry_base_url() {
+        fn has_base_url<T: serde::Serialize>(v: &T) -> bool {
+            serde_yaml::to_value(v)
+                .unwrap()
+                .as_mapping()
+                .unwrap()
+                .contains_key("base_url")
+        }
+        assert!(!has_base_url(&EdgeTtsConfig::default()));
+        assert!(!has_base_url(&ElevenLabsConfig::default()));
+        assert!(!has_base_url(&OpenAiTtsConfig::default()));
+        assert!(!has_base_url(&GroqSttConfig::default()));
+        assert!(!has_base_url(&OpenAiSttConfig::default()));
+        assert!(has_base_url(&OpenAiCompatibleTtsConfig::default()));
+        assert!(has_base_url(&OpenAiCompatibleSttConfig::default()));
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 2 — realtime: block, voice.service, legacy fold (D-13/D-15)
+    // -------------------------------------------------------------------------
+
+    fn load_yaml(yaml: &str) -> Config {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, yaml).expect("write");
+        Config::load_from(&path).expect("load")
+    }
+
+    #[test]
+    fn realtime_block_absent_uses_defaults() {
+        let c = Config::default();
+        assert_eq!(c.realtime.model(), "gpt-realtime");
+        assert_eq!(c.realtime.voice(), "shimmer");
+        assert_eq!(c.realtime.transcription_model(), "gpt-4o-mini-transcribe");
+        assert_eq!(c.realtime.base_url, "https://api.openai.com/v1");
+        assert_eq!(c.realtime.provider, "openai_compatible");
+        assert!(c.realtime.is_openai_default_base_url());
+        let custom = RealtimeConfig {
+            base_url: "http://rt.lan:8000/v1/".to_string(),
+            ..RealtimeConfig::default()
+        };
+        assert!(!custom.is_openai_default_base_url());
+        let padded = RealtimeConfig {
+            base_url: " https://api.openai.com/v1/ ".to_string(),
+            ..RealtimeConfig::default()
+        };
+        assert!(padded.is_openai_default_base_url());
+    }
+
+    #[test]
+    fn legacy_realtime_keys_fold_into_unset_fields() {
+        let c = load_yaml("voice:\n  realtime_voice: echo\n");
+        assert_eq!(c.realtime.voice(), "echo");
+        assert_eq!(c.realtime.model(), "gpt-realtime");
+
+        let c = load_yaml("realtime:\n  voice: marin\nvoice:\n  realtime_voice: echo\n");
+        assert_eq!(c.realtime.voice(), "marin", "new block wins over legacy");
+    }
+
+    #[test]
+    fn operator_live_voice_block_migrates_to_realtime_service() {
+        let c = load_yaml(
+            "voice:\n  barge_in_mode: open_mic\n  realtime_model: gpt-realtime\n  \
+             realtime_voice: shimmer\n  realtime_transcription_model: gpt-4o-mini-transcribe\n",
+        );
+        assert_eq!(c.voice.effective_service(), VoiceService::Realtime);
+        assert_eq!(c.realtime.model(), "gpt-realtime");
+        assert_eq!(c.realtime.voice(), "shimmer");
+        assert_eq!(c.realtime.transcription_model(), "gpt-4o-mini-transcribe");
+        assert!(c.voice.legacy_realtime_keys_present());
+    }
+
+    #[test]
+    fn service_absent_maps_by_barge_in_mode() {
+        let mut v = VoiceConfig {
+            barge_in_mode: BargeInMode::PushToInterrupt,
+            ..VoiceConfig::default()
+        };
+        assert_eq!(v.effective_service(), VoiceService::TurnBased);
+        v.barge_in_mode = BargeInMode::OpenMic;
+        assert_eq!(v.effective_service(), VoiceService::Realtime);
+        v.service = Some(VoiceService::TurnBased);
+        assert_eq!(v.effective_service(), VoiceService::TurnBased);
+        v.barge_in_mode = BargeInMode::HalfDuplex;
+        v.service = Some(VoiceService::Realtime);
+        assert_eq!(v.effective_service(), VoiceService::Realtime);
+        v.service = None;
+        assert_eq!(v.effective_service(), VoiceService::TurnBased);
+    }
+
+    #[test]
+    fn voice_service_round_trips_through_save_and_load() {
+        for variant in [VoiceService::Realtime, VoiceService::TurnBased] {
+            let mut c = Config::default();
+            c.voice.service = Some(variant);
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("config.yaml");
+            c.save_to(&path).expect("save");
+            let voice_yaml = serde_yaml::to_string(&c.voice).unwrap();
+            assert!(
+                voice_yaml.contains(&format!("service: {}", variant.as_str())),
+                "serialized voice block must carry the service key: {voice_yaml}"
+            );
+            let loaded = Config::load_from(&path).expect("load");
+            assert_eq!(loaded.voice.effective_service(), variant);
+        }
+    }
+
+    #[test]
+    fn cleared_legacy_keys_are_not_serialized() {
+        let v = VoiceConfig::default();
+        assert!(v.realtime_model.is_none());
+        assert!(v.realtime_voice.is_none());
+        assert!(v.realtime_transcription_model.is_none());
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(!yaml.contains("realtime_model"), "{yaml}");
+        assert!(!yaml.contains("realtime_voice"), "{yaml}");
+        assert!(!yaml.contains("realtime_transcription_model"), "{yaml}");
+    }
+
+    // -- Phase 54.7 Plan 06 (D-16): identity profile model/voice/format ----------
+
+    fn identity_with(
+        provider: &str,
+        model: Option<&str>,
+        voice: Option<&str>,
+        format: Option<&str>,
+    ) -> Config {
+        let mut config = Config::default();
+        config.identities.insert(
+            "t547".to_string(),
+            IdentityRecord {
+                voice: IdentityVoiceProfile {
+                    free_mode_tts_provider: Some(provider.to_string()),
+                    free_mode_tts_voice: voice.map(str::to_string),
+                    free_mode_tts_model: model.map(str::to_string),
+                    free_mode_tts_format: format.map(str::to_string),
+                    realtime_voice: None,
+                    realtime_model: None,
+                },
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn identity_profile_applies_model_and_format_per_provider() {
+        // openai_compatible: model, voice and format all land in that block.
+        let config = identity_with(
+            "openai_compatible",
+            Some("kokoro"),
+            Some("af_heart"),
+            Some("wav"),
+        );
+        let eff = config.effective_tts_config_for_identity(Some("t547"));
+        assert_eq!(eff.provider, "openai_compatible");
+        assert_eq!(eff.openai_compatible.model, "kokoro");
+        assert_eq!(eff.openai_compatible.voice, "af_heart");
+        assert_eq!(eff.openai_compatible.format, "wav");
+        // The other blocks are untouched.
+        assert_eq!(eff.openai.model, config.tts.openai.model);
+        assert_eq!(eff.edge.voice, config.tts.edge.voice);
+
+        // openai
+        let config = identity_with("openai", Some("tts-1-hd"), Some("nova"), Some("opus"));
+        let eff = config.effective_tts_config_for_identity(Some("t547"));
+        assert_eq!(eff.openai.model, "tts-1-hd");
+        assert_eq!(eff.openai.voice, "nova");
+        assert_eq!(eff.openai.format, "opus");
+        assert_eq!(
+            eff.openai_compatible.model,
+            config.tts.openai_compatible.model
+        );
+
+        // elevenlabs: model -> model_id, voice -> voice_id, format -> output_format
+        let config = identity_with(
+            "elevenlabs",
+            Some("eleven_turbo_v2_5"),
+            Some("VoiceXyz1"),
+            Some("mp3"),
+        );
+        let eff = config.effective_tts_config_for_identity(Some("t547"));
+        assert_eq!(eff.elevenlabs.model_id, "eleven_turbo_v2_5");
+        assert_eq!(eff.elevenlabs.voice_id, "VoiceXyz1");
+        assert_eq!(eff.elevenlabs.output_format, "mp3");
+
+        // edge: voice -> voice, format -> output_format, no model block
+        let config = identity_with(
+            "edge",
+            Some("ignored"),
+            Some("en-GB-SoniaNeural"),
+            Some("mp3"),
+        );
+        let eff = config.effective_tts_config_for_identity(Some("t547"));
+        assert_eq!(eff.edge.voice, "en-GB-SoniaNeural");
+        assert_eq!(eff.edge.output_format, "mp3");
+
+        // An unknown provider is not swallowed into some other block.
+        let config = identity_with("mystery", Some("m"), Some("v"), Some("f"));
+        let eff = config.effective_tts_config_for_identity(Some("t547"));
+        assert_eq!(eff.provider, "mystery");
+        assert_eq!(eff.edge.voice, config.tts.edge.voice);
+        assert_eq!(eff.openai.voice, config.tts.openai.voice);
+        assert_eq!(
+            eff.openai_compatible.voice,
+            config.tts.openai_compatible.voice
+        );
+        assert_eq!(eff.elevenlabs.voice_id, config.tts.elevenlabs.voice_id);
+
+        // The global config is never mutated.
+        assert_eq!(config.tts.edge.voice, "en-US-AriaNeural");
+    }
+
+    // Phase 54.8 D-07: per-turn gateway deadline.
+    #[test]
+    fn gateway_turn_timeout_defaults_and_disable() {
+        let d = GatewayConfig::default();
+        assert_eq!(d.turn_timeout_secs, 1800);
+        assert_eq!(
+            d.turn_deadline(),
+            Some(std::time::Duration::from_secs(1800))
+        );
+
+        let zero = GatewayConfig {
+            turn_timeout_secs: 0,
+            ..GatewayConfig::default()
+        };
+        assert_eq!(zero.turn_deadline(), None);
+        let neg = GatewayConfig {
+            turn_timeout_secs: -5,
+            ..GatewayConfig::default()
+        };
+        assert_eq!(neg.turn_deadline(), None);
+
+        // Pre-54.8 configs without the key load with the default.
+        let parsed: GatewayConfig = serde_yaml::from_str("persist_sessions: true\n").unwrap();
+        assert_eq!(parsed.turn_timeout_secs, 1800);
+        let parsed: GatewayConfig = serde_yaml::from_str("turn_timeout_secs: 42\n").unwrap();
+        assert_eq!(
+            parsed.turn_deadline(),
+            Some(std::time::Duration::from_secs(42))
+        );
+    }
+}
+
+/// Phase 57 Plan 02 (D-08, D-09, D-11, D-21, D-22): DEFCON resolution.
+#[cfg(test)]
+mod defcon_resolution_tests {
+    use super::*;
+
+    fn cfg(yaml: &str) -> Config {
+        serde_yaml::from_str(yaml).expect("yaml must parse")
+    }
+
+    #[test]
+    fn no_keys_resolves_to_three_and_no_bypass() {
+        let d = Config::default().effective_defcon_level();
+        assert_eq!(d.level(), 3);
+        assert!(!d.yolo_bypass_active());
+        let from_yaml = cfg("{}").effective_defcon_level();
+        assert_eq!(from_yaml.level(), 3);
+        assert!(!from_yaml.yolo_bypass_active());
+    }
+
+    #[test]
+    fn yolo_alias_true_is_five() {
+        let on = cfg("autonomous:\n  yolo: true\n").effective_defcon_level();
+        assert_eq!(on.level(), 5);
+        assert!(on.yolo_bypass_active());
+        let off = cfg("autonomous:\n  yolo: false\n").effective_defcon_level();
+        assert_eq!(off.level(), 3);
+    }
+
+    #[test]
+    fn security_key_wins_over_aliases() {
+        let c = cfg(
+            "security:\n  defcon_level: 1\nautonomous:\n  yolo: true\nskills:\n  defcon_level: 4\n",
+        );
+        assert_eq!(c.effective_defcon_level().level(), 1);
+    }
+
+    #[test]
+    fn skills_alias_wins_over_yolo_alias() {
+        let c = cfg("skills:\n  defcon_level: 2\nautonomous:\n  yolo: true\n");
+        assert_eq!(c.effective_defcon_level().level(), 2);
+    }
+
+    #[test]
+    fn out_of_range_level_rejected() {
+        for bad in ["0", "6"] {
+            let yaml = format!("security:\n  defcon_level: {bad}\n");
+            assert!(
+                serde_yaml::from_str::<Config>(&yaml).is_err(),
+                "security.defcon_level: {bad} must fail to deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn bypass_only_at_four_and_five() {
+        for n in 1u8..=5 {
+            let level = DefconLevel::try_from(n).unwrap();
+            assert_eq!(level.yolo_bypass_active(), n >= 4, "level {n}");
+        }
+    }
+
+    #[test]
+    fn remote_change_flag_defaults_false() {
+        assert!(!SecurityConfig::default().defcon_remote_change_enabled);
+        let c = cfg("security:\n  web_config_write_enabled: true\n");
+        assert!(!c.security.defcon_remote_change_enabled);
+    }
+
+    fn flags() -> (std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool) {
+        (
+            std::sync::atomic::AtomicBool::new(false),
+            std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+
+    #[test]
+    fn deprecated_yolo_alias_warns_once() {
+        let c = cfg("autonomous:\n  yolo: true\n");
+        let (yolo, skills) = flags();
+        let first = c.take_defcon_alias_warnings(&yolo, &skills);
+        assert_eq!(first.len(), 1, "exactly one message: {first:?}");
+        assert!(
+            first[0].contains("security.defcon_level: 5"),
+            "must name the replacement key and level: {}",
+            first[0]
+        );
+        assert!(c.take_defcon_alias_warnings(&yolo, &skills).is_empty());
+        // explicit `yolo: false` is identical to an absent key: no warning.
+        let off = cfg("autonomous:\n  yolo: false\n");
+        let (y2, s2) = flags();
+        assert!(off.take_defcon_alias_warnings(&y2, &s2).is_empty());
+    }
+
+    #[test]
+    fn deprecated_skills_alias_warns_once() {
+        let c = cfg("skills:\n  defcon_level: 2\n");
+        let (yolo, skills) = flags();
+        let first = c.take_defcon_alias_warnings(&yolo, &skills);
+        assert_eq!(first.len(), 1, "exactly one message: {first:?}");
+        assert!(first[0].contains("skills.defcon_level"), "{}", first[0]);
+        assert!(
+            first[0].contains("security.defcon_level: 2"),
+            "{}",
+            first[0]
+        );
+        assert!(c.take_defcon_alias_warnings(&yolo, &skills).is_empty());
+    }
+
+    #[test]
+    fn canonical_key_emits_no_warning() {
+        let c = cfg("security:\n  defcon_level: 4\n");
+        assert!(c.defcon_alias_warnings().is_empty());
+        let (yolo, skills) = flags();
+        assert!(c.take_defcon_alias_warnings(&yolo, &skills).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod validate_yaml_str_tests {
+    use super::*;
+
+    #[test]
+    fn validate_yaml_str_accepts_valid_config_with_no_unknown_keys() {
+        assert_eq!(
+            Config::validate_yaml_str("agent:\n  max_iterations: 5\n"),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn validate_yaml_str_lists_unknown_keys_by_dotted_path() {
+        let text = "bogus: 1\nagent:\n  typo_key: 1\n";
+        assert_eq!(
+            Config::validate_yaml_str(text),
+            Ok(vec!["agent.typo_key".to_string(), "bogus".to_string()])
+        );
+    }
+
+    #[test]
+    fn validate_yaml_str_ignores_known_free_form_maps() {
+        let text = "mcp_servers:\n  x:\n    anything: 1\n\
+                    providers:\n  p:\n    api_key: abc\n\
+                    agent:\n  max_turns: 3\n\
+                    gateway:\n  platforms:\n    telegram:\n      captured_by_extra: 1\n";
+        assert_eq!(Config::validate_yaml_str(text), Ok(vec![]));
+    }
+
+    #[test]
+    fn validate_yaml_str_type_error_has_position_once() {
+        let issue = Config::validate_yaml_str("agent:\n  max_iterations: notanumber\n")
+            .expect_err("type error must be reported");
+        assert_eq!(issue.line, Some(2));
+        assert!(issue.column.is_some());
+        assert!(!issue.message.contains(" at line "), "{}", issue.message);
+    }
+
+    #[test]
+    fn validate_yaml_str_syntax_error_has_position() {
+        let issue = Config::validate_yaml_str("agent: [1, 2\nother: 3\n")
+            .expect_err("syntax error must be reported");
+        assert!(issue.line.is_some());
+        assert!(issue.column.is_some());
+    }
+
+    #[test]
+    fn validate_yaml_str_legacy_subagent_key_returns_err_with_line() {
+        let issue = Config::validate_yaml_str("a: 1\nb: 2\nsubagent:\n  x: 1\n")
+            .expect_err("legacy key must be reported, not exit");
+        assert_eq!(issue.line, Some(3));
+        assert_eq!(issue.column, Some(1));
+        assert!(
+            issue.message.ends_with("Rename it to 'delegation:'."),
+            "{}",
+            issue.message
+        );
+        // Reaching this assert proves the process was not exited.
     }
 }

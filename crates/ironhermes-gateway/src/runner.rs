@@ -20,7 +20,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::PlatformAdapter;
-use crate::backoff::BackoffState;
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal;
 use crate::session::{SessionKey, SessionStore};
@@ -29,6 +28,14 @@ use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
 use crate::user_queue::{DispatchOutcome, UserQueueManager};
 use ironhermes_core::MessageEvent;
 use ironhermes_cron::{DeliveryRegistry, DeliverySend, TgSendApi};
+
+/// What the dispatch loop writes to the log for an inbound message (Phase 54.8 D-15,
+/// RESEARCH F7). Every message passes through the shared OAuth redactor, so an
+/// authorization code, state or token in a pasted callback URL - bare, percent-encoded
+/// or inside a sentence - never reaches a log line. Plain text is returned borrowed.
+pub(crate) fn inbound_log_content(content: &str) -> std::borrow::Cow<'_, str> {
+    ironhermes_mcp::paste_back::redact_oauth_params(content)
+}
 
 /// Resolves when the process receives SIGTERM (POSIX / container shutdown) or
 /// SIGINT (terminal Ctrl-C).
@@ -219,6 +226,40 @@ fn commands_for_platform(commands: &[CommandDef], platform: &Platform) -> Vec<Tg
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         })
         .collect()
+}
+
+/// Phase 57 D-02 / D-09 / D-21: the gateway's security boot, run once before any
+/// adapter, scheduler or turn exists.
+///
+/// 1. Boots the process-wide security service (`ironhermes_security::service::boot`,
+///    idempotent: a second call returns the service already installed). The sidecar
+///    child and the baseline policy file come up here, so the first inbound message and
+///    the first gated tool call already have a screen. The gateway also hosts the cron,
+///    kanban and notifier loops, so this boot serves their screens too.
+/// 2. Seeds the process default DEFCON level from the config's effective level
+///    (`security.defcon_level`, then the deprecated aliases, else 3). A session created
+///    afterwards starts at it; a session that already has a level keeps it (D-09: only
+///    the audited `/yolo <N>` command changes a live session).
+///
+/// A sidecar that cannot start is NOT a boot failure: the client records why in its
+/// health and every screen is then unavailable, which the policy treats as Warn or
+/// Block by level (D-12), never as a clean pass.
+pub fn boot_security(config: &Config) {
+    let _service = ironhermes_security::service::boot(
+        &ironhermes_security::service::BootOptions::from_home(ironhermes_core::get_hermes_home()),
+    );
+    let level = config.effective_defcon_level();
+    ironhermes_core::defcon::session_defcon().set_process_default(level);
+    info!(
+        defcon_level = level.level(),
+        "Security service booted; default DEFCON level {} (warn-class approvals {})",
+        level.level(),
+        if level.yolo_bypass_active() {
+            "bypassed, audited"
+        } else {
+            "required"
+        }
+    );
 }
 
 impl GatewayRunner {
@@ -753,6 +794,12 @@ impl GatewayRunner {
         let _pid_guard = crate::pid::acquire_pid_lock(&home)
             .context("Gateway startup refused: PID lock conflict")?;
 
+        // Phase 57 D-02 / D-09: boot the security service and seed the default DEFCON
+        // level BEFORE any adapter, scheduler loop or turn can run. Placed after the PID
+        // lock (a second gateway must not spawn a second sidecar) and before the platform
+        // gate, so it does not depend on any adapter having started.
+        boot_security(&self.config);
+
         // Phase 47.6 Plan 03 (P0-1): the boot gate is now the single source
         // of truth for which platforms are usable. This replaces the
         // previous unconditional `resolve_token(...).context(...)?` hard
@@ -872,6 +919,14 @@ impl GatewayRunner {
                     host: api_server_platform_config.host.clone(),
                     port: api_server_platform_config.port,
                     public_opt_in: api_server_platform_config.public_opt_in,
+                    // Phase 54 Plan 06 (D-20): no cross-origin config surface
+                    // wired through `PlatformGatewayConfig` yet — that field
+                    // addition is out of this plan's declared scope. `None`
+                    // preserves exactly today's behavior (no cross-origin
+                    // handling at all); `ApiServerConfig::allowed_origin`'s
+                    // own doc comment explains why the field exists on the
+                    // `ironhermes-restgw` side regardless.
+                    allowed_origin: None,
                 };
                 // Task 3: shared runtime handles constructed ONCE here so
                 // Plans 06-09 (runs, sessions, chat, jobs route families)
@@ -1097,10 +1152,10 @@ impl GatewayRunner {
         // and cloned into every coordinator — the store carries the operator's
         // CLI-set session/always approvals and the audit log is a single
         // append-only file, both shared truth across every platform, never
-        // per-platform copies. Discord/Slack handlers built further below stay
-        // fail-closed (no coordinator) — that remains their documented, unchanged
-        // behavior; Buzz is no longer in that same boat now that this task gives
-        // it real wiring.
+        // per-platform copies. Discord and Slack (7b/7c below) get their own
+        // coordinators too, via `attach_dm_approval_coordinator`: bound to a
+        // DM-only adapter so the prompt reaches the requesting user's DM and never
+        // a channel, and answerable only from that DM.
 
         let mut join_set: JoinSet<()> = JoinSet::new();
 
@@ -1224,65 +1279,19 @@ impl GatewayRunner {
             telegram_handler = Some(handler.clone());
 
             // --- 7. Poll loop ---
-            let poll_cancel = self.cancel.clone();
-            let adapter_poll = adapter.clone();
-            let msg_tx_poll = msg_tx_local.clone();
-            join_set.spawn(async move {
-            let mut offset: Option<i64> = None;
-            let mut backoff = BackoffState::default_polling();
-
-            loop {
-                tokio::select! {
-                    _ = poll_cancel.cancelled() => {
-                        info!("Poll loop cancelled");
-                        break;
-                    }
-                    result = adapter_poll.get_updates(offset) => {
-                        match result {
-                            Ok(updates) => {
-                                backoff.record_success();
-                                if !updates.is_empty() {
-                                    info!(count = updates.len(), "Received {} update(s) from polling", updates.len());
-                                }
-                                for update in &updates {
-                                    if let Some(new_offset) = offset {
-                                        if update.update_id >= new_offset {
-                                            offset = Some(update.update_id + 1);
-                                        }
-                                    } else {
-                                        offset = Some(update.update_id + 1);
-                                    }
-                                    if msg_tx_poll.send(update.clone()).await.is_err() {
-                                        // Dispatch channel closed — shutting down
-                                        return;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let err_str = e.to_string();
-                                if err_str.contains("Conflict") || err_str.contains("409") {
-                                    backoff.record_conflict();
-                                    if backoff.is_fatal_conflict() {
-                                        error!("Fatal 409 conflict — another bot instance is polling on this token. Shutting down.");
-                                        poll_cancel.cancel();
-                                        break;
-                                    }
-                                } else {
-                                    backoff.record_failure();
-                                }
-                                let delay = backoff.next_delay();
-                                warn!(
-                                    error = %e,
-                                    delay_ms = delay.as_millis(),
-                                    "Polling error, backing off"
-                                );
-                                tokio::time::sleep(delay).await;
-                            }
-                        }
-                    }
-                }
-            }
-        });
+            // Phase 54.8 Plan 07 (D-05): the poll loop is a supervised,
+            // self-healing task. `poll_supervisor` owns the offset, the 409
+            // backoff state and the generation lifecycle (cancel -> bounded
+            // join -> rebuild the HTTP client -> respawn), and cancels the
+            // parent gateway token only on a fatal 409 conflict.
+            let poll_stats = Arc::new(crate::poll_supervisor::PollStats::default());
+            join_set.spawn(crate::poll_supervisor::run_poll_supervisor(
+                adapter.clone(),
+                msg_tx_local.clone(),
+                self.cancel.clone(),
+                crate::poll_supervisor::PollTuning::default(),
+                poll_stats,
+            ));
         } // close: if let Some(ref adapter) = telegram_adapter (steps 3-7)
 
         // --- 7b. Optional Discord adapter (D-10) ---
@@ -1323,6 +1332,17 @@ impl GatewayRunner {
             if let Some(ref uq) = user_queue {
                 handler_discord.set_user_queue_manager(uq.clone());
             }
+            // Phase 57: real approval gate, DM-only (see attach_dm_approval_coordinator).
+            // A persistent Http from the bot token, independent of the per-message Context.
+            attach_dm_approval_coordinator(
+                &mut handler_discord,
+                crate::discord::DiscordAdapter::from_http(Arc::new(serenity::http::Http::new(
+                    &discord_token,
+                ))),
+                self.config.approvals.timeout_secs,
+                approvals_store.clone(),
+                audit_log.clone(),
+            );
             handler_discord.set_telegram_audio_dispatcher(std::sync::Arc::new(
                 ironhermes_tools::NotSupportedAudioDispatcher::new("discord"),
             )
@@ -1405,6 +1425,23 @@ impl GatewayRunner {
             let mut handler_slack = self.build_gateway_handler();
             if let Some(ref uq) = user_queue {
                 handler_slack.set_user_queue_manager(uq.clone());
+            }
+            // Phase 57: real approval gate, DM-only (see attach_dm_approval_coordinator).
+            // Own Web API client; if it cannot be built the handler stays fail-closed.
+            match slack_morphism::prelude::SlackClientHyperConnector::new() {
+                Ok(connector) => attach_dm_approval_coordinator(
+                    &mut handler_slack,
+                    crate::slack::SlackAdapter::new(
+                        Arc::new(slack_morphism::prelude::SlackClient::new(connector)),
+                        slack_morphism::prelude::SlackApiToken::new(slack_bot.as_str().into()),
+                    ),
+                    self.config.approvals.timeout_secs,
+                    approvals_store.clone(),
+                    audit_log.clone(),
+                ),
+                Err(e) => tracing::warn!(
+                    "Slack approval client init failed — Slack approvals stay fail-closed: {e}"
+                ),
             }
             handler_slack.set_telegram_audio_dispatcher(std::sync::Arc::new(
                 ironhermes_tools::NotSupportedAudioDispatcher::new("slack"),
@@ -1725,7 +1762,7 @@ impl GatewayRunner {
                             info!(
                                 chat_id = %event.chat_id,
                                 sender_id = %event.sender_id,
-                                content = %event.content,
+                                content = %inbound_log_content(&event.content),
                                 chat_type = %event.chat_type,
                                 "Received message from dispatch channel"
                             );
@@ -1740,6 +1777,16 @@ impl GatewayRunner {
                                 } else {
                                     warn!(sender_id = %event.sender_id, "Sender not in whitelist, ignoring");
                                 }
+                                continue;
+                            }
+
+                            // Phase 54.8 D-15 (review 09 HIGH): a pasted MCP OAuth callback is
+                            // consumed here, synchronously, before the group @mention check, the
+                            // slash fast path, the UserQueueManager and the agent. The decision
+                            // is a plain bool (no await, no error arm that could fall through);
+                            // the delete / token exchange / reconnect / reply run in a spawned,
+                            // budgeted task so the dispatcher never waits on them.
+                            if handler_dispatch.intercept_oauth_paste(&event, adapter_dispatch.clone()) {
                                 continue;
                             }
 
@@ -1771,32 +1818,36 @@ impl GatewayRunner {
                                 // Detached spawn — commands are short-lived (D-27). Graceful shutdown
                                 // observes cancel_token via cancel.is_cancelled() inside the handler.
                                 tokio::spawn(async move {
-                                    let permit = match sem_cmd.acquire().await {
-                                        Ok(p) => p,
-                                        Err(_) => return, // semaphore closed → shutdown in progress
-                                    };
-                                    // Commands are text-only by contract (D-27) — skip multimodal processing.
-                                    let processed = crate::multimodal::ProcessedAttachments {
-                                        text_prefix: None,
-                                        image_data_uri: None,
-                                        image_cache_path: None,
-                                    };
-                                    if let Err(e) = handler_cmd
-                                        .handle_with_multimodal(
-                                            &event_cmd,
-                                            adapter_cmd,
-                                            cancel_cmd.child_token(),
-                                            processed,
-                                        )
-                                        .await
+                                    // Phase 54.8 D-07: the permit (or, for /stop /approve
+                                    // /deny, the permit-free control lane) is owned by
+                                    // turn_slot::run_slash_command, which also enforces
+                                    // the absolute ceiling. Commands are text-only by
+                                    // contract (D-27) — no multimodal processing.
+                                    match crate::turn_slot::run_slash_command(
+                                        &sem_cmd,
+                                        &handler_cmd,
+                                        &event_cmd,
+                                        adapter_cmd,
+                                        &cancel_cmd,
+                                    )
+                                    .await
                                     {
-                                        error!(
-                                            chat_id = %event_cmd.chat_id,
-                                            error = %e,
-                                            "Slash-command fast-path handler error (Phase 36.17.2 Plan 05)"
-                                        );
+                                        crate::turn_slot::SlotOutcome::Completed(Err(e)) => {
+                                            error!(
+                                                chat_id = %event_cmd.chat_id,
+                                                error = %e,
+                                                "Slash-command fast-path handler error (Phase 36.17.2 Plan 05)"
+                                            );
+                                        }
+                                        crate::turn_slot::SlotOutcome::CeilingHit => {
+                                            warn!(
+                                                chat_id = %event_cmd.chat_id,
+                                                "Slash-command fast path hit its ceiling (Phase 54.8 D-07)"
+                                            );
+                                        }
+                                        crate::turn_slot::SlotOutcome::Completed(Ok(()))
+                                        | crate::turn_slot::SlotOutcome::SemaphoreClosed => {}
                                     }
-                                    drop(permit);
                                 });
                                 continue; // Skip the multimodal + UQM.dispatch path for this event
                             }
@@ -1805,17 +1856,48 @@ impl GatewayRunner {
                             // image_cache_path threads the inbound photo's cache PATH to the worker
                             // so the model can drive video_animate (image-to-video) — fix 36.3.3.
                             let (text_prefix, image_data_uri, image_cache_path) = if !event.attachments.is_empty() {
-                                match multimodal::process_attachments(&adapter_dispatch_mm, &msg).await {
-                                    Ok(processed) => (
+                                // Phase 54.8 Plan 07 (D-05, T-54.8-54): every network await
+                                // in this dispatcher is time-bounded so one wedged step can
+                                // never pin the single dispatcher and fill the poll channel.
+                                match crate::poll_supervisor::bounded_dispatch_step(
+                                    crate::poll_supervisor::DISPATCH_STEP_BUDGET,
+                                    multimodal::process_attachments(&adapter_dispatch_mm, &msg),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(processed)) => (
                                         processed.text_prefix,
                                         processed.image_data_uri,
                                         processed.image_cache_path,
                                     ),
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         // Send user-friendly error and skip this message
                                         let chat_id = event.chat_id.clone();
                                         let err_msg = format!("Could not process attachment: {}", e);
-                                        let _ = PlatformAdapter::send_message(adapter_dispatch_mm.as_ref(), &chat_id, &err_msg, None).await;
+                                        if crate::poll_supervisor::bounded_dispatch_step(
+                                            crate::poll_supervisor::DISPATCH_STEP_BUDGET,
+                                            PlatformAdapter::send_message(adapter_dispatch_mm.as_ref(), &chat_id, &err_msg, None),
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            error!(
+                                                chat_id = %chat_id,
+                                                step = "attachment_error_reply",
+                                                "dispatch step exceeded its budget; update dropped (D-05)"
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                    Err(_elapsed) => {
+                                        // A timed-out attachment step is treated like a
+                                        // processing error, minus the reply (the network
+                                        // is the thing that is stuck).
+                                        error!(
+                                            chat_id = %event.chat_id,
+                                            step = "process_attachments",
+                                            "dispatch step exceeded its budget; update dropped (D-05)"
+                                        );
                                         continue;
                                     }
                                 }
@@ -1832,7 +1914,22 @@ impl GatewayRunner {
                             // Phase 36.17.2 Plan 02: full match on Result<DispatchOutcome, QueueError> (D-15).
                             // Cap-hit UX (❌ + chat reply) fires inside UQM::dispatch on Err — no
                             // additional handling needed here for the error path.
-                            let dispatch_result = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri, image_cache_path).await;
+                            let dispatch_result = match crate::poll_supervisor::bounded_dispatch_step(
+                                crate::poll_supervisor::DISPATCH_STEP_BUDGET,
+                                user_queue_dispatch.dispatch(event, text_prefix, image_data_uri, image_cache_path),
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_elapsed) => {
+                                    error!(
+                                        chat_id = %event_chat_id,
+                                        step = "user_queue_dispatch",
+                                        "dispatch step exceeded its budget; update dropped (D-05)"
+                                    );
+                                    continue;
+                                }
+                            };
 
                             // SessionKey built from fields captured before event was moved into dispatch (D-14).
                             let session_key_task = SessionKey::new(event_platform, &event_chat_id)
@@ -1918,65 +2015,82 @@ impl GatewayRunner {
                                                 }
                                             };
 
-                                            // Acquire semaphore permit (TG-06 — bounded concurrency).
-                                            let permit = match sem_task.acquire().await {
-                                                Ok(p) => p,
-                                                Err(_) => break, // semaphore closed on shutdown
+                                            // Phase 54.8 D-07: the run permit (TG-06 — bounded
+                                            // concurrency) and its absolute ceiling are owned by
+                                            // turn_slot::run_turn_slot. `prepare` runs AFTER the
+                                            // permit is held and INSIDE the ceiling, in today's
+                                            // order, so a hang there cannot pin the permit.
+                                            let prepare = {
+                                                let adapter_prep = adapter_task.clone();
+                                                let queue_prep = queue_task.clone();
+                                                let key_prep = session_key_for_worker.clone();
+                                                let chat_id_prep = next_event.chat_id.clone();
+                                                let message_id_prep = next_event.message_id.clone();
+                                                move || async move {
+                                                    // D-06 step 3 + D-08: emit 👀 reaction inline before
+                                                    // handle_with_multimodal. Inline await means "👀 reaches
+                                                    // Telegram before the placeholder █ send" — strict ordering
+                                                    // preferred over fire-and-forget (see CONTEXT.md Claude's Discretion).
+                                                    // D-09: warn-and-ignore on failure; must not block the turn.
+                                                    if let Err(e) = adapter_prep
+                                                        .add_reaction(&chat_id_prep, &message_id_prep, "👀")
+                                                        .await
+                                                    {
+                                                        tracing::warn!(
+                                                            chat_id = %chat_id_prep,
+                                                            message_id = %message_id_prep,
+                                                            error = %e,
+                                                            "Worker: 👀 reaction emission failed; continuing (Phase 36.17.2 D-09)"
+                                                        );
+                                                    }
+
+                                                    // Reconstruct multimodal payload from UQM sidecar (M1 locked by Plan 01).
+                                                    // FIFO lockstep with SessionQueue::pop — one take_multimodal per pop.
+                                                    // None means plain-text message with no multimodal payload.
+                                                    let (text_prefix, image_data_uri, image_cache_path) = queue_prep
+                                                        .take_multimodal(&key_prep)
+                                                        .await
+                                                        .unwrap_or((None, None, None));
+                                                    crate::multimodal::ProcessedAttachments {
+                                                        text_prefix,
+                                                        image_data_uri,
+                                                        image_cache_path,
+                                                    }
+                                                }
                                             };
 
-                                            // D-06 step 3 + D-08: emit 👀 reaction inline before
-                                            // handle_with_multimodal. Inline await means "👀 reaches
-                                            // Telegram before the placeholder █ send" — strict ordering
-                                            // preferred over fire-and-forget (see CONTEXT.md Claude's Discretion).
-                                            // D-09: warn-and-ignore on failure; must not block the turn.
-                                            if let Err(e) = adapter_task
-                                                .add_reaction(&next_event.chat_id, &next_event.message_id, "👀")
-                                                .await
+                                            match crate::turn_slot::run_turn_slot(
+                                                &sem_task,
+                                                &handler_task,
+                                                &next_event,
+                                                adapter_task.clone(),
+                                                &cancel_task,
+                                                prepare,
+                                            )
+                                            .await
                                             {
-                                                tracing::warn!(
-                                                    chat_id = %next_event.chat_id,
-                                                    message_id = %next_event.message_id,
-                                                    error = %e,
-                                                    "Worker: 👀 reaction emission failed; continuing (Phase 36.17.2 D-09)"
-                                                );
-                                            }
-
-                                            // Reconstruct multimodal payload from UQM sidecar (M1 locked by Plan 01).
-                                            // FIFO lockstep with SessionQueue::pop — one take_multimodal per pop.
-                                            // None means plain-text message with no multimodal payload.
-                                            let (text_prefix, image_data_uri, image_cache_path) = queue_task
-                                                .take_multimodal(&session_key_for_worker)
-                                                .await
-                                                .unwrap_or((None, None, None));
-                                            let processed = crate::multimodal::ProcessedAttachments {
-                                                text_prefix,
-                                                image_data_uri,
-                                                image_cache_path,
-                                            };
-
-                                            let result = handler_task
-                                                .handle_with_multimodal(
-                                                    &next_event,
-                                                    adapter_task.clone(),
-                                                    cancel_task.child_token(),
-                                                    processed,
-                                                )
-                                                .await;
-
-                                            if let Err(e) = result {
-                                                error!(
-                                                    chat_id = %next_event.chat_id,
-                                                    error = %e,
-                                                    "Handler error for message (Phase 36.17.2 worker pop-loop)"
-                                                );
+                                                crate::turn_slot::SlotOutcome::Completed(Ok(())) => {}
+                                                crate::turn_slot::SlotOutcome::Completed(Err(e)) => {
+                                                    error!(
+                                                        chat_id = %next_event.chat_id,
+                                                        error = %e,
+                                                        "Handler error for message (Phase 36.17.2 worker pop-loop)"
+                                                    );
+                                                }
+                                                crate::turn_slot::SlotOutcome::CeilingHit => {
+                                                    warn!(
+                                                        chat_id = %next_event.chat_id,
+                                                        "Worker: gateway call hit its ceiling; permit released (Phase 54.8 D-07)"
+                                                    );
+                                                }
+                                                // semaphore closed on shutdown
+                                                crate::turn_slot::SlotOutcome::SemaphoreClosed => break,
                                             }
 
                                             // D-07: post-turn drain_pending call removed.
                                             // The next loop iteration pops the next event from
                                             // session_queue_task if any arrived during the turn —
                                             // that is the natural drain.
-
-                                            drop(permit);
 
                                             // D-05: cancellation check between iterations.
                                             if cancel_task.is_cancelled() { break; }
@@ -2026,17 +2140,50 @@ impl GatewayRunner {
             }
         });
 
+        // --- 9d. Tier 2 memory loops (Phase 58.2 D-15/D-24) ---
+        // Hourly consolidation + nightly 02:00-local dreams for THIS process's home only.
+        let tier2_targets = crate::tier2_loops::tier2_targets_for(
+            ironhermes_core::get_hermes_home(),
+            self.memory_manager.clone(),
+        )
+        .await;
+        let tier2_tz = crate::tier2_loops::parse_tz(self.config.agent.timezone.as_deref());
+        let tier2_tasks = crate::tier2_loops::spawn_tier2_loops(
+            &mut join_set,
+            self.cancel.clone(),
+            tier2_targets,
+            &self.config.memory,
+            tier2_tz,
+        );
+        info!(tasks = tier2_tasks, "Tier 2 memory loops started");
+
         // --- 9b. Session cleanup task ---
         let cleanup_cancel = self.cancel.clone();
         let session_store_cleanup = self.session_store.clone();
+        let tool_registry_cleanup = self.tool_registry.clone();
         join_set.spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
             loop {
                 tokio::select! {
                     _ = cleanup_cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        let mut store = session_store_cleanup.write().await;
-                        store.expire_stale(timeout_hours);
+                        let evicted = {
+                            let mut store = session_store_cleanup.write().await;
+                            store.expire_stale(timeout_hours)
+                        };
+                        // 49.8-08 (D-10/D-16): an idle-expiry sweep that expired
+                        // at least one session is a real session boundary — stop
+                        // the robot and cancel any goals. Awaited outside the
+                        // SessionStore write guard, bounded so an unreachable
+                        // bridge can never wedge the cleanup task.
+                        if evicted > 0 {
+                            let ros2_report =
+                                ironhermes_tools::ros2::end_session_stop(&tool_registry_cleanup)
+                                    .await;
+                            if ros2_report != "nothing to stop" {
+                                info!(report = %ros2_report, "gateway idle-expiry sweep: ros2 session-end stop");
+                            }
+                        }
                     }
                 }
             }
@@ -2053,7 +2200,12 @@ impl GatewayRunner {
         // NamedTempFile-in-same-dir-then-persist shape `write_gateway_pid`
         // uses, T-49.3-06-02).
         //
-        // `connected` for Telegram/Buzz/webhook/api_server is each
+        // Phase 54.8 Plan 07 (D-04): Telegram `connected` is now a live,
+        // monotonic poll-liveness signal computed per tick (a poller that has
+        // not completed a getUpdates in ~90 s reads disconnected). The
+        // remaining platforms keep the boot-time signal described next.
+        //
+        // `connected` for Buzz/webhook/api_server is each
         // adapter's `Option<Arc<..>>.is_some()` — a real signal, captured
         // once here (these Options are `Arc`s that live for the whole
         // function and are already cloned into other tasks below, e.g.
@@ -2070,7 +2222,11 @@ impl GatewayRunner {
         let status_cancel = self.cancel.clone();
         let session_store_status = self.session_store.clone();
         let status_home = home.clone();
-        let telegram_status_flag = telegram_adapter.is_some();
+        // Phase 54.8 Plan 07 (D-04): Telegram `connected` is a LIVE signal, not
+        // a boot-time boolean. The adapter's monotonic PollLiveness stamp is
+        // read every tick, so a dead poller reads `connected: false` within
+        // ~90 s regardless of wall-clock steps.
+        let telegram_liveness = telegram_adapter.as_ref().map(|a| a.poll_liveness());
         #[cfg(feature = "buzz")]
         let buzz_status_flag = buzz_adapter.is_some();
         #[cfg(not(feature = "buzz"))]
@@ -2097,7 +2253,9 @@ impl GatewayRunner {
                         platforms.insert(
                             "telegram".to_string(),
                             ironhermes_core::gateway_status::PlatformStatusEntry {
-                                connected: telegram_status_flag,
+                                connected: crate::poll_supervisor::telegram_status_connected(
+                                    telegram_liveness.as_deref(),
+                                ),
                                 session_count: counts.get(&Platform::Telegram).copied().unwrap_or(0),
                             },
                         );
@@ -2543,6 +2701,17 @@ impl GatewayRunner {
             }
         }
 
+        // 49.8-08 (D-10/D-16): graceful shutdown is a real session boundary
+        // for every live gateway session — stop the robot and cancel any
+        // goals before MCP servers (and everything else) tear down.
+        // Awaited, and bounded by end_session_stop's own session-end timeout
+        // (see ironhermes_tools::ros2::session), so an unreachable bridge can
+        // never delay shutdown beyond that bound.
+        let ros2_report = ironhermes_tools::ros2::end_session_stop(&self.tool_registry).await;
+        if ros2_report != "nothing to stop" {
+            info!(report = %ros2_report, "gateway shutdown: ros2 session-end stop");
+        }
+
         // GAP-8 (Phase 21.2 Plan 11): tear down MCP servers BEFORE
         // self.cancel.cancel() and BEFORE the join_set drain, so stdio
         // children are SIGKILL'd (via kill_on_drop) and bounded-timeout
@@ -2876,6 +3045,28 @@ fn build_platform_approval_coordinator(
     ))
 }
 
+/// Give a Discord or Slack handler a real approval gate (Phase 57). The coordinator is
+/// bound to a [`DmOnlyAdapter`](crate::adapter::DmOnlyAdapter), so every prompt, expiry
+/// notice and bypass notice is delivered to the requesting user's DM and never to a
+/// channel; `handle_slash_command` resolves only from that user's DM. Shares the one
+/// approvals store and audit log with every other platform.
+fn attach_dm_approval_coordinator<T: crate::adapter::DirectMessageSender + 'static>(
+    handler: &mut GatewayMessageHandler,
+    sender: T,
+    timeout_secs: u64,
+    approvals_store: Arc<ironhermes_core::ApprovalsStore>,
+    audit_log: Arc<ironhermes_core::AuditLog>,
+) {
+    let adapter: Arc<dyn crate::adapter::PlatformAdapter> =
+        Arc::new(crate::adapter::DmOnlyAdapter(sender));
+    handler.set_approval_coordinator(build_platform_approval_coordinator(
+        timeout_secs,
+        adapter,
+        approvals_store,
+        audit_log,
+    ));
+}
+
 // -------------------------------------------------------------------------
 // Phase 36.3.7.5 BUG-36.3.7.5-04: notifier-spawn support helpers.
 //
@@ -3030,6 +3221,113 @@ fn build_notifier_send_fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 57: a stand-in DM transport for the wiring test below.
+    struct NoopDm;
+
+    #[async_trait::async_trait]
+    impl crate::adapter::DirectMessageSender for NoopDm {
+        fn platform(&self) -> ironhermes_core::Platform {
+            ironhermes_core::Platform::Discord
+        }
+        async fn send_direct_message(
+            &self,
+            user_id: &str,
+            _content: &str,
+        ) -> anyhow::Result<ironhermes_core::MessageResponse> {
+            Ok(ironhermes_core::MessageResponse {
+                message_id: "m".into(),
+                chat_id: user_id.to_string(),
+                platform: ironhermes_core::Platform::Discord,
+            })
+        }
+    }
+
+    /// Phase 57: `attach_dm_approval_coordinator` is what gives a Discord/Slack handler
+    /// a coordinator (without it `approval_gate_for_event` returns `None` and every
+    /// gated Warn fails closed with no prompt), and `start()`'s 7b and 7c blocks must
+    /// call it with their own transport. Needles are built from fragments so this test
+    /// never matches itself.
+    #[test]
+    fn discord_and_slack_handlers_get_an_approval_coordinator() {
+        let config = ironhermes_core::Config::default();
+        let state = Arc::new(std::sync::Mutex::new(
+            ironhermes_state::StateStore::new(":memory:").expect("in-memory store"),
+        ));
+        let mut handler = GatewayMessageHandler::new(
+            config.clone(),
+            ironhermes_core::ProviderResolver::build(&config).expect("resolver"),
+            Arc::new(RwLock::new(crate::session::SessionStore::new(state))),
+            Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new())),
+        );
+        assert!(!handler.has_approval_coordinator());
+        let dir = tempfile::tempdir().expect("tempdir");
+        attach_dm_approval_coordinator(
+            &mut handler,
+            NoopDm,
+            5,
+            Arc::new(ironhermes_core::ApprovalsStore::with_path(
+                dir.path().join("approvals.json"),
+            )),
+            Arc::new(ironhermes_core::AuditLog::with_path(
+                dir.path().join("audit.jsonl"),
+                ironhermes_core::AuditConfig::default(),
+            )),
+        );
+        assert!(handler.has_approval_coordinator());
+
+        let source = include_str!("runner.rs");
+        let production = source
+            .split(&["#[cfg(", "test)]\nmod tests"].concat())
+            .next()
+            .expect("split always yields a first part");
+        let call = ["attach_dm_approval_", "coordinator(\n"].concat();
+        for handler_name in ["&mut handler_discord", "&mut handler_slack"] {
+            assert!(
+                production.contains(&format!("{call}                {handler_name}"))
+                    || production.contains(&format!("{call}                    {handler_name}")),
+                "start() must attach the DM approval coordinator to {handler_name}"
+            );
+        }
+    }
+
+    /// Phase 54.8 Plan 07 (D-05, T-54.8-54): source-shape pin. The dispatch
+    /// loop's three network awaits must each sit inside a
+    /// `bounded_dispatch_step(` call. Needles are built from fragments so this
+    /// test never matches itself.
+    #[test]
+    fn dispatch_loop_awaits_are_bounded() {
+        let source = include_str!("runner.rs");
+        let production = source
+            .split(&["#[cfg(", "test)]\nmod tests"].concat())
+            .next()
+            .expect("split always yields a first part");
+        let wrapper = ["bounded_dispatch", "_step("].concat();
+        let lines: Vec<&str> = production.lines().collect();
+        let needles = [
+            ["multimodal::process_", "attachments("].concat(),
+            ["PlatformAdapter::send_", "message(adapter_dispatch_mm"].concat(),
+            ["user_queue_dispatch.", "dispatch("].concat(),
+        ];
+        for needle in &needles {
+            let hits: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.contains(needle.as_str()))
+                .map(|(i, _)| i)
+                .collect();
+            assert!(!hits.is_empty(), "needle {needle} not found in runner.rs");
+            for i in hits {
+                let from = i.saturating_sub(3);
+                let window = lines[from..=i].join("\n");
+                assert!(
+                    window.contains(&wrapper),
+                    "`{needle}` (line {}) is not inside a {wrapper} call",
+                    i + 1
+                );
+            }
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Phase 47.6 Plan 03 (P0-1): primary-adapter selection + optional-Telegram
@@ -4981,5 +5279,136 @@ gateway:
                  in session_queue.rs."
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod turn_slot_wiring_tests {
+    /// Phase 54.8 D-07: the runner has exactly one permit path per call site —
+    /// `turn_slot::run_turn_slot` (worker) and `turn_slot::run_slash_command`
+    /// (slash fast path). Needles are built from fragments so this test never
+    /// matches itself.
+    #[test]
+    fn runner_uses_turn_slot() {
+        let src = include_str!("runner.rs");
+        let worker = ["run_turn", "_slot("].concat();
+        let slash = ["run_slash", "_command("].concat();
+        assert!(
+            src.contains(&format!("turn_slot::{worker}")),
+            "the per-chat worker must call turn_slot::run_turn_slot"
+        );
+        assert!(
+            src.contains(&format!("turn_slot::{slash}")),
+            "the slash fast path must call turn_slot::run_slash_command"
+        );
+        for needle in [
+            ["sem_task", ".acquire()"].concat(),
+            ["sem_cmd", ".acquire()"].concat(),
+        ] {
+            assert!(
+                !src.contains(&needle),
+                "runner.rs must not take a run permit directly: {needle}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod inbound_log_tests {
+    use super::inbound_log_content;
+
+    const CALLBACK: &str = "http://127.0.0.1:8765/callback?code=cd-123&state=st-1";
+
+    /// Phase 54.8 D-15 / RESEARCH F7: a pasted callback is masked before it is logged.
+    #[test]
+    fn inbound_log_content_redacts_callback() {
+        let logged = inbound_log_content(CALLBACK);
+        assert!(logged.contains("code=[REDACTED]"), "{logged}");
+        assert!(logged.contains("state=[REDACTED]"), "{logged}");
+        assert!(!logged.contains("cd-123"), "{logged}");
+
+        // Percent-encoded parameter names are decoded before the decision.
+        let encoded =
+            inbound_log_content("http://127.0.0.1:8765/callback?%63ode=cd-123&%73tate=st-1");
+        assert!(!encoded.contains("cd-123"), "{encoded}");
+
+        // A callback inside a sentence is masked too.
+        let sentence = format!("here you go <{CALLBACK}> thanks");
+        let prose = inbound_log_content(&sentence);
+        assert!(!prose.contains("cd-123"), "{prose}");
+        assert!(prose.contains("here you go"), "{prose}");
+    }
+
+    #[test]
+    fn inbound_log_content_passes_plain_text() {
+        assert_eq!(inbound_log_content("hello there"), "hello there");
+    }
+
+    /// The info line that records every inbound message uses the redactor for its
+    /// `content` field. Needles are built from fragments so this test never matches
+    /// its own source.
+    #[test]
+    fn inbound_log_line_uses_redactor() {
+        let src = include_str!("runner.rs");
+        let marker = ["Received message from", " dispatch channel"].concat();
+        let at = src
+            .find(&marker)
+            .expect("the inbound info line must exist in runner.rs");
+        let window = &src[at.saturating_sub(400)..at];
+        let redacted = ["content = %inbound_log", "_content(&event.content)"].concat();
+        let raw = ["content = %event", ".content"].concat();
+        assert!(
+            window.contains(&redacted),
+            "the inbound info line must log the redacted content"
+        );
+        assert!(
+            !window.contains(&raw),
+            "the inbound info line must not log the raw message content"
+        );
+    }
+
+    /// The paste intercept sits after the whitelist check and before the slash fast
+    /// path and the UserQueueManager, and its `if` body is exactly `continue` - there
+    /// is no arm that can fall through to ordinary dispatch.
+    #[test]
+    fn intercept_precedes_slash_and_queue() {
+        let src = include_str!("runner.rs");
+        let call = ["handler_dispatch.intercept", "_oauth_paste("].concat();
+        let whitelist = ["crate::telegram::telegram_whitelist", "_allows("].concat();
+        let slash = ["crate::turn_slot::run_slash", "_command("].concat();
+        let queue = ["user_queue_dispatch.", "dispatch("].concat();
+
+        let i = src
+            .find(&call)
+            .expect("intercept call in the dispatch loop");
+        assert_eq!(
+            src.matches(&call).count(),
+            1,
+            "exactly one intercept call site"
+        );
+        let w = src.find(&whitelist).expect("whitelist check");
+        let s = src.find(&slash).expect("slash fast path call");
+        let q = src.find(&queue).expect("user queue dispatch call");
+        assert!(w < i, "the intercept must come after the whitelist check");
+        assert!(i < s, "the intercept must come before the slash fast path");
+        assert!(i < q, "the intercept must come before the user queue");
+
+        assert!(
+            src[..i].trim_end().ends_with("if"),
+            "the intercept call must be the condition of an `if`"
+        );
+        let after = &src[i..];
+        let open = after.find('{').expect("the `if` body");
+        let body_and_rest = after[open + 1..].trim_start();
+        assert!(
+            body_and_rest.starts_with("continue;"),
+            "the `if` body must be exactly `continue;`"
+        );
+        assert!(
+            body_and_rest["continue;".len()..]
+                .trim_start()
+                .starts_with('}'),
+            "nothing may follow `continue;` inside the `if`"
+        );
     }
 }

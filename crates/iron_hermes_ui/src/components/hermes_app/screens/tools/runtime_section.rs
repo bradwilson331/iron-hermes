@@ -82,7 +82,7 @@ pub(super) fn runtime_pill(
 
 /// Which lifecycle action a confirm dialog names.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum RuntimeAction {
+pub(crate) enum RuntimeAction {
     Stop,
     Start,
     Restart,
@@ -110,7 +110,10 @@ fn runtime_confirm_title(action: RuntimeAction) -> &'static str {
 /// that action. Every one of the three bodies is distinct text — never the
 /// same wording reused across actions.
 #[allow(dead_code)] // constructed inside RuntimeSection rsx!; dead_code fires on test target
-fn runtime_confirm_body(action: RuntimeAction, status: Option<&GatewayRuntimeStatus>) -> String {
+pub(crate) fn runtime_confirm_body(
+    action: RuntimeAction,
+    status: Option<&GatewayRuntimeStatus>,
+) -> String {
     match action {
         RuntimeAction::Stop => "STOP — scheduled jobs and board automation stop firing until \
             the gateway is started again, and any in-flight work it is doing is interrupted."
@@ -139,7 +142,7 @@ fn runtime_confirm_body(action: RuntimeAction, status: Option<&GatewayRuntimeSta
 /// completes. Never a raw OS error (the outcome DTO itself carries none —
 /// `gateway_control_api`'s own T-48.2-13-11 contract).
 #[allow(dead_code)] // used inside RuntimeSection rsx!; dead_code fires on test target
-fn runtime_outcome_line(outcome: &GatewayLifecycleOutcome) -> String {
+pub(crate) fn runtime_outcome_line(outcome: &GatewayLifecycleOutcome) -> String {
     use GatewayLifecycleOutcome::*;
     match outcome {
         Stopped { pid } => format!("STOPPED — pid {pid} confirmed gone."),

@@ -113,7 +113,10 @@ fn queue_transcript_line() {
     // Touch the queue so the unused import would surface as a build error if
     // any of the imports drift.
     assert_eq!(app.queue.len(&app.queue_key), 0);
-    let _ = StreamEvent::Finished { total_tokens: 0 };
+    let _ = StreamEvent::Finished {
+        total_tokens: 0,
+        context_warnings: Vec::new(),
+    };
     let _ = Ordering::SeqCst;
     let _ = make_key();
     let _ = std::any::type_name::<dyn MessageQueue<SessionKey>>();

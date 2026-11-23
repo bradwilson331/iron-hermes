@@ -57,7 +57,10 @@ pub trait TtsProvider: Send + Sync {
 /// `TtsRegistry::register()` accepts only names in this set; any other name
 /// triggers a `tracing::warn!` and is ignored. This pre-positions the invariant
 /// for a future user-extension reversal without changing call sites.
-pub const BUILTIN_TTS_NAMES: &[&str] = &["edge", "elevenlabs", "openai"];
+///
+/// Phase 54.7 (D-01/D-19) appends `openai_compatible` — appended LAST so the
+/// index-based assertions in the provider unit tests keep their meaning.
+pub const BUILTIN_TTS_NAMES: &[&str] = &["edge", "elevenlabs", "openai", "openai_compatible"];
 
 /// Registry mapping provider names to `Arc<dyn TtsProvider>` instances.
 ///

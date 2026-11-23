@@ -12,13 +12,17 @@ config and the free-mode continuous wake-word session.
 
 ## TL;DR
 
-- There are **two** voice modes, chosen by `voice.barge_in_mode`:
-  - **Free mode** (`push_to_interrupt`) — turn-based: mic → STT → agent → **TTS**.
-    **This is the only mode that uses ElevenLabs** (or Edge / OpenAI TTS).
-  - **Realtime mode** (`open_mic`) — full-duplex over the OpenAI Realtime API.
-    Uses **OpenAI realtime voices only** (e.g. `shimmer`), **never ElevenLabs**.
-- To hear an **ElevenLabs** voice, you must be in **free mode**
-  (`voice.barge_in_mode: push_to_interrupt`).
+- There are **two** voice services, chosen by `voice.service` (Phase 54.7):
+  - **Turn-based** (`voice.service: turn_based`, the default) — mic → STT → agent → **TTS**.
+    **This is the only service that uses ElevenLabs** (or Edge / OpenAI TTS / an
+    OpenAI-compatible server such as Kokoro).
+  - **Realtime** (`voice.service: realtime`) — full-duplex over an OpenAI-Realtime-compatible
+    server configured by the top-level `realtime:` block (`api.openai.com` by default).
+    Uses the **realtime voice** (e.g. `shimmer`), **never ElevenLabs**.
+- To hear an **ElevenLabs** voice, you must be on the **turn-based** service
+  (`voice.service: turn_based`). `voice.barge_in_mode` now only controls how
+  turn-based playback is interrupted; a config with no `voice.service` and
+  `barge_in_mode: open_mic` still loads as `realtime`.
 - The voice is configured in two places, with per-identity winning over global:
   1. **Global** — `tts.provider: elevenlabs` + `tts.elevenlabs.voice_id`.
   2. **Per-avatar** — `identities.<slug>.voice.free_mode_tts_provider` +
@@ -31,21 +35,26 @@ config and the free-mode continuous wake-word session.
 
 ## The two modes
 
-`voice.barge_in_mode` decides which code path runs when you enter voice mode
-(`crates/iron_hermes_ui/src/components/hermes_app/screens/voice_mode.rs:282-323`):
+`voice.service` decides which code path runs when you enter voice mode. It is
+decoupled from `voice.barge_in_mode`, which governs turn-based interruption only:
 
-| `barge_in_mode` | Path | Voices used | Notes |
+| `voice.service` | Path | Voices used | Notes |
 |---|---|---|---|
-| `push_to_interrupt` (default) | **Free / turn-based** (`start_voice_loop`) | **Edge / ElevenLabs / OpenAI TTS** | Wake word supported. The ElevenLabs path. |
-| `open_mic` | **Realtime** (`start_realtime_session`) | **OpenAI realtime voices only** | WebRTC; needs an OpenAI key. Falls back to free mode if realtime is unavailable. |
-| `half_duplex` | Deferred (not wired) | — | Treated as turn-based. |
+| `turn_based` (default) | **Free / turn-based** (`start_voice_loop`) | **Edge / ElevenLabs / OpenAI TTS / `openai_compatible` TTS** | STT is `groq`, `openai` or `openai_compatible`. Wake word supported. The ElevenLabs path. |
+| `realtime` | **Realtime** (`start_realtime_session`) | **The realtime voice** (`realtime.voice`) | WebRTC; the browser connects directly to `{realtime.base_url}/realtime/calls`. Falls back to turn-based if realtime is unavailable. |
 
-> **Gotcha for testing ElevenLabs:** `open_mic` tries the OpenAI Realtime API
-> first. If you have an OpenAI key configured (which you also need for STT), the
-> realtime session **succeeds and ElevenLabs is never called**. It only falls back
-> to the free/ElevenLabs path when realtime is *unavailable* (no resolvable OpenAI
-> key). **Set `voice.barge_in_mode: push_to_interrupt` to force the ElevenLabs
-> free-mode path.**
+| `barge_in_mode` | Meaning (turn-based service) |
+|---|---|
+| `push_to_interrupt` (default) | The user presses the record key to interrupt playback |
+| `open_mic` | Legacy. With no `voice.service` in the config it is read as `voice.service: realtime` |
+| `half_duplex` | Deferred (not wired); treated as turn-based |
+
+> **Gotcha for testing ElevenLabs:** the realtime service tries the realtime
+> endpoint first. If it can be reached (for the default OpenAI URL, an OpenAI key
+> that is also needed for STT), the session **succeeds and ElevenLabs is never
+> called**. It only falls back to the turn-based/ElevenLabs path when realtime is
+> *unavailable*. **Set `voice.service: turn_based` to force the ElevenLabs
+> turn-based path.**
 
 ---
 
@@ -122,7 +131,7 @@ identities:
     voice:
       free_mode_tts_provider: elevenlabs        # edge | openai | elevenlabs | null(=inherit)
       free_mode_tts_voice: pNInz6obpgDQGcFmaJgB  # Adam — overrides tts.elevenlabs.voice_id
-      realtime_voice: shimmer                    # OpenAI realtime voice (open_mic only)
+      realtime_voice: shimmer                    # realtime voice (voice.service: realtime only)
 ```
 
 ### Resolution precedence (exactly how it works)
@@ -192,30 +201,52 @@ is pre-wired to ElevenLabs/Adam.
 
 ## Realtime mode (contrast — does NOT use ElevenLabs)
 
-With `voice.barge_in_mode: open_mic`, voice runs over the **OpenAI Realtime API +
-WebRTC** (`start_realtime_session`). It uses OpenAI realtime voices, configured by:
+With `voice.service: realtime` (formerly `voice.barge_in_mode: open_mic`), voice runs
+over an **OpenAI-Realtime-compatible server + WebRTC** (`start_realtime_session`). It
+uses the realtime voice, configured by the top-level `realtime:` block:
 
 ```yaml
 voice:
-  barge_in_mode: open_mic
-  realtime_model: gpt-realtime
-  realtime_voice: shimmer        # global realtime voice
-  realtime_transcription_model: gpt-4o-mini-transcribe
+  service: realtime
   realtime_noise_reduction: far_field   # far_field | near_field | off
   realtime_vad_mode: semantic_vad       # semantic_vad | server_vad
+realtime:
+  base_url: https://api.openai.com/v1   # default; a custom server must be browser-reachable
+  # api_key_ref: VOICE_KEY_REALTIME     # optional; the NAME of an env var / vault entry
+  model: gpt-realtime
+  voice: shimmer                        # global realtime voice
+  transcription_model: gpt-4o-mini-transcribe
 ```
 
+- **How it connects.** The server mints an ephemeral token at
+  `{base_url}/realtime/client_secrets`, then the **browser connects directly** to
+  `{base_url}/realtime/calls`. The browser, not only the server, must be able to
+  reach `base_url`. With **no key** (no `api_key_ref` on a custom URL) no token is
+  minted and the browser connects without one.
 - Per-identity override: `identities.<slug>.voice.realtime_voice`
   (`resolve_realtime_voice` + `issue_realtime_token` in `server/api.rs`).
-- Allowed realtime voices (server-side whitelist `REALTIME_ALLOWED_VOICES`):
-  **`alloy`, `shimmer`, `echo`, `verse`, `ash`, `ballad`, `coral`, `sage`**.
-  An unlisted value triggers graceful fallback to turn-based voice.
-- Realtime needs an OpenAI key resolvable via `providers.openai.api_key_env`
-  (default `OPENAI_API_KEY`).
-- **Wake word does not apply in `open_mic`** (the UI greys it out).
+- There is no fixed list of allowed models or voices any more: `model`, `voice` and
+  `transcription_model` accept any value inside a strict charset and length rule
+  (see [`CONFIGURATION.md`](CONFIGURATION.md#realtime-realtime)). For `api.openai.com`
+  the panel offers the known OpenAI values; for a custom server it lists what the
+  server reports, and always lets you type a custom value. If realtime cannot start,
+  voice falls back to turn-based.
+- The default OpenAI URL needs an OpenAI key resolvable via
+  `providers.openai.api_key_env` (default `OPENAI_API_KEY`); a custom server uses
+  `realtime.api_key_ref` (a `VOICE_KEY_*` variable or `secret/voice/*` vault entry —
+  never another provider's key name).
+- The legacy `voice.realtime_model` / `realtime_voice` / `realtime_transcription_model`
+  keys are still read as fallbacks and dropped on the next web Voice save; a config
+  with `barge_in_mode: open_mic` and no `voice.service` loads as `realtime`.
+- **Wake word does not apply to the realtime service** (the UI greys it out).
 
-ElevenLabs and `realtime_voice` are unrelated: ElevenLabs is free-mode TTS;
-`realtime_voice` is an OpenAI voice used only in `open_mic`.
+ElevenLabs and `realtime_voice` are unrelated: ElevenLabs is turn-based TTS;
+`realtime_voice` is the realtime session's voice, used only when
+`voice.service: realtime`.
+
+Turn-based replies can also use a self-hosted **OpenAI-compatible** TTS/STT server
+(Kokoro, whisper.cpp): see `tts.openai_compatible` / `stt.openai_compatible` in
+[`CONFIGURATION.md`](CONFIGURATION.md#text-to-speech-tts).
 
 ---
 
@@ -226,11 +257,11 @@ All live in `~/.ironhermes/.env` (never in `config.yaml`):
 | Purpose | Env var | Notes |
 |---|---|---|
 | **TTS (ElevenLabs)** | `ELEVENLABS_API_KEY` | Required for ElevenLabs voices. Without it, replies fall back to keyless Edge. |
-| **STT (transcription)** | `OPENAI_API_KEY` **or** `VOICE_TOOLS_OPENAI_KEY` (OpenAI Whisper) **or** `GROQ_API_KEY` (Groq Whisper) | `stt.provider: auto` picks the first present (Groq preferred). |
+| **STT (transcription)** | `OPENAI_API_KEY` **or** `VOICE_TOOLS_OPENAI_KEY` (OpenAI Whisper) **or** `GROQ_API_KEY` (Groq Whisper) — or no key for a self-hosted `stt.openai_compatible.base_url` | `stt.provider: auto` picks the first configured in the order `openai_compatible > groq > openai` (a configured self-hosted server wins over cloud keys; an empty key variable counts as unset). |
 | **LLM (the agent)** | your provider key, e.g. `OPENROUTER_API_KEY` | Must match `model.provider` / `providers.<name>.api_key_env`. |
 
-> If you set an OpenAI key for STT **and** leave `barge_in_mode: open_mic`, realtime
-> will win over ElevenLabs. Use `push_to_interrupt` for the ElevenLabs path.
+> If you set an OpenAI key for STT **and** leave `voice.service: realtime`, realtime
+> will win over ElevenLabs. Use `voice.service: turn_based` for the ElevenLabs path.
 
 ---
 

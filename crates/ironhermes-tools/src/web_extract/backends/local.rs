@@ -33,11 +33,13 @@ pub async fn fetch_local_content(url: &str, web_cfg: &WebConfig) -> Result<Local
 
     debug!("web_extract: fetching {} via local backend", url);
 
-    let client = reqwest::Client::builder()
-        .user_agent(&web_cfg.user_agent)
-        .timeout(Duration::from_secs(web_cfg.timeout_secs))
-        // Default redirect policy follows redirects — re-validated below.
-        .build()?;
+    // D-13/D-14: every hop — including a redirect's new host — is resolved
+    // through crate::web_client's SSRF-safe resolver BEFORE connecting; see its
+    // module doc for the redirect-policy rationale.
+    let client = crate::web_client::build_ssrf_safe_client(
+        Some(&web_cfg.user_agent),
+        Duration::from_secs(web_cfg.timeout_secs),
+    )?;
 
     let response = client
         .get(url)
@@ -45,7 +47,10 @@ pub async fn fetch_local_content(url: &str, web_cfg: &WebConfig) -> Result<Local
         .await
         .map_err(|e| anyhow!("local fetch failed: {}", e))?;
 
-    // D-18 post-redirect re-validation (web_read.rs:142-150 verbatim pattern)
+    // D-18 post-redirect re-validation (web_read.rs verbatim pattern): SECOND
+    // line of defense. The SSRF-safe resolver above is the FIRST line — it
+    // blocks pre-connection, at resolution time, for every hop reqwest
+    // follows. This check only fires if the resolver did not.
     let final_url = response.url().as_str().to_string();
     if final_url != url {
         validate_url_async(&final_url)

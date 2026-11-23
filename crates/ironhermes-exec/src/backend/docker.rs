@@ -309,7 +309,10 @@ fn mount_args(
         // Best-effort: if this fails, `{runtime} run` will fail loudly
         // (no silent fallback) rather than silently mounting nothing.
         let _ = std::fs::create_dir_all(&host_dir);
-        vec!["-v".to_string(), format!("{}:/workspace", host_dir.display())]
+        vec![
+            "-v".to_string(),
+            format!("{}:/workspace", host_dir.display()),
+        ]
     } else {
         vec![
             "--tmpfs".to_string(),
@@ -785,18 +788,20 @@ mod integration_tests {
         let env_a = create_environment(&cfg, task_id, profile)
             .await
             .expect("first create_environment should succeed against a live daemon");
-        let (id_after_a, _state) = find_reusable_container(&cfg.container_runtime, task_id, profile)
-            .await
-            .expect("find_reusable_container should succeed")
-            .expect("a container must exist after the first create_environment call");
+        let (id_after_a, _state) =
+            find_reusable_container(&cfg.container_runtime, task_id, profile)
+                .await
+                .expect("find_reusable_container should succeed")
+                .expect("a container must exist after the first create_environment call");
 
         let env_b = create_environment(&cfg, task_id, profile)
             .await
             .expect("second create_environment should reuse the same container");
-        let (id_after_b, _state) = find_reusable_container(&cfg.container_runtime, task_id, profile)
-            .await
-            .expect("find_reusable_container should succeed")
-            .expect("the reused container must still exist");
+        let (id_after_b, _state) =
+            find_reusable_container(&cfg.container_runtime, task_id, profile)
+                .await
+                .expect("find_reusable_container should succeed")
+                .expect("the reused container must still exist");
 
         assert_eq!(
             id_after_a, id_after_b,

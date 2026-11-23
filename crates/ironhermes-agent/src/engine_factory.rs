@@ -12,6 +12,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::any_client::{build_main_client, build_role_client};
 use crate::context_engine::{ContextEngine, LocalPruningEngine};
+use crate::fit;
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::summarizing_engine::{AnyClientSummarizer, SummarizationClient, SummarizingEngine};
@@ -46,7 +47,19 @@ pub fn build_context_engine(
 ) -> Arc<dyn ContextEngine> {
     let sid = session_id.into();
     let protect_first = config.compression.protect_first_n;
-    let protect_last = config.compression.protect_last_tokens;
+    // 58.3.1 D-15: window-scaled trigger and a tail clamped to half the trigger level.
+    let threshold = fit::effective_compression_threshold(
+        threshold,
+        config
+            .compression
+            .threshold_for_model(&resolver.resolve_for_main().default_model),
+        context_length,
+    );
+    let protect_last = fit::effective_protect_last(
+        config.compression.protect_last_tokens,
+        context_length,
+        threshold,
+    );
     let shift = config.compression.tool_pair_shift_tokens;
 
     let build_local = |hooks: Option<Arc<HookRegistry>>,
@@ -130,8 +143,10 @@ pub fn build_context_engine(
                 .map(|ep| ep.default_model.clone())
                 .or_else(|| Some(resolver.resolve_for_main().default_model.clone()));
 
-            let summarizer: Arc<dyn SummarizationClient> =
-                Arc::new(AnyClientSummarizer::new(Arc::new(client), model));
+            let summarizer: Arc<dyn SummarizationClient> = Arc::new(
+                AnyClientSummarizer::new(Arc::new(client), model)
+                    .with_context_window(context_length),
+            );
 
             // Phase 18-13 gap-closure: same three-branch independent attachment
             // as build_local — session_id unconditional, tracker/hooks each
@@ -196,6 +211,31 @@ mod tests {
         );
         assert_eq!(engine.mode(), CompressionMode::Hard);
         assert!((engine.threshold() - 0.85).abs() < 1e-4);
+    }
+
+    /// 58.3.1 D-15: small windows tighten the trigger; the per-model map overrides it.
+    #[test]
+    fn engine_factory_applies_small_window_threshold_and_protect() {
+        let mut config = Config::default();
+        let resolver = default_resolver();
+        let build = |config: &Config, window: usize, t: f32| {
+            build_context_engine(
+                config,
+                "local_prune",
+                &resolver,
+                window,
+                t,
+                "s",
+                None,
+                None,
+                None,
+            )
+        };
+        assert!((build(&config, 8_192, 0.5).threshold() - 0.35).abs() < 1e-4);
+        assert!((build(&config, 128_000, 0.85).threshold() - 0.85).abs() < 1e-4);
+        let model = resolver.resolve_for_main().default_model.clone();
+        config.compression.model_thresholds.insert(model, 0.4);
+        assert!((build(&config, 8_192, 0.5).threshold() - 0.4).abs() < 1e-4);
     }
 
     /// `build_context_engine` with `"summarizing"` returns an engine with Soft mode.

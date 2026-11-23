@@ -1026,8 +1026,10 @@ fn invariant_22_4_35_command_context_field_membership() {
 ///
 /// Four subsystem handles (D-08): `state_store`, `resolver`,
 /// `context_compressor`, `personality_overlay`.
-/// Six toggle Arcs (D-09): `yolo_enabled` (UPGRADED), `verbose_enabled`,
-/// `statusbar_enabled`, `debug_enabled`, `fast_enabled`, `skin`.
+/// Five toggle Arcs (D-09): `verbose_enabled`, `statusbar_enabled`, `debug_enabled`,
+/// `fast_enabled`, `skin`. The sixth, `yolo_enabled`, was retired by Phase 57 (D-09):
+/// `/yolo <N>` is the audited session DEFCON dial and the App carries the session's
+/// live level as `defcon: DefconHandle`.
 ///
 /// Backstops D-08 / D-09 — a future refactor that removes any of these fields
 /// would silently break Plans 01-04 that read them from App.
@@ -1039,7 +1041,7 @@ fn invariant_22_4_36_app_field_membership() {
         "resolver",
         "context_compressor",
         "personality_overlay",
-        // D-09 six toggle Arcs (yolo_enabled is the upgrade; rest are new)
+        // D-09 toggle Arcs (the old yolo_enabled bool is the session DEFCON dial now)
         "verbose_enabled",
         "statusbar_enabled",
         "debug_enabled",
@@ -1055,12 +1057,23 @@ fn invariant_22_4_36_app_field_membership() {
              and the tui_rata post-router hook."
         );
     }
-    // yolo_enabled must be Arc<AtomicBool> (not plain bool) after the D-09 upgrade.
+    // Phase 57 D-09: the App holds the session's live DEFCON level, and the old
+    // shared yolo boolean is gone (it let a live toggle approve with no audit row).
     assert!(
-        TUI_RATA_APP.contains("yolo_enabled: Arc<AtomicBool>"),
-        "INV-22.4-36: app.rs must declare `yolo_enabled: Arc<AtomicBool>` \
-         (D-09 upgrade from plain `bool`). The post-router toggle hook uses \
-         fetch_xor on this AtomicBool."
+        TUI_RATA_APP.contains("pub defcon: ironhermes_core::defcon::DefconHandle")
+            || TUI_RATA_APP.contains("pub defcon: DefconHandle"),
+        "INV-22.4-36: app.rs must declare a `defcon:` DefconHandle field \
+         (Phase 57 D-09: `/yolo <N>` is the session dial)."
+    );
+    let non_comment: String = TUI_RATA_APP
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !non_comment.contains("yolo_enabled: Arc<AtomicBool>"),
+        "INV-22.4-36: app.rs must no longer declare `yolo_enabled: Arc<AtomicBool>` \
+         (Phase 57 D-09/D-10 retired the silent boolean toggle)."
     );
 }
 

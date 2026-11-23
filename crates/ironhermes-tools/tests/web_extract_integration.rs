@@ -872,7 +872,8 @@ async fn web_extract_budget_exceeds_worst_case_batch() {
          {MAX_REASONABLE_BATCH}-URL batch time ({worst_case_batch_secs}s = \
          {}s per-URL * {rounds} rounds at parallelism {}), or the registry ceiling \
          (Plan 01) could pre-empt a batch the per-URL deadlines would have completed",
-        cfg.extract.per_url_timeout_secs, cfg.extract.max_parallel_summaries
+        cfg.extract.per_url_timeout_secs,
+        cfg.extract.max_parallel_summaries
     );
 }
 
@@ -961,12 +962,19 @@ async fn partial_batch_on_one_stuck_url() {
     );
 
     let results: Vec<Value> = serde_json::from_str(&result).expect("parse Vec<ExtractionResult>");
-    assert_eq!(results.len(), 6, "exactly 6 ExtractionResult entries expected");
+    assert_eq!(
+        results.len(),
+        6,
+        "exactly 6 ExtractionResult entries expected"
+    );
 
     for i in [0usize, 1, 2, 4, 5] {
         let marker = format!("OK{i}");
         assert!(
-            results[i]["content"].as_str().unwrap_or("").contains(&marker),
+            results[i]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains(&marker),
             "index {i} expected content containing {marker}; got {:?}",
             results[i]
         );
@@ -1490,5 +1498,195 @@ async fn default_chain_matches_pre_phase_behavior() {
         "firecrawl must receive the request under the unconfigured default \
          chain — Phase 25.2 D-04 behavior must be unchanged for operators who \
          edit nothing"
+    );
+}
+
+// =============================================================================
+// Debug session web-extract-hangs-60s: nested-semaphore deadlock regression.
+// =============================================================================
+//
+// `WebExtractTool::execute` used to hold one permit of the shared
+// `Semaphore(extract.max_parallel_summaries)` for the WHOLE life of each URL task,
+// while `route_tiers` (tier 2) and `summarize_chunked` (tier 3) acquired ANOTHER
+// permit from the SAME semaphore. When the number of URLs concurrently reaching
+// summarization was >= the permit count, every permit was held by an outer task
+// that was itself waiting for a permit: a deadlock that only the per-URL deadline
+// (60s) broke, turning every URL in the batch into `extraction_timeout`.
+//
+// Every earlier multi-URL test used `use_llm_processing:false` or pages under the
+// 5K tier-2 threshold, so nothing exercised summarization with a batch as large as
+// the permit count. These tests do, through the real `WebExtractTool::execute`
+// entry point, with an instant mock summarizer — so a timeout here can only be the
+// permit deadlock, never a slow LLM.
+
+/// Runs one batch of `n_urls` pages of `page_words` words each through the real
+/// tool and returns the parsed results plus the number of summarizer calls.
+///
+/// `extract_yaml` is written verbatim under the `extract:` key of a temp
+/// `config.yaml` (`IRONHERMES_HOME` redirect), so each case can set
+/// `max_parallel_summaries`, `per_url_timeout_secs` and the tier thresholds.
+async fn run_summarizing_batch(
+    n_urls: usize,
+    page_words: usize,
+    extract_yaml: &str,
+) -> (Vec<Value>, usize) {
+    let _g = env_lock().lock().await;
+    let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
+    let _e = EnvGuard::unset("EXA_API_KEY");
+    let _t = EnvGuard::unset("TAVILY_API_KEY");
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+
+    let cfg_tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        cfg_tmp.path().join("config.yaml"),
+        format!("extract:\n{extract_yaml}"),
+    )
+    .expect("write test config.yaml");
+    let _home = EnvGuard::set(
+        "IRONHERMES_HOME",
+        cfg_tmp.path().to_str().expect("tmp path is valid utf8"),
+    );
+
+    let server = MockServer::start().await;
+    for i in 0..n_urls {
+        // "wordN " repeated: well past the 5K tier-2 threshold at the page sizes
+        // the callers choose, and distinct per URL.
+        let body = format!("page{i} ").repeat(page_words);
+        Mock::given(method("GET"))
+            .and(path(format!("/page{i}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    // A real (not synthetic) fetch latency, like a news homepage.
+                    // Without it an instant local fetch lets URL 0 take its inner
+                    // summarization permit before URLs 1..N have taken their outer
+                    // ones, so the pre-fix deadlock would be a scheduling race
+                    // instead of the deterministic all-permits-held state seen in
+                    // production. 1s, not less: at 300ms a loaded dev machine (dx +
+                    // rust-analyzer running) still showed ~1-in-8 task-start skew,
+                    // letting URL 0 slip through; at 1s it was 10/10 deterministic.
+                    .set_delay(Duration::from_millis(1000))
+                    .insert_header("content-type", "text/html")
+                    .set_body_raw(
+                        format!("<html><body><article><p>{body}</p></article></body></html>"),
+                        "text/html",
+                    ),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let (reg, counter, _tmp) = make_test_registry();
+    let urls: Vec<String> = (0..n_urls)
+        .map(|i| format!("{}/page{}", server.uri(), i))
+        .collect();
+
+    let result = reg
+        .handle_tool_call(
+            "web_extract",
+            json!({ "urls": urls, "use_llm_processing": true }),
+        )
+        .await
+        .expect("web_extract must return Ok");
+    let results: Vec<Value> = serde_json::from_str(&result).expect("parse Vec<ExtractionResult>");
+    let calls = counter.calls.lock().unwrap().len();
+    (results, calls)
+}
+
+/// Asserts every result is a clean summarized success (no error, mock summary body).
+fn assert_all_summarized(results: &[Value], expected: usize) {
+    assert_eq!(results.len(), expected, "one result per URL expected");
+    for (i, r) in results.iter().enumerate() {
+        assert!(
+            r["error"].is_null(),
+            "URL {i} must succeed, got error {:?} (an `extraction_timeout` here is the \
+             nested-semaphore deadlock: every permit held by an outer URL task that is \
+             itself waiting for a summarization permit)",
+            r["error"]
+        );
+        assert_eq!(
+            r["content"].as_str(),
+            Some("MOCK_SUMMARY"),
+            "URL {i} must carry the (tier-2/3) summary body; got {:?}",
+            r
+        );
+    }
+}
+
+/// Control: a batch one URL SMALLER than the permit count always had a free permit
+/// for the inner summarization acquire, so it worked before the fix too. Keeps the
+/// suite honest that the fix changed the >= permits case, not the happy path.
+#[tokio::test(flavor = "multi_thread")]
+async fn summarizing_batch_below_permit_count_completes() {
+    let (results, calls) = run_summarizing_batch(
+        3,
+        1500,
+        "  max_parallel_summaries: 4\n  per_url_timeout_secs: 4\n",
+    )
+    .await;
+    assert_all_summarized(&results, 3);
+    assert_eq!(calls, 3, "one tier-2 summarizer call per URL");
+}
+
+/// THE production failure: 4 large pages == `max_parallel_summaries` (4). Mirrors the
+/// 2026-10-09 / 2026-10-10 avatar-mode batches (4 news homepages, every URL timed
+/// out together at the 60s deadline).
+#[tokio::test(flavor = "multi_thread")]
+async fn summarizing_batch_equal_to_permit_count_does_not_deadlock() {
+    let (results, calls) = run_summarizing_batch(
+        4,
+        1500,
+        "  max_parallel_summaries: 4\n  per_url_timeout_secs: 4\n",
+    )
+    .await;
+    assert_all_summarized(&results, 4);
+    assert_eq!(calls, 4, "one tier-2 summarizer call per URL");
+}
+
+/// Boundary neighbour above the equivalence class: more URLs than permits. Before
+/// the fix the first `permits` URLs deadlocked and only the overflow URL succeeded
+/// (after the others timed out and released their permits).
+#[tokio::test(flavor = "multi_thread")]
+async fn summarizing_batch_above_permit_count_does_not_deadlock() {
+    let (results, calls) = run_summarizing_batch(
+        6,
+        1500,
+        "  max_parallel_summaries: 4\n  per_url_timeout_secs: 4\n",
+    )
+    .await;
+    assert_all_summarized(&results, 6);
+    assert_eq!(calls, 6, "one tier-2 summarizer call per URL");
+}
+
+/// Degenerate boundary: `max_parallel_summaries: 1` made even a SINGLE URL
+/// deadlock itself (its own outer permit starved its own inner acquire).
+#[tokio::test(flavor = "multi_thread")]
+async fn single_url_with_one_permit_does_not_self_deadlock() {
+    let (results, calls) = run_summarizing_batch(
+        1,
+        1500,
+        "  max_parallel_summaries: 1\n  per_url_timeout_secs: 4\n",
+    )
+    .await;
+    assert_all_summarized(&results, 1);
+    assert_eq!(calls, 1);
+}
+
+/// Tier 3 (chunked + synthesis) had the same nesting through `summarize_chunked`'s
+/// per-chunk `acquire_owned()` and its synthesis `acquire()`. Thresholds are lowered
+/// via config so a 7.5K-char page is tier 3 with 3 chunks — no 500K-char fixtures.
+#[tokio::test(flavor = "multi_thread")]
+async fn chunked_tier_batch_equal_to_permit_count_does_not_deadlock() {
+    let (results, calls) = run_summarizing_batch(
+        4,
+        1500,
+        "  max_parallel_summaries: 4\n  per_url_timeout_secs: 4\n  \
+         summary_tier3_threshold_chars: 6000\n  summary_chunk_chars: 3000\n",
+    )
+    .await;
+    assert_all_summarized(&results, 4);
+    assert!(
+        calls > 4,
+        "tier 3 must fan out into chunk calls + a synthesis call per URL (got {calls} total \
+         summarizer calls for 4 URLs — tier 3 did not engage)"
     );
 }

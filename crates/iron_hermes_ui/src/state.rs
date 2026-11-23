@@ -483,19 +483,21 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level screens addressable by the wheel + Settings sub-nav.
 ///
-/// 16 variants. The 11 wedge-reachable screens correspond 1-to-1 with
+/// 17 variants. The 10 wedge-reachable screens correspond 1-to-1 with
 /// `WheelWedge`; `Soul`, `Schedules`, `Office` are reachable via the
 /// Settings screen's "Other Screens" sub-nav (Plan 07's
 /// `SettingsScreenLink`) — they are not wheel wedges per CONTEXT D-10.
 ///
-/// `Kanban` is the 11th wheel-reachable screen, added in Phase
-/// 36.3.7.11 Plan 04 per D-02. Plan 01 will wire the live dashboard;
-/// until then a minimal `ScreenKanban` placeholder is rendered.
+/// `Kanban` is NOT a wheel wedge (removed in Phase 54.4); it is reached via
+/// the persistent header's KANBAN shortcut button.
 ///
 /// `Artifacts` and `ArtifactViewer` (Phase 46.6 Plan 05, D-07) are NOT
 /// wheel wedges either — they are reached from the Sessions page's
 /// `▤ ARTIFACTS` affordance (gallery → row click → viewer), like a
 /// sub-screen pair rather than a top-level wheel destination.
+///
+/// `Logs` (Phase 54.4 Plan 07, D-08) is likewise NOT a wheel wedge: it is
+/// reached from the persistent header's Logs shortcut.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum Screen {
     #[default]
@@ -517,19 +519,29 @@ pub enum Screen {
     Artifacts,
     /// Phase 46.6 Plan 05 (D-02/D-07): sandboxed artifact viewer chrome.
     ArtifactViewer,
+    /// Phase 54.4 D-08: server / audit / agent-activity logs. Not a wheel
+    /// wedge; reached from the header's Logs shortcut.
+    Logs,
+    /// Phase 54.9 D-13: generated views (OpenUI). Not a wheel wedge; the default
+    /// reach is a header shortcut (menu catalog entry `openui`).
+    OpenUi,
+    /// Phase 54.10 D-01: live boards (Dashboard). Not a wheel wedge; the default reach is
+    /// a header shortcut via menu catalog entry `dashboard`.
+    Dashboard,
 }
 
-/// The 11 wheel wedges in CONTEXT D-10 + Phase 36.3.7.11 D-02 canonical order:
+/// The 10 wheel wedges in CONTEXT D-10 canonical order:
 /// `chat, agents, models, tools, skills, memory, sessions, providers,
-/// gateway, settings, kanban` — the first 10 are sourced verbatim from
-/// `wheel-v2.js` `DEFAULT_SECTIONS` lines 11-22; `Kanban` was appended in
-/// Phase 36.3.7.11 Plan 04 per D-02.
+/// gateway, settings` — sourced verbatim from `wheel-v2.js`
+/// `DEFAULT_SECTIONS` lines 11-22. Phase 54.4: the former 11th `Kanban`
+/// wedge was removed (the persistent header's KANBAN shortcut button
+/// covers it); `Screen::Kanban` is unchanged.
 ///
 /// Note: this is **not** the app.html visual ordering — the JS file is
 /// the wheel's source of truth for the original 10 wedges (per D-10), and
 /// the `WheelWedge::label` / `sub` / `glyph` helpers below emit the exact
 /// strings from those 12 JS lines so the wheel SVG matches the prototype
-/// byte-for-byte. The Kanban wedge's strings come from UI-SPEC §3.3.
+/// byte-for-byte.
 #[allow(dead_code)] // Phase 36.3.7.11 wheel SVG; variants and methods wired in WheelComponent
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum WheelWedge {
@@ -544,12 +556,11 @@ pub enum WheelWedge {
     Providers,
     Gateway,
     Settings,
-    Kanban,
 }
 
 #[allow(dead_code)] // methods wired in wheel SVG component; dead_code fires on test target
 impl WheelWedge {
-    /// Wedge index in CONTEXT D-10 + Phase 36.3.7.11 D-02 order (0..=10).
+    /// Wedge index in CONTEXT D-10 order (0..=9).
     pub fn index(self) -> usize {
         match self {
             WheelWedge::Chat => 0,
@@ -562,20 +573,19 @@ impl WheelWedge {
             WheelWedge::Providers => 7,
             WheelWedge::Gateway => 8,
             WheelWedge::Settings => 9,
-            WheelWedge::Kanban => 10,
         }
     }
 
-    /// Wrap `i` modulo 11 and return the matching wedge. Used by the wheel
+    /// Wrap `i` modulo 10 and return the matching wedge. Used by the wheel
     /// rim hit-test (Plan 04) and by keyboard nav. Never panics — wraps
     /// safely via `rem_euclid` on the signed-cast value so even
     /// `usize::MAX` yields a valid variant.
     ///
-    /// Phase 36.3.7.11 D-02 Risk 1 atomic fix: modulo changed from 10 → 11
-    /// alongside the new `10 => WheelWedge::Kanban` arm; failure to update
-    /// any one of these would silently route index 10 to Chat.
+    /// Phase 54.4: the wheel has 10 wedges. A stale index 10 (the removed
+    /// Kanban wedge, e.g. from an old persisted `ih.ui.wheel`) wraps to
+    /// `Chat`.
     pub fn from_index(i: usize) -> Self {
-        let n = ((i as i64).rem_euclid(11)) as usize;
+        let n = ((i as i64).rem_euclid(10)) as usize;
         match n {
             0 => WheelWedge::Chat,
             1 => WheelWedge::Agents,
@@ -587,13 +597,12 @@ impl WheelWedge {
             7 => WheelWedge::Providers,
             8 => WheelWedge::Gateway,
             9 => WheelWedge::Settings,
-            10 => WheelWedge::Kanban,
-            _ => WheelWedge::Settings, // unreachable after rem_euclid(11)
+            _ => WheelWedge::Settings, // unreachable after rem_euclid(10)
         }
     }
 
     /// Wedge label per `wheel-v2.js` DEFAULT_SECTIONS `label` field
-    /// (and UI-SPEC §3.3 for `Kanban`).
+    /// 
     /// Note: `Providers` reads `"PROVIDER"` (singular) — that's the
     /// prototype's value, not a typo here.
     pub fn label(self) -> &'static str {
@@ -608,12 +617,10 @@ impl WheelWedge {
             WheelWedge::Providers => "PROVIDER",
             WheelWedge::Gateway => "GATEWAY",
             WheelWedge::Settings => "SYSTEM",
-            WheelWedge::Kanban => "KANBAN",
         }
     }
 
-    /// Wedge sublabel per `wheel-v2.js` DEFAULT_SECTIONS `sub` field
-    /// (and UI-SPEC §3.3 for `Kanban`).
+    /// Wedge sublabel per `wheel-v2.js` DEFAULT_SECTIONS `sub` field.
     pub fn sub(self) -> &'static str {
         match self {
             WheelWedge::Chat => "INTELLIGENCE CONSOLE",
@@ -626,13 +633,10 @@ impl WheelWedge {
             WheelWedge::Providers => "INFERENCE GATEWAYS",
             WheelWedge::Gateway => "NETWORK BRIDGE",
             WheelWedge::Settings => "CONFIGURATION",
-            WheelWedge::Kanban => "TASK BOARD",
         }
     }
 
-    /// Wedge glyph per `wheel-v2.js` DEFAULT_SECTIONS `glyph` field
-    /// (and UI-SPEC §3.3 for `Kanban`). The Kanban glyph `▦` is NOT in the
-    /// original 10-wedge set (▓◆◇◈✦⬢▣◉⌬⚙) — no new asset required.
+    /// Wedge glyph per `wheel-v2.js` DEFAULT_SECTIONS `glyph` field.
     pub fn glyph(self) -> &'static str {
         match self {
             WheelWedge::Chat => "▓",
@@ -645,7 +649,6 @@ impl WheelWedge {
             WheelWedge::Providers => "◉",
             WheelWedge::Gateway => "⌬",
             WheelWedge::Settings => "⚙",
-            WheelWedge::Kanban => "▦",
         }
     }
 
@@ -665,7 +668,6 @@ impl WheelWedge {
             WheelWedge::Providers => Screen::Providers,
             WheelWedge::Gateway => Screen::Gateway,
             WheelWedge::Settings => Screen::Settings,
-            WheelWedge::Kanban => Screen::Kanban,
         }
     }
 }
@@ -682,7 +684,23 @@ impl WheelWedge {
 pub struct WheelState {
     pub position: (f64, f64),
     pub size: f64,
+    #[serde(deserialize_with = "deserialize_wedge_or_chat")]
     pub active_wedge: WheelWedge,
+    /// Phase 54.9 (D-04): index of the active wedge within the configured wheel list.
+    /// The docked wheel reads this; `active_wedge` stays for the fixed-10 floating tests.
+    #[serde(default)]
+    pub active_index: usize,
+}
+
+/// Phase 54.4: tolerate a stale persisted `ih.ui.wheel` blob whose
+/// `active_wedge` names a removed wedge (the old `"Kanban"`): any unknown
+/// value falls back to `Chat` instead of failing the whole `WheelState` parse.
+fn deserialize_wedge_or_chat<'de, D>(d: D) -> Result<WheelWedge, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 impl Default for WheelState {
@@ -691,6 +709,7 @@ impl Default for WheelState {
             position: (24.0, 24.0),
             size: 240.0,
             active_wedge: WheelWedge::Chat,
+            active_index: 0,
         }
     }
 }
@@ -845,29 +864,40 @@ mod tests {
 
     #[test]
     fn wheel_wedge_from_index_round_trips_all_indices() {
-        // Phase 36.3.7.11 D-02: 11 wedges (was 10) — bump upper bound.
-        for i in 0..11 {
+        // Phase 54.4: 10 wedges (Kanban wedge removed).
+        for i in 0..10 {
             assert_eq!(WheelWedge::from_index(i).index(), i, "wedge {} mismatch", i);
         }
     }
 
     #[test]
-    fn wheel_wedge_from_index_wraps_modulo_eleven() {
-        // Phase 36.3.7.11 D-02 Risk 1: modulo changed from 10 → 11.
-        // 10 → Kanban (new), 11 → Chat (wrap to 0), 21 → Kanban (21 % 11 == 10),
-        // 22 → Chat (22 % 11 == 0).
-        assert_eq!(WheelWedge::from_index(10), WheelWedge::Kanban);
-        assert_eq!(WheelWedge::from_index(11), WheelWedge::Chat);
-        assert_eq!(WheelWedge::from_index(21), WheelWedge::Kanban);
-        assert_eq!(WheelWedge::from_index(22), WheelWedge::Chat);
+    fn wheel_wedge_from_index_wraps_modulo_ten() {
+        // Phase 54.4: 10 wedges. A stale index 10 (the removed Kanban wedge)
+        // wraps to Chat and never panics.
+        assert_eq!(WheelWedge::from_index(10), WheelWedge::Chat);
+        assert_eq!(WheelWedge::from_index(11), WheelWedge::Agents);
+        assert_eq!(WheelWedge::from_index(20), WheelWedge::Chat);
+        assert_eq!(WheelWedge::from_index(29), WheelWedge::Settings);
+    }
+
+    #[test]
+    fn wheel_state_stale_kanban_active_wedge_falls_back_to_chat() {
+        // An old persisted `ih.ui.wheel` blob carries active_wedge "Kanban".
+        let stale = r#"{"position":[10.0,12.0],"size":300.0,"active_wedge":"Kanban"}"#;
+        let ws: WheelState = serde_json::from_str(stale).expect("stale blob must still parse");
+        assert_eq!(ws.active_wedge, WheelWedge::Chat);
+        assert_eq!(ws.size, 300.0);
+        let ok = r#"{"position":[1.0,2.0],"size":240.0,"active_wedge":"Settings"}"#;
+        let ws: WheelState = serde_json::from_str(ok).unwrap();
+        assert_eq!(ws.active_wedge, WheelWedge::Settings);
     }
 
     #[test]
     fn wheel_wedge_from_index_handles_extreme_value() {
         // Should not panic; result is a valid variant.
         let w = WheelWedge::from_index(usize::MAX);
-        // Round-trip via index() must be ≤ 10 (11 wedges → 0..=10).
-        assert!(w.index() <= 10);
+        // Round-trip via index() must be ≤ 9 (10 wedges → 0..=9).
+        assert!(w.index() <= 9);
     }
 
     #[test]
@@ -882,8 +912,6 @@ mod tests {
         assert_eq!(WheelWedge::Providers.label(), "PROVIDER");
         assert_eq!(WheelWedge::Gateway.label(), "GATEWAY");
         assert_eq!(WheelWedge::Settings.label(), "SYSTEM");
-        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition (UI-SPEC §3.3).
-        assert_eq!(WheelWedge::Kanban.label(), "KANBAN");
     }
 
     #[test]
@@ -898,8 +926,6 @@ mod tests {
         assert_eq!(WheelWedge::Providers.sub(), "INFERENCE GATEWAYS");
         assert_eq!(WheelWedge::Gateway.sub(), "NETWORK BRIDGE");
         assert_eq!(WheelWedge::Settings.sub(), "CONFIGURATION");
-        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition (UI-SPEC §3.3).
-        assert_eq!(WheelWedge::Kanban.sub(), "TASK BOARD");
     }
 
     #[test]
@@ -914,8 +940,6 @@ mod tests {
         assert_eq!(WheelWedge::Providers.glyph(), "◉");
         assert_eq!(WheelWedge::Gateway.glyph(), "⌬");
         assert_eq!(WheelWedge::Settings.glyph(), "⚙");
-        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition (UI-SPEC §3.3).
-        assert_eq!(WheelWedge::Kanban.glyph(), "▦");
     }
 
     #[test]
@@ -930,8 +954,6 @@ mod tests {
         assert_eq!(WheelWedge::Providers.to_screen(), Screen::Providers);
         assert_eq!(WheelWedge::Gateway.to_screen(), Screen::Gateway);
         assert_eq!(WheelWedge::Settings.to_screen(), Screen::Settings);
-        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition.
-        assert_eq!(WheelWedge::Kanban.to_screen(), Screen::Kanban);
     }
 
     #[test]
@@ -975,7 +997,7 @@ mod tests {
         // added without updating ALL, but it does force this constant's own
         // array length to be re-examined whenever it's touched.
         use crate::state::Screen;
-        const ALL: [Screen; 16] = [
+        const ALL: [Screen; 19] = [
             Screen::Chat,
             Screen::Sessions,
             Screen::Agents,
@@ -992,13 +1014,53 @@ mod tests {
             Screen::Kanban,
             Screen::Artifacts,
             Screen::ArtifactViewer,
+            Screen::Logs,
+            Screen::OpenUi,
+            Screen::Dashboard,
         ];
-        assert_eq!(ALL.len(), 16);
+        assert_eq!(ALL.len(), 19);
         for s in ALL.iter() {
             let json = serde_json::to_string(s).expect("Screen serializes");
             let back: Screen = serde_json::from_str(&json).expect("Screen deserializes");
             assert_eq!(*s, back, "Screen variant did not round-trip via serde_json");
         }
+    }
+
+    #[test]
+    fn screen_logs_round_trips_and_all_has_18_variants() {
+        // Phase 54.4 Plan 07 (D-08): `Logs` is the 17th Screen variant (`OpenUi`, 54.9, the 18th). It is
+        // NOT a wheel wedge: the wheel stays at 10 wedges.
+        use crate::state::Screen;
+        const ALL: [Screen; 19] = [
+            Screen::Chat,
+            Screen::Sessions,
+            Screen::Agents,
+            Screen::Skills,
+            Screen::Models,
+            Screen::Memory,
+            Screen::Soul,
+            Screen::Tools,
+            Screen::Schedules,
+            Screen::Gateway,
+            Screen::Office,
+            Screen::Settings,
+            Screen::Providers,
+            Screen::Kanban,
+            Screen::Artifacts,
+            Screen::ArtifactViewer,
+            Screen::Logs,
+            Screen::OpenUi,
+            Screen::Dashboard,
+        ];
+        assert_eq!(ALL.len(), 19);
+        let json = serde_json::to_string(&Screen::Logs).expect("Screen::Logs serializes");
+        let back: Screen = serde_json::from_str(&json).expect("Screen::Logs deserializes");
+        assert_eq!(back, Screen::Logs);
+        // The wheel is unchanged: index 10 still wraps to Chat.
+        assert_eq!(
+            crate::state::WheelWedge::from_index(10),
+            crate::state::WheelWedge::Chat
+        );
     }
 
     #[test]

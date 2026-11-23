@@ -61,8 +61,8 @@ pub trait BudgetSnapshot: Send + Sync {
 /// Produced by [`crate::provider::ProviderResolver::providers`], one row per
 /// entry in the already-validated `endpoints` map (no new trust boundary or
 /// config parsing — see provider.rs). `models` is the provider's configured
-/// model-override keys unioned with `default_model`, deduped — sparse and
-/// honestly framed as "your configured models," NOT a full catalog.
+/// models plus the ids it served at the last `/models refresh`, deduped, never
+/// an empty string.
 ///
 /// SECURITY (Security Domain §3): this DTO MUST NOT carry `api_key` or any
 /// other credential/secret field — not even redacted (stricter than
@@ -636,6 +636,11 @@ pub trait ProviderResolverHandle: Send + Sync {
     /// `is_current` marks the active main provider, and no row carries
     /// `api_key`/any credential.
     fn list_providers(&self) -> Vec<ProviderPickerRow>;
+    /// Phase 58.3.1 (D-13): the main endpoint's effective context window and
+    /// its source word. `None` for a handle that cannot resolve one.
+    fn context_window(&self) -> Option<(usize, &'static str)> {
+        None
+    }
 }
 
 /// The canonical [`ProviderResolverHandle`] adapter over a real
@@ -670,6 +675,11 @@ impl ProviderResolverHandle for ProviderResolverAdapter {
 
     fn main_model(&self) -> String {
         self.0.resolve_for_main().default_model.clone()
+    }
+
+    fn context_window(&self) -> Option<(usize, &'static str)> {
+        let (len, source) = self.0.resolve_for_main().context_length_with_source();
+        Some((len, source.label()))
     }
 
     /// V8.1: `api_key` is never included — only provider name and model.
@@ -743,6 +753,30 @@ pub trait PersonalityHandle: Send + Sync {
 pub trait AgentLoopHandle: Send + Sync {
     /// Returns true if an agent turn is currently running.
     fn is_running(&self) -> bool;
+}
+
+// =============================================================================
+// DefconAuthFacts (Phase 57 Plan 04, D-22)
+// =============================================================================
+
+/// Per-message facts a surface supplies so `/yolo <N>` can be authorized
+/// (D-22). The command layer cannot know whether a chat message arrived in a
+/// direct message, whether the sender is allowlisted, or whether a web
+/// session is authenticated; the surface does.
+///
+/// Every field defaults to the REFUSING value, so a surface that sets nothing
+/// can never change the level remotely. `Platform::Local` needs no facts.
+#[derive(Clone, Debug, Default)]
+pub struct DefconAuthFacts {
+    /// The message arrived in a direct message (chat platforms).
+    pub direct_message: bool,
+    /// The sender is on the platform's allowlist (chat platforms).
+    pub sender_whitelisted: bool,
+    /// The request carries an authenticated web session (`Platform::Web`).
+    pub web_authenticated: bool,
+    /// Who is asking, for the audit row (e.g. a chat user id). Empty is
+    /// recorded as `"unknown"`.
+    pub actor: String,
 }
 
 // =============================================================================
@@ -887,6 +921,12 @@ pub struct CommandContext {
     /// via `Option::is_none()` the way it does for the other eight core handles. This
     /// private flag is the signal instead; it carries no meaning outside this file.
     turn_registry_wired: bool,
+
+    /// Phase 57 Plan 04 (D-22): per-message authorization facts for
+    /// `/yolo <N>`. Defaults to the refusing value; a surface sets it with
+    /// [`CommandContext::with_defcon_auth`] after building the context. Not a
+    /// `CoreContextHandles` member: it is per-message, not a long-lived handle.
+    pub defcon_auth: DefconAuthFacts,
 }
 
 impl CommandContext {
@@ -937,6 +977,8 @@ impl CommandContext {
             turn_registry: Arc::new(crate::concurrency::TurnRegistry::default()),
             // Phase 41.3 (D-12): not wired until with_turn_registry() is called.
             turn_registry_wired: false,
+            // Phase 57 Plan 04 (D-22): refusing facts until a surface supplies real ones.
+            defcon_auth: DefconAuthFacts::default(),
         }
     }
 
@@ -1118,6 +1160,12 @@ impl CommandContext {
     ) -> Self {
         self.chat_id = Some(chat_id.into());
         self.thread_id = thread_id.map(|t| t.into());
+        self
+    }
+
+    /// Builder: attach the per-message DEFCON authorization facts (D-22).
+    pub fn with_defcon_auth(mut self, facts: DefconAuthFacts) -> Self {
+        self.defcon_auth = facts;
         self
     }
 

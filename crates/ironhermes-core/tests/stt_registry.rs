@@ -37,12 +37,15 @@ impl SttProvider for FakeSttProvider {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// D-04: BUILTIN_STT_NAMES frozen set contains exactly "groq" and "openai".
+/// D-01/D-19 (Phase 54.7): BUILTIN_STT_NAMES is exactly {groq, openai,
+/// openai_compatible}, with the new provider appended last.
 #[test]
-fn test_builtin_names_set() {
-    assert_eq!(BUILTIN_STT_NAMES.len(), 2);
+fn builtin_stt_names_include_openai_compatible() {
+    assert_eq!(BUILTIN_STT_NAMES.len(), 3);
     assert!(BUILTIN_STT_NAMES.contains(&"groq"));
     assert!(BUILTIN_STT_NAMES.contains(&"openai"));
+    assert!(BUILTIN_STT_NAMES.contains(&"openai_compatible"));
+    assert_eq!(BUILTIN_STT_NAMES.last().copied(), Some("openai_compatible"));
 }
 
 /// D-04: Non-builtin name warns and is ignored ("built-ins always win").

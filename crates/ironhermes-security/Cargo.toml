@@ -1,0 +1,25 @@
+[package]
+name = "ironhermes-security"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MIT client that supervises the ironhermes-tirith detection sidecar (JSONL over stdio)"
+
+[dependencies]
+ironhermes-security-proto = { path = "../ironhermes-security-proto" }
+ironhermes-core = { path = "../ironhermes-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# Test helper that speaks the plan-01 sidecar protocol in several misbehaving
+# modes. MIT, contains no tirith code.
+[[bin]]
+name = "ironhermes-tirith-fake"
+path = "src/bin/ironhermes-tirith-fake.rs"

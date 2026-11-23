@@ -4,22 +4,27 @@ Step-by-step instructions for building and running the IronHermes container
 image with **Podman** (recommended) or Docker. The shipped `Dockerfile` is a
 multi-stage OCI build, so the same file works with both engines.
 
-> **Quick reference — first run is two steps.** Build, start once to get a
-> generated password, then restart with `-e IP=0.0.0.0` to expose it:
+> **Quick reference — the default run is `docker-compose.yml`, in two steps.**
+> The compose file is the hardened profile (read-only root filesystem, noexec
+> tmpfs, minimal capabilities, `no-new-privileges`, resource limits). Start it
+> once to get a generated password, then re-up with `IRONHERMES_IP=0.0.0.0`:
 >
 > ```bash
-> podman build -t ironhermes .
-> podman run -d --name ironhermes -v ironhermes-data:/opt/data -p 8080:8080 -e OPENROUTER_API_KEY=sk-or-... ironhermes
-> podman logs ironhermes        # copy the FIRST-RUN WEB PASSWORD
-> podman rm -f ironhermes
-> podman run -d --name ironhermes -v ironhermes-data:/opt/data -p 8080:8080 -e IP=0.0.0.0 -e OPENROUTER_API_KEY=sk-or-... ironhermes
+> export OPENROUTER_API_KEY=sk-or-...
+> docker compose up -d             # or: podman compose up -d
+> docker compose logs ironhermes   # copy the FIRST-RUN WEB PASSWORD
+> IRONHERMES_IP=0.0.0.0 \
+> IRONHERMES_WEB_PASSWORD_HASH='<argon2id hash>' \
+> IRONHERMES_WEB_ALLOWED_ORIGINS=https://hermes.example.com \
+> docker compose up -d
 > ```
 >
 > The first start binds loopback **inside** the container on purpose, so a
 > freshly generated password is never reachable from the network. See
-> [§3 First run](#first-run-generate-a-password-then-expose). The sections
-> below explain each step, the prerequisites, rootless notes, and what to do
-> when something fails.
+> [§3 Default: docker compose](#default-docker-compose) and
+> [the hardened profile](#the-hardened-profile). Plain `podman run` still works
+> as the unhardened alternative. The sections below explain each step, the
+> prerequisites, rootless notes, and what to do when something fails.
 
 ---
 
@@ -46,26 +51,31 @@ owned by your mapped UID.
 From the **repository root** (the directory containing `Cargo.toml`):
 
 ```bash
-podman build -t ironhermes .
+podman build --format docker -t ironhermes .
 #   equivalently: docker build -t ironhermes .
 ```
+
+Under Podman pass `--format docker`: Podman's default OCI image format drops
+the image `HEALTHCHECK`, which the compose file and the container health
+status rely on. Docker needs no flag.
 
 The build takes roughly **10–25 minutes** on a warm machine (Rust release
 profile; dependency layers are cached on rebuilds).
 
 ### What the build does
 
-Three stages (see `docs/DEPLOYMENT.md` §Container Deployment for the full
-reference):
+Two stages (see `docs/DEPLOYMENT.md` §Container Deployment for the full
+reference). There is no separate privilege-helper stage: the drop to UID 10000
+uses `setpriv` from `util-linux`, already in the runtime image.
 
-1. **`gosu_source`** — fetches `tianon/gosu:1.17` for privilege dropping.
-2. **`builder`** — `rust:1.96-trixie`; installs ALSA/OpenSSL build deps and
+1. **`builder`** — `rust:1.96-trixie`; installs ALSA/OpenSSL build deps and
    compiles `cargo build --release --bin ironhermes`, then `dx bundle` for the
    fullstack web bundle. Trixie (glibc 2.41), not bookworm: the prebuilt `dx`
    binary needs glibc 2.39.
-3. **`runtime`** — `debian:trixie-slim` + `python3`, `ca-certificates`,
-   `procps`, `libasound2t64`, `curl`, `tini`, `vim-tiny`, `chromium`,
-   `fonts-liberation`; runs as UID 10000 with `tini` as PID 1. See §6 for what the last three are
+2. **`runtime`** — `debian:trixie-slim` + `python3`, `ca-certificates`,
+   `procps`, `libasound2t64`, `curl`, `tini`, `vim-tiny`, `libnss-wrapper`,
+   `chromium`, `fonts-liberation`; the entrypoint starts as root, drops to
+   UID 10000 itself, and `tini` is PID 1. See §6 for what the last three are
    for and how much `chromium` costs.
 
 ### Build-context gotchas
@@ -105,10 +115,54 @@ deployment, §6 says which lines to remove.
 
 `--help`/`version` run the real entrypoint first: it starts as root, seeds
 config templates into `/opt/data` (an anonymous volume here, discarded with
-`--rm`), drops to UID 10000 via `gosu`, then execs the binary. Exit code 0
+`--rm`), drops to UID 10000 via `setpriv`, then execs the binary. Exit code 0
 from both means the image is healthy.
 
 ## 3. Run the container
+
+### Default: docker compose
+
+`docker-compose.yml` at the repository root is **the** documented way to run
+IronHermes. It applies the hardened profile (see
+[The hardened profile](#the-hardened-profile)) and a healthcheck, and it is the
+file the container lint (`ci-gates.sh` Gate 11) checks. Use `docker compose` or
+`podman compose`; the plain `podman run` commands in the rest of this section
+are the **unhardened alternative** and do not give you the read-only rootfs or
+the resource limits.
+
+**Step 1 — start it once.** With no bind override the web UI listens on
+loopback inside the container:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...   # or put it in the project's .env
+docker compose up -d
+docker compose logs ironhermes        # read the generated password NOW
+```
+
+The password is printed once (the box shown under
+[First run](#first-run-generate-a-password-then-expose)); only its hash is
+stored in `/opt/data/config.yaml`.
+
+**Step 2 — expose it deliberately.** Re-up with a bind address, a password hash
+and the browser origins allowed to reach it. Both fail-closed guards (hash and
+origin allowlist) apply exactly as for `podman run`:
+
+```bash
+IRONHERMES_IP=0.0.0.0 \
+IRONHERMES_WEB_PASSWORD_HASH='<argon2id hash>' \
+IRONHERMES_WEB_ALLOWED_ORIGINS=https://hermes.example.com \
+docker compose up -d
+```
+
+The published host port is always bound to `127.0.0.1`; put a reverse proxy or
+the optional Cloudflare Tunnel profile (`docs/DEPLOYMENT.md`, "Cloudflare
+Tunnel") in front of it for remote access.
+
+**Healthcheck.** The image `HEALTHCHECK` and the compose healthcheck both
+`curl` `http://127.0.0.1:8080/`, the one unauthenticated 200 route. That only
+works while the server listens on loopback or `0.0.0.0`, so `IP` must be one of
+those two. Binding to a specific LAN address makes the container report
+unhealthy even though it serves traffic.
 
 ### Minimal: CLI chat inside the container
 
@@ -147,6 +201,8 @@ podman run -d \
   default CLI behavior; `podman run --rm ironhermes --help` lists them all.
 
 ### First run: generate a password, then expose
+
+(Shown with plain `podman run`. The compose flow above is the same two steps.)
 
 The image binds **`127.0.0.1` by default** (`ENV IP=127.0.0.1`). Exposing the
 UI on the network is always something you ask for explicitly, never something
@@ -263,16 +319,85 @@ Three things worth knowing:
 
 ### What the entrypoint does on first run
 
-1. Starts as root; optionally remaps UID/GID (see §4).
-2. `chown`s `/opt/data` to the `ironhermes` user (skipped silently in rootless).
-3. Drops privileges to UID 10000 via `gosu` (never runs the agent as root).
+1. Starts as root and validates `IRONHERMES_UID`/`IRONHERMES_GID` (see §4).
+2. `chown`s `/opt/data` to the runtime user (a warning, not a failure, in
+   rootless).
+3. Drops privileges with `setpriv` (never runs the agent as root; see
+   [The hardened profile](#the-hardened-profile)).
 4. Creates `cron/ sessions/ logs/ hooks/ memories/ skills/ workspace/` under
    `/opt/data`.
 5. Seeds `.env`, `config.yaml`, and `SOUL.md` from templates **only if they
    don't already exist** — your edits survive container recreation.
+   `config.yaml` comes from the file named by `IRONHERMES_CONFIG_TEMPLATE` when
+   that is set and readable, else from the baked example (seed-once either way).
 6. `chmod 600` on `.env`.
 7. Seeds `skills/` and `optional-skills/` from the copies baked into the image
-   (`cp -rn`, skip-if-exists — see §6), then `exec ironhermes <your args>`.
+   with a history-aware copy (`docker/seed-bundled.sh`, see §6), then
+   `exec ironhermes <your args>`.
+
+### The hardened profile
+
+`docker-compose.yml` applies these controls. Each has a reason, and each has a
+cost you may notice:
+
+| Control | What it does | Why |
+|---|---|---|
+| `read_only: true` | Root filesystem is read-only; only `/opt/data` (the volume) and the tmpfs mounts are writable | A compromised or confused agent cannot modify binaries, `/etc` or installed packages |
+| tmpfs `/tmp`, `/var/tmp` with `noexec,nosuid` | Scratch space in memory that **blocks direct execution from /tmp** | Dropped payloads cannot be run as a binary straight out of `/tmp` |
+| `cap_drop: [ALL]` + `CHOWN`, `DAC_OVERRIDE`, `SETUID`, `SETGID` | Only the capabilities the entrypoint needs to chown the volume and drop to UID 10000 | Minimal attack surface; the app process ends with none (see below) |
+| `no-new-privileges` | The process tree can never gain privileges, even through setuid binaries | Closes privilege escalation through a setuid helper |
+| `pids_limit: 512`, `mem_limit`/`memswap_limit: 2g`, `cpus: 2` | Resource ceilings | A fork bomb or runaway browser cannot take down the host |
+| `shm_size: 256m` | Shared memory for Chromium | Chromium needs more than the 64 MB default |
+
+**What `noexec` does and does not do.** It *blocks direct execution from
+/tmp*: `/tmp/payload` fails with `Permission denied`. It does not stop code
+execution in general. An interpreted script such as `python3 /tmp/x.py` still
+runs, because the interpreter lives on the read-only rootfs and only *reads*
+the file. Treat `noexec` as one layer, not a sandbox.
+
+**Privilege drop.** The image has no `USER` directive. The entrypoint starts as
+root, validates the IDs, chowns the volume, and runs `setpriv` to become UID
+10000 with `no_new_privs` set and the inheritable capability set emptied. Where
+the runtime allows `CAP_SETPCAP` the bounding set is emptied too, so the
+application holds no capabilities at all; under the compose capability set the
+app keeps the (already minimal) bounding set it was started with. The drop
+**fails closed**: a missing `setpriv`, an invalid `IRONHERMES_UID`/`GID`, or a
+drop that cannot happen exits non-zero. The agent never runs as root. This is
+enforced inside the image, so it holds on hosts that cannot apply the compose
+file's runtime flags (for example Sliplane).
+
+**EROFS for `apt install`-style workflows.** With a read-only rootfs,
+`apt install`, `apt-get`, `pip install --system`, and any write to `/etc`,
+`/usr` or `/opt/ironhermes` fail with `EROFS` (read-only file system). This is
+a **breaking change** for agent workflows that installed system packages; see
+the CHANGELOG. Install into the volume instead (next paragraph) or build a
+derived image with the packages baked in.
+
+**Volume-scoped installs.** The entrypoint exports `NPM_CONFIG_PREFIX` and
+`PYTHONUSERBASE` pointing at `/opt/data/.local`, sets `PIP_USER=1`, and puts
+`/opt/data/.local/bin` first on `PATH`. So `npm install -g x` lands on the
+persisted volume and is runnable (the volume is not `noexec`).
+
+**The image does not ship `pip` or `python3-venv`** (only the `python3`
+interpreter), so `python3 -m pip` and `python3 -m venv` fail out of the box.
+If you provide a pip (a derived image with `python3-pip python3-venv`, or one
+bootstrapped onto the volume), `pip install x` is a `--user` install into
+`/opt/data/.local` via `PIP_USER=1`. Debian's PEP 668 marker may additionally
+require `--break-system-packages` for `--user` installs. A `pip install` inside
+a **virtualenv** must run with `PIP_USER` unset (`env -u PIP_USER ...`),
+because pip refuses `--user` inside a venv.
+
+**Temp files.** No production code path executes from `/tmp`. Anything that
+needs to execute a file writes it to the volume (`tempfile_in` under
+`/opt/data`), not to the `noexec` tmpfs; the `temp_dir()` uses in the agent
+runtime and the TUI fixtures are test-only. The tirith security sidecar's home
+lives on the volume at `/opt/data/security/tirith-home` (mode 700).
+
+**The `docker` terminal backend is not supported inside the hardened
+container.** There is no container-runtime binary in the image and the runtime
+socket must **never** be mounted (`docker-compose.yml` has no `docker.sock`,
+and the lint rejects one). Use `terminal.backend: local` (the default) or
+`ssh`. See `docs/MULTI-ENVIRONMENT-EXEC.md`.
 
 ### The background gateway (quick task 260825-dww)
 
@@ -349,6 +474,62 @@ systemctl --user enable --now ironhermes
 loginctl enable-linger "$USER"   # start without an active login session
 ```
 
+### Dev-tools variant (site deploys from chat)
+
+The default image is deliberately lean: it has **no** `git`, `gh`, `node`,
+`npm` or `wrangler`. The Telegram site-deploy flow (the agent's `terminal`
+tool running `git`, `gh`, `npx`, `wrangler`) needs them, so they ship as a
+separate opt-in image variant built from `docker/dev-tools.Dockerfile`. It
+layers git, gh, Node 22 + npm/npx and a pinned wrangler on top of any
+ironhermes base image and inherits the base image's entrypoint, user drop and
+`IRONHERMES_HOME` unchanged. It also inherits Chromium and the
+`IRONHERMES_BROWSER_NO_SANDBOX=1` default (§6). Normal installs do not need it: on a host
+install the agent uses the host's tools, and `ironhermes doctor` reports which
+of them are missing.
+
+**Build it locally** on top of your local base tag. Both build args are
+required, and the build fails without either (there is no `latest` default):
+
+```bash
+podman build --format docker --build-arg WRANGLER_VERSION=4.140.0 -f docker/dev-tools.Dockerfile --build-arg BASE_IMAGE=localhost/ironhermes:latest -t ironhermes:dev-tools .
+```
+
+The wrangler version above is the one approved in the Dockerfile header
+(`# approved-wrangler:`); use that value. The build proves the toolchain at
+build time (`git`, `gh`, `node` major 22, `npm`, `wrangler --version`).
+
+**Or pull the published tag.** Each release publishes the variant as
+`<tag>-dev-tools` (for example `ghcr.io/<owner>/<image>:v1.2.3-dev-tools`,
+`linux/amd64`), built on the exact digest of the base image it shipped with.
+
+**Run it** with the same volume, env and port flags as the standard run above;
+only the image name changes:
+
+```bash
+podman run -d --name ironhermes -v ironhermes-data:/opt/data -p 8080:8080 --env-file ~/.ironhermes/.env ironhermes:dev-tools gateway
+```
+
+**Exec as the bot's identity.** A plain `podman exec` runs as root and bypasses
+the entrypoint's `setpriv` privilege drop, so anything it writes to the volume can
+end up root-owned. To run a command as the application user, use:
+
+```bash
+podman exec -it --user ironhermes -e HOME=/opt/data ironhermes wrangler --version
+```
+
+**Credentials.** Put `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and
+`GITHUB_TOKEN` in the volume's `.env` as single-quoted values
+(`CLOUDFLARE_API_TOKEN='...'`). The `terminal` tool clears its environment, so
+each name must also be listed in `terminal.terminal_env_allowlist` in
+`config.yaml`, or the tools will not see them:
+
+```yaml
+terminal:
+  terminal_env_allowlist: [CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, GITHUB_TOKEN]
+```
+
+See `docs/SITE-DEPLOY-FROM-CHAT.md` for the full flow.
+
 ## 4. Environment variables
 
 ### Entrypoint-level (container behavior)
@@ -356,8 +537,10 @@ loginctl enable-linger "$USER"   # start without an active login session
 | Variable | Default | Purpose |
 |---|---|---|
 | `IRONHERMES_HOME` | `/opt/data` | Data directory inside the container |
-| `IRONHERMES_UID` | `10000` | Remap the runtime UID (useful when bind-mounting a host directory so ownership matches your host user) |
-| `IRONHERMES_GID` | `10000` | Remap the runtime GID |
+| `IRONHERMES_UID` | `10000` | Remap the runtime UID (useful when bind-mounting a host directory so ownership matches your host user). Works under `--read-only`: the image never edits `/etc/passwd`; `libnss-wrapper` makes the `ironhermes` name resolve for the remapped ID. `0` and non-numeric values are refused and the container exits. |
+| `IRONHERMES_GID` | `10000` | Remap the runtime GID (same rules as `IRONHERMES_UID`) |
+| `IRONHERMES_CONFIG_TEMPLATE` | unset | Path (inside the container) of a `config.yaml` to seed from instead of the baked example. Seed-once: ignored when `/opt/data/config.yaml` already exists; an unreadable path logs a warning and falls back to the baked example. |
+| `IRONHERMES_BROWSER_NO_SANDBOX` | `1` | Chromium `--no-sandbox` for the browser tools. The image sets `1` (§6); set `0` to restore the sandbox. Overrides `browser.no_sandbox` in `config.yaml`. Unknown values defer to the config key. |
 | `IRONHERMES_GATEWAY` | `1` | Launch `ironhermes gateway` in the background alongside the web UI. Set to `0`/`false`/`no`/`off` to run the web UI alone. |
 | `IRONHERMES_GATEWAY_STOP_TIMEOUT` | `5` | Seconds the entrypoint waits for the background gateway to shut down after SIGTERM before letting the container finish tearing down. Keep it below the runtime's stop grace period (`podman stop --time`, default 10s). |
 
@@ -426,9 +609,9 @@ again).
 
 ## 6. Skills and browser automation
 
-Two capabilities ship in the image but are deliberately **not** fully on by
-default. Both are covered here because both surprise operators in the same
-way: the files are present, and nothing uses them until you say so.
+Two capabilities ship in the image. Skills are on by default; the browser
+toolset is present but needs one opt-in. Both are covered here because the
+files are present and operators are often unsure what is active.
 
 ### Skills
 
@@ -437,20 +620,24 @@ The image bakes two read-only copies:
 | In the image | Seeded to (on the volume) | Scanned by default? |
 |---|---|---|
 | `/opt/ironhermes/skills/` | `/opt/data/skills/` | **Yes** |
-| `/opt/ironhermes/optional-skills/` | `/opt/data/optional-skills/` | **No** — opt in |
+| `/opt/ironhermes/optional-skills/` | `/opt/data/optional-skills/` | **Yes** (a default search root since 54.1) |
 
 The agent only ever scans the **volume**, never the image copies. Its default
-search roots are `<cwd>/.ironhermes/skills`, `$IRONHERMES_HOME/skills`, and
+search roots are `<cwd>/.ironhermes/skills`, `$IRONHERMES_HOME/skills`,
+`$IRONHERMES_HOME/optional-skills` (a default root since Phase 54.1) and
 `$HOME/.agents/skills` — and since `HOME` for UID 10000 *is* `/opt/data`, all
 of them live on the persisted volume. That is why the entrypoint seeds rather
 than the Dockerfile just copying into place: an image-only copy would be
 invisible to the agent.
 
-Seeding is `cp -rn` — **skip-if-exists**. An image upgrade adds new skills and
-new categories without ever overwriting a skill you edited or one installed
-from the Hub. The corollary: editing a shipped skill on the volume pins it,
-and later image versions will not update your copy. Delete the file and
-restart to take the image's version again.
+Seeding is **history-aware** (`docker/seed-bundled.sh`), per file: absent files
+are copied; a file that is byte-identical to the bundled one is left alone; a
+file that still matches a pristine *older* bundled version (listed in
+`skills/.bundled-history`) is upgraded to the current one; anything else is an
+operator edit and is kept. So an image upgrade adds new skills and refreshes
+untouched ones without overwriting a skill you edited or one installed from the
+Hub. The corollary: editing a shipped skill on the volume pins your version.
+Delete the file and restart to take the image's version again.
 
 Seeding is also non-fatal by design. A failure prints a warning and the
 container keeps starting.
@@ -460,11 +647,11 @@ container keeps starting.
 deeper is silently invisible, so do not nest `optional-skills/` inside
 `skills/`.
 
-**Enabling the optional skills.** `optional-skills/` is a separate root on
-purpose: merging it into `skills/` would make every "optional" skill
-unconditionally active. Two ways to opt in:
+**The optional skills.** `optional-skills/` is a separate root from `skills/`
+so the two trust tiers stay distinct, and it is searched by default. To point
+at a *different* location, or to add further roots, use `skills.extra_paths`:
 
-1. **Whole directory** — add it to `skills.extra_paths` in
+1. **Extra directory** — add it to `skills.extra_paths` in
    `/opt/data/config.yaml`:
 
    ```yaml
@@ -514,12 +701,13 @@ ordering.
 > to the later steps. Overriding one with a bad path disables the browser
 > tools entirely.
 
-**The cost is most of the image.** `chromium` pulls 171 additional packages on
-trixie (`x11-utils` and `xdg-utils` among them). Measured: **1.11 GB with it,
-377 MB without** — roughly 730 MB, about two thirds of the image, for a
-capability that is disabled by default. If you never enable the browser
-toolset, delete `chromium`, `fonts-liberation`, and the `CHROMIUM_PATH` ENV
-from the Dockerfile; the comments there mark the exact lines.
+**Chromium ships in BOTH images.** The default image and the `-dev-tools`
+image both carry Chromium (it stays in the default image; there is no
+separate browser-less tag to switch to). **The cost is most of the image.**
+`chromium` pulls 171 additional packages on trixie. Measured: **1.11 GB with
+it, 377 MB without**. If you never enable the browser toolset, delete
+`chromium`, `fonts-liberation`, and the `CHROMIUM_PATH` ENV from a local copy
+of the Dockerfile; the comments there mark the exact lines.
 
 **One opt-in is required** before the tools appear in the model's tool list —
 the browser toolset is default-disabled, because enabling it hands the agent a
@@ -539,27 +727,34 @@ podman exec ironhermes ironhermes toolset show browser
 # Tools:      11/11 available
 ```
 
-**You probably do not need `no_sandbox`.** Chromium's sandbox comes up fine as
-the container's UID 10000 under rootless Podman — measured, not assumed:
-`chromium --headless --dump-dom about:blank` exits 0 with the sandbox intact,
-and the default `browser.no_sandbox: false` is correct there. Leave it alone
-unless a launch actually fails.
+**Chromium runs with `--no-sandbox` by default.** The image sets
+`IRONHERMES_BROWSER_NO_SANDBOX=1` (both images; `-dev-tools` inherits it). The
+reason is measured: under the full compose hardened profile (seccomp default,
+`cap_drop: ALL`, `no-new-privileges`, read-only rootfs) Chromium's own sandbox
+crashes at launch, so a sandboxed default would leave the browser tools broken
+out of the box. Chromium's sandbox is its main containment boundary, so the
+**compensating controls** are the container's: UID 10000, no capabilities,
+`no_new_privs`, an empty (or minimal) bounding set, and a read-only rootfs
+under compose. Be deliberate about letting the agent browse untrusted pages.
 
-Two environments where it does fail, and what each needs:
+**To restore the sandbox** where your runtime allows it:
+
+```bash
+podman run ... -e IRONHERMES_BROWSER_NO_SANDBOX=0 ironhermes
+# compose: set IRONHERMES_BROWSER_NO_SANDBOX=0 in the service environment
+```
+
+The variable overrides the `browser.no_sandbox` config key. Measured: on a
+runtime with no flags at all (the Sliplane case) Chromium starts and renders
+with the sandbox enabled, so `0` works there; the crash is specific to the
+compose seccomp/capability profile.
+
+Two other failures and what each needs:
 
 | Situation | Symptom | Fix |
 |---|---|---|
-| Host has unprivileged user namespaces disabled (Ubuntu 23.10+ AppArmor, some hardened kernels) | `zygote_host_impl_linux.cc: No usable sandbox!` | Re-enable userns for the engine, or set `browser.no_sandbox true` |
-| Container forced to run as **root** (`--user 0`, or an entrypoint override that skips the `gosu` drop) | `Running as root without --no-sandbox is not supported` | Run as UID 10000 as the image intends — this is the real fix |
-
-```bash
-# Only if a launch actually failed for one of the reasons above:
-podman exec ironhermes ironhermes config set browser.no_sandbox true
-```
-
-`no_sandbox: true` removes Chromium's primary containment boundary. Reach for
-it last, and think twice if the agent will browse untrusted pages — the
-root-user case in particular is better fixed by not running as root.
+| Sandbox restored (`IRONHERMES_BROWSER_NO_SANDBOX=0`) on a host with unprivileged user namespaces disabled (Ubuntu 23.10+ AppArmor, some hardened kernels) | `zygote_host_impl_linux.cc: No usable sandbox!` | Re-enable userns for the engine, or go back to `IRONHERMES_BROWSER_NO_SANDBOX=1` |
+| Container forced to run as **root** (`--user 0`, or an entrypoint override that skips the `setpriv` drop) | `Running as root without --no-sandbox is not supported` | Run as UID 10000 as the image intends — this is the real fix |
 
 Worth knowing:
 
@@ -601,13 +796,17 @@ podman exec -it ironhermes vi /opt/data/config.yaml
 | Container starts but the LLM calls fail with auth errors | No provider key in scope. Pass `--env-file`/`-e`, or `podman exec -it ironhermes sh` and edit `/opt/data/.env` (it persists). |
 | `podman build` fails pulling base images | Registry mirror/proxy needed — configure `/etc/containers/registries.conf` or `~/.config/containers/registries.conf`. |
 | Nothing listens on 8080 | `iron_hermes_ui` has two fail-closed startup guards (see the Dockerfile header) — the bind guard (no password hash configured for a non-loopback `IP`) and the provider-key guard (no resolvable API key for `model.provider`). Either refuses the socket before it opens. Check `podman logs ironhermes` for which guard tripped. |
-| A skill you expect isn't loaded | Check which root it's in: `/opt/data/optional-skills` is not scanned by default (§6). Also check nesting — scan depth is bounded at two levels, so `<root>/<category>/<slug>/SKILL.md` is the deepest form that resolves. |
-| Edits to a shipped skill reappear / don't update after an image upgrade | Seeding is `cp -rn`, skip-if-exists. Your edited file is pinned and the image's newer version is skipped. Delete it from `/opt/data/skills/` and restart to re-seed. |
+| A skill you expect isn't loaded | Check which root it's in: the default roots are `skills/`, `optional-skills/` and `~/.agents/skills` on the volume (§6); anything else needs `skills.extra_paths`. Also check nesting — scan depth is bounded at two levels, so `<root>/<category>/<slug>/SKILL.md` is the deepest form that resolves. |
+| Edits to a shipped skill reappear / don't update after an image upgrade | Seeding is history-aware: a file you edited is kept (pinned) and the image's newer version is skipped. Delete it from `/opt/data/skills/` and restart to re-seed. |
 | `COPY failed` on `optional-skills/` during build | The directory is missing from the build context. Build from the repo root (§2). |
-| The agent behaves as though the browser tools don't exist | Expected until both opt-ins are done: `ironhermes toolset enable browser` **and** a workable sandbox setting (§6). Missing Chromium excludes the schemas silently rather than erroring, so there's no message to find. |
+| The agent behaves as though the browser tools don't exist | Expected until `ironhermes toolset enable browser` is done (§6). Missing Chromium excludes the schemas silently rather than erroring, so there's no message to find. |
 | Browser tools vanish after setting `BROWSER_PATH`/`CHROMIUM_PATH` | Both are authoritative — an invalid path yields no browser and does **not** fall through to autodiscovery (§6). Unset it or point it at a real binary. |
-| `No usable sandbox!` when Chromium launches | The host has unprivileged user namespaces disabled. Re-enable them for the container engine, or set `browser.no_sandbox true` (§6). Not needed under default rootless Podman, where the sandbox works as-is. |
-| `Running as root without --no-sandbox is not supported` | The container is running as root — usually an `--entrypoint` override that skipped the `gosu` privilege drop, or an explicit `--user 0`. Run as UID 10000 as the image intends rather than disabling the sandbox (§6). |
+| `No usable sandbox!` when Chromium launches | You restored the sandbox (`IRONHERMES_BROWSER_NO_SANDBOX=0`) on a host with unprivileged user namespaces disabled. Re-enable them for the container engine, or keep the image default `IRONHERMES_BROWSER_NO_SANDBOX=1` (§6). |
+| `Running as root without --no-sandbox is not supported` | The container is running as root — usually an `--entrypoint` override that skipped the `setpriv` privilege drop, or an explicit `--user 0`. Run as UID 10000 as the image intends (§6). |
+| `Read-only file system` (EROFS) from `apt install` or a write to `/etc`, `/usr` | Expected under the compose hardened profile. Install into the volume (`npm install -g` and `pip install` go to `/opt/data/.local`) or bake the package into a derived image (§3, hardened profile). |
+| `Permission denied` running `/tmp/something` | `noexec` on `/tmp` blocks direct execution from `/tmp`. Write executables to the volume instead. |
+| Container exits at start with `IRONHERMES_UID must be a non-zero number` | The remap value was `0` or non-numeric. Use a real non-root UID/GID (§4). |
+| Container shows `unhealthy` but the UI works | The healthcheck curls `127.0.0.1:8080`; `IP` must be loopback or `0.0.0.0` (§3). |
 | Browser logins disappear between sessions | A live `SingletonLock` in `/opt/data/browser-profile` forced a fallback to an ephemeral profile (§6). |
 | Cron / kanban schedules never fire | The background gateway refused to boot — almost always because zero messaging platforms are configured (§3). Check `podman exec ironhermes cat /opt/data/logs/gateway.log` for the exact reason, configure a platform (e.g. `TELEGRAM_BOT_TOKEN`), or accept it and silence the warning with `-e IRONHERMES_GATEWAY=0`. |
 

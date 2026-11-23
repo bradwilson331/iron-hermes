@@ -436,3 +436,43 @@ fn b9_i64_microdollars_round_trip_losslessly() {
     assert_eq!(cost_ev, big);
     assert_eq!(cost_sess, big);
 }
+
+// ---------------------------------------------------------------------------
+// record_turn_usage writes the event row and the session aggregate together
+// ---------------------------------------------------------------------------
+
+#[test]
+fn record_turn_usage_writes_event_and_session_totals() {
+    let (mut store, _f) = fresh_store();
+    store
+        .create_session("sess-rtu", "web", None, None, None, None)
+        .unwrap();
+    let ev = UsageEvent {
+        session_id: "sess-rtu".to_string(),
+        ts: 1,
+        provider: "thesys".to_string(),
+        model: "openai/gpt-5".to_string(),
+        in_tok: 120,
+        out_tok: 45,
+        cache_read: 0,
+        cache_create: 0,
+        cost_usd_micros: 0,
+        error_kind: None,
+    };
+    store.record_turn_usage(&ev).unwrap();
+    store.record_turn_usage(&ev).unwrap();
+
+    let conn = store.conn_for_test();
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(events, 2);
+    let (in_tok, out_tok): (i64, i64) = conn
+        .query_row(
+            "SELECT input_tokens, output_tokens FROM sessions WHERE id = ?1",
+            params!["sess-rtu"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((in_tok, out_tok), (240, 90));
+}

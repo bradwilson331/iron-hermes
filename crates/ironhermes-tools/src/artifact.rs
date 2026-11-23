@@ -100,7 +100,7 @@ fn derive_title(body: &str) -> String {
 /// already fixed for `expected_run_id`. Only when NOT in a worker does the
 /// `run_key` arg apply (the delegate surface has no worker env to trust). Neither
 /// present means interactive chat, which is never capped.
-fn resolve_producer(
+pub(crate) fn resolve_producer(
     env_task: Option<String>,
     run_key_arg: Option<&str>,
 ) -> (Option<String>, &'static str) {

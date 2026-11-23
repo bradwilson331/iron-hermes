@@ -1,0 +1,102 @@
+# =============================================================================
+# IronHermes -- the hardened default run (phase 54.11, D-01)
+# =============================================================================
+# This file is THE documented way to run IronHermes: read-only root filesystem,
+# noexec tmpfs scratch space, a minimal capability set, no_new_privs and
+# resource ceilings (docs/CONTAINER-HARDENING-AUDIT.md section 5). The image
+# drops to uid 10000 itself, so the same guarantees (minus the runtime flags)
+# hold on hosts that cannot apply this file.
+#
+# First run (two steps, the web UI binds loopback until you opt in):
+#   1. docker compose up -d
+#      docker compose logs ironhermes     # read the generated password NOW,
+#                                         # it is printed once
+#   2. Expose it deliberately. Re-up with a bind address, a password hash and
+#      the browser origins allowed to reach it:
+#      IRONHERMES_IP=0.0.0.0 \
+#      IRONHERMES_WEB_PASSWORD_HASH='<argon2id hash>' \
+#      IRONHERMES_WEB_ALLOWED_ORIGINS=https://hermes.example.com \
+#      docker compose up -d
+#
+# The published host port is always bound to 127.0.0.1; put a reverse proxy or
+# tunnel in front of it for remote access.
+#
+# Cloudflare Tunnel (optional profile, docs/DEPLOYMENT.md "Cloudflare Tunnel"):
+#   CLOUDFLARE_TUNNEL_TOKEN=<token> docker compose --profile cloudflare up -d
+# Needs, on the ironhermes service: IRONHERMES_IP=0.0.0.0, a password hash and
+# IRONHERMES_WEB_ALLOWED_ORIGINS=https://<tunnel hostname>. In the Cloudflare
+# dashboard route the public hostname to http://ironhermes:8080. Put the token
+# in this project's .env (mode 0600), never in config.yaml.
+#
+# compose-validator-image: docker.io/library/docker:29.9.2-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb
+# =============================================================================
+services:
+  ironhermes:
+    image: ${IRONHERMES_IMAGE:-ghcr.io/bradwilson331/iron-hermes:latest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=200m
+      - /var/tmp:rw,noexec,nosuid,size=50m
+      - /run:rw,nosuid,size=10m
+    # The runtime's own /dev/shm mount is already noexec. 64m is the Chromium
+    # floor (audit section 5); 256m leaves headroom for a real browser session.
+    shm_size: 256m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges
+    pids_limit: 512
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2
+    environment:
+      IP: ${IRONHERMES_IP:-127.0.0.1}
+      # Bare names pass through from the shell / .env file when set.
+      OPENROUTER_API_KEY:
+      IRONHERMES_WEB_PASSWORD_HASH:
+      IRONHERMES_WEB_ALLOWED_ORIGINS:
+      IRONHERMES_UID:
+      IRONHERMES_GID:
+      IRONHERMES_GATEWAY:
+      IRONHERMES_CONFIG_TEMPLATE:
+    ports:
+      - "127.0.0.1:${IRONHERMES_PORT:-8080}:8080"
+    volumes:
+      - ironhermes-data:/opt/data
+    # `/` is the only unauthenticated 200 route (every other path is 401).
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    stop_grace_period: 10s
+
+  # Outbound-only Cloudflare Tunnel connector: no published port, no volumes.
+  # Without `--profile cloudflare` compose starts only the ironhermes service.
+  cloudflared:
+    profiles: [cloudflare]
+    image: docker.io/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
+    command: [tunnel, --no-autoupdate, run]
+    environment:
+      # `:-` so `compose config` renders without it; cloudflared itself
+      # refuses an empty token.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      ironhermes:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+
+volumes:
+  ironhermes-data: {}

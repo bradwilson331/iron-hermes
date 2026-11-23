@@ -63,6 +63,40 @@ pub struct StartResult {
     pub tool_count: usize,
 }
 
+/// Screen every enabled server's rendered config with the security sidecar before
+/// anything is started (Phase 57 D-04c; research OQ6 probed POSITIVE: tirith flags
+/// hostile `mcp.json` shapes).
+///
+/// Returns the servers that may start plus `(name, reason)` for each one the screen
+/// refused. With no content screen installed (tests, an unbooted process) every
+/// server passes untouched. Disabled servers are not screened: they never start.
+/// Runs before the manager takes its locks, because the screen blocks on the
+/// sidecar.
+fn screen_configs(
+    configs: HashMap<String, McpServerConfig>,
+) -> (HashMap<String, McpServerConfig>, Vec<(String, String)>) {
+    let Some(screen) = ironhermes_core::content_screen::content_screen() else {
+        return (configs, Vec::new());
+    };
+    let level = ironhermes_core::defcon::session_defcon().process_default();
+    let mut allowed = HashMap::with_capacity(configs.len());
+    let mut refused = Vec::new();
+    for (name, config) in configs {
+        if config.enabled {
+            let rendered = crate::config::render_mcp_json(&name, &config);
+            if !crate::security::screen_mcp_config(screen.as_ref(), &name, &rendered, level) {
+                refused.push((
+                    name,
+                    "blocked by the security screen (see the audit log)".to_string(),
+                ));
+                continue;
+            }
+        }
+        allowed.insert(name, config);
+    }
+    (allowed, refused)
+}
+
 /// Manages all MCP server connections and their tool registrations.
 ///
 /// Orchestrates per-server `tokio::spawn` tasks (D-04), handles startup (D-07),
@@ -176,6 +210,7 @@ impl McpManager {
     /// the caller does not wait for connections to complete (avoids blocking startup).
     /// Disabled servers (enabled=false) are skipped.
     pub async fn start_all(&self, configs: HashMap<String, McpServerConfig>) {
+        let (configs, _refused) = screen_configs(configs);
         let mut tasks = self.tasks.lock().await;
         let mut stored_configs = self.configs.lock().await;
         let mut flags = self.connected_flags.lock().await;
@@ -230,6 +265,7 @@ impl McpManager {
         &self,
         configs: HashMap<String, McpServerConfig>,
     ) -> StartResult {
+        let (configs, refused) = screen_configs(configs);
         let mut task_names: Vec<String> = Vec::new();
         {
             let mut tasks = self.tasks.lock().await;
@@ -280,7 +316,9 @@ impl McpManager {
         // that registered tools must have flipped the flag to true) but the flag
         // is the ground truth that closes the GAP-7 false-positive.
         let mut connected = Vec::new();
-        let mut failed: Vec<(String, String)> = Vec::new();
+        // Servers the security screen refused never started; report them as failed
+        // (D-12 data contract) instead of silently dropping them.
+        let mut failed: Vec<(String, String)> = refused;
         {
             let tasks = self.tasks.lock().await;
             let flags = self.connected_flags.lock().await;
@@ -339,63 +377,26 @@ impl McpManager {
     ///   2. `tokio::time::timeout(Duration::from_secs(2), handle)` bounds the
     ///      JoinHandle await so shutdown always returns — the operator's
     ///      Ctrl+C returns within ~2s/server regardless of child behavior.
+    ///
+    /// 54.8-16: a task that ignores cancel for the full 2 s is now aborted (and the
+    /// aborted handle awaited) instead of being left running; the per-entry body
+    /// lives in `stop_server_entry`, shared with `restart_server`.
     pub async fn shutdown_all(&self) -> Vec<ServerTaskResult> {
-        use tokio::time::{Duration, timeout};
-
         let mut tasks = self.tasks.lock().await;
         let mut flags = self.connected_flags.lock().await;
         let mut last_failure = self.last_failure.lock().await;
         let mut results = Vec::new();
 
         for (name, (handle, cancel, child_slot)) in tasks.drain() {
-            tracing::info!(server = %name, "Shutting down MCP server");
-
-            // 1. Cancel the task's cancellation token (tells the serve loop to break).
-            cancel.cancel();
-
-            // 2. GAP-8: hard-kill the stdio child (if any). start_kill() is
-            //    non-blocking — it sets the SIGKILL flag on the child. The
-            //    subsequent timeout(2s, handle) does the actual bounded wait.
-            //    Under plan-11 Option B this branch is typically a no-op —
-            //    rmcp owns the child internally and the slot holds None — but
-            //    `kill_on_drop(true)` in connect_stdio gives us the same OS-
-            //    level kill guarantee when rmcp's transport drops. Either way,
-            //    the bounded timeout below is the load-bearing guarantee.
-            if let Some(mut child) = child_slot.lock().await.take() {
-                match child.start_kill() {
-                    Ok(()) => tracing::debug!(server = %name, "Sent SIGKILL to MCP stdio child"),
-                    Err(e) => tracing::warn!(
-                        server = %name,
-                        error = %e,
-                        "Failed to SIGKILL MCP stdio child (may already be reaped)"
-                    ),
-                }
+            // Cancel, SIGKILL the child, bounded join (abort on elapse) and
+            // tool unregistration all live in `stop_server_entry`, shared with
+            // `restart_server`.
+            if let Some(result) = self
+                .stop_server_entry(&name, handle, cancel, child_slot)
+                .await
+            {
+                results.push(result);
             }
-
-            // 3. GAP-8: await the JoinHandle with a bounded 2-second ceiling.
-            //    If the task is genuinely stuck, we log a warning and proceed
-            //    — never blocking the gateway's Ctrl+C return.
-            match timeout(Duration::from_secs(2), handle).await {
-                Ok(Ok(result)) => results.push(result),
-                Ok(Err(join_err)) => tracing::warn!(
-                    server = %name,
-                    error = %join_err,
-                    "MCP server task panicked during shutdown"
-                ),
-                Err(_elapsed) => tracing::warn!(
-                    server = %name,
-                    "MCP server task did not join within 2s of cancel+SIGKILL; proceeding"
-                ),
-            }
-
-            // 4. Unregister tools for this server (D-09: rebuild registry on reload)
-            //    GAP-4: unregister_by_prefix appends "__" to its argument; we must
-            //    pass the already-sanitized server name so the match finds the
-            //    tools we registered.
-            let mut guard = self.registry.write().await;
-            let removed = guard.unregister_by_prefix(&sanitize_server_name(&name));
-            tracing::debug!(server = %name, removed, "Unregistered MCP tools");
-            drop(guard); // explicitly drop before next iteration to avoid holding write lock
 
             // 5. GAP-7: remove the connected flag alongside the task handle so
             //    no stale reads of `connected_server_names()` survive shutdown.
@@ -414,6 +415,118 @@ impl McpManager {
     pub async fn reload(&self, new_configs: HashMap<String, McpServerConfig>) {
         self.shutdown_all().await;
         self.start_all(new_configs).await;
+    }
+
+    /// Restart exactly one MCP server, leaving every other server untouched
+    /// (54.8-16, D-15, T-54.8-52).
+    ///
+    /// A full [`Self::reload`] shuts down every server, which would cut the
+    /// tools out from under a turn running on another chat. After a fresh OAuth
+    /// authorization only the authorized server needs to reconnect, so this
+    /// stops that one entry (cancel, child kill, bounded join with abort, tool
+    /// unregistration for that name only) and starts a fresh task from `config`.
+    /// A server that is not currently running is simply started; a config with
+    /// `enabled: false` stops the old task and starts nothing.
+    ///
+    /// The bookkeeping entries are removed under the same lock order `start_all`
+    /// uses, and ALL guards are dropped before the stop and the start run:
+    /// `start_all` locks `tasks` itself, so holding the `tasks` guard across it
+    /// would deadlock, and holding any guard across the (up to 2 s) stop would
+    /// block every other manager call for that long.
+    pub async fn restart_server(&self, name: &str, config: McpServerConfig) {
+        let old_entry = {
+            let mut tasks = self.tasks.lock().await;
+            let mut stored_configs = self.configs.lock().await;
+            let mut flags = self.connected_flags.lock().await;
+            let mut last_failure = self.last_failure.lock().await;
+            stored_configs.remove(name);
+            flags.remove(name);
+            last_failure.remove(name);
+            tasks.remove(name)
+        };
+
+        if let Some((handle, cancel, child_slot)) = old_entry {
+            tracing::info!(server = %name, "Restarting MCP server");
+            self.stop_server_entry(name, handle, cancel, child_slot)
+                .await;
+        }
+
+        self.start_all(HashMap::from([(name.to_string(), config)]))
+            .await;
+    }
+
+    /// Stop one server entry that has already been removed from the manager's
+    /// maps: cancel, hard-kill the stdio child, bounded join, unregister tools.
+    ///
+    /// Shared by [`Self::shutdown_all`] and [`Self::restart_server`]. If the task
+    /// ignores cancel for 2 s it is aborted and the aborted handle awaited, so a
+    /// stuck task can never keep running beside its replacement (this abort is
+    /// new relative to the pre-54.8-16 `shutdown_all`, which only logged and
+    /// moved on). Returns the task's result when it joined cleanly.
+    async fn stop_server_entry(
+        &self,
+        name: &str,
+        mut handle: JoinHandle<ServerTaskResult>,
+        cancel: CancellationToken,
+        child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+    ) -> Option<ServerTaskResult> {
+        use tokio::time::timeout;
+
+        tracing::info!(server = %name, "Shutting down MCP server");
+
+        // 1. Cancel the task's cancellation token (tells the serve loop to break).
+        cancel.cancel();
+
+        // 2. GAP-8: hard-kill the stdio child (if any). start_kill() is
+        //    non-blocking — it sets the SIGKILL flag on the child. The
+        //    subsequent timeout(2s, handle) does the actual bounded wait.
+        //    Under plan-11 Option B this branch is typically a no-op —
+        //    rmcp owns the child internally and the slot holds None — but
+        //    `kill_on_drop(true)` in connect_stdio gives us the same OS-
+        //    level kill guarantee when rmcp's transport drops. Either way,
+        //    the bounded timeout below is the load-bearing guarantee.
+        if let Some(mut child) = child_slot.lock().await.take() {
+            match child.start_kill() {
+                Ok(()) => tracing::debug!(server = %name, "Sent SIGKILL to MCP stdio child"),
+                Err(e) => tracing::warn!(
+                    server = %name,
+                    error = %e,
+                    "Failed to SIGKILL MCP stdio child (may already be reaped)"
+                ),
+            }
+        }
+
+        // 3. GAP-8: await the JoinHandle with a bounded 2-second ceiling, then
+        //    abort a task that ignored cancel so it cannot outlive this call.
+        let result = match timeout(Duration::from_secs(2), &mut handle).await {
+            Ok(Ok(result)) => Some(result),
+            Ok(Err(join_err)) => {
+                tracing::warn!(
+                    server = %name,
+                    error = %join_err,
+                    "MCP server task panicked during shutdown"
+                );
+                None
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    server = %name,
+                    "MCP server task did not join within 2s of cancel+SIGKILL; aborting it"
+                );
+                handle.abort();
+                let _ = handle.await;
+                None
+            }
+        };
+
+        // 4. Unregister tools for this server (D-09: rebuild registry on reload)
+        //    GAP-4: unregister_by_prefix appends "__" to its argument; we must
+        //    pass the already-sanitized server name so the match finds the
+        //    tools we registered.
+        let mut guard = self.registry.write().await;
+        let removed = guard.unregister_by_prefix(&sanitize_server_name(name));
+        tracing::debug!(server = %name, removed, "Unregistered MCP tools");
+        result
     }
 
     /// D-09/D-12: Reload all MCP servers and report connection results.
@@ -1048,7 +1161,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_all_unregisters_tools_for_server_with_special_char_name() {
-        use crate::tool::{McpTool, make_prefixed_name};
+        use crate::tool::McpTool;
         use ironhermes_tools::ToolRegistry;
         use tokio::sync::mpsc;
 
@@ -1093,8 +1206,11 @@ mod tests {
         }
 
         // Pre-condition: both tools visible under sanitized prefix.
-        let sanitized_prefix = make_prefixed_name(server_name, "");
-        let sanitized_prefix = sanitized_prefix.trim_end_matches("__").to_string();
+        // 54.8-16: derive the prefix from `sanitize_server_name` directly. The old
+        // `make_prefixed_name(server, "")` + `trim_end_matches("__")` derivation
+        // broke when an empty tool name began sanitizing to "_" (it left a
+        // trailing "_" on the prefix, so the precondition matched zero tools).
+        let sanitized_prefix = crate::tool::sanitize_server_name(server_name);
         // sanitized_prefix is e.g. "_scope_pkg_name_v1"
         {
             let guard = registry.read().await;
@@ -1347,5 +1463,262 @@ mod tests {
             names.is_empty(),
             "GAP-8: post-shutdown, connected_server_names must be empty"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // restart_server (54.8-16, D-15, T-54.8-52): reconnect ONE server
+    // -------------------------------------------------------------------
+
+    /// An enabled HTTP config pointing at a closed port: the task is spawned
+    /// and keeps failing to connect, so it never registers tools.
+    fn unreachable_http_config() -> McpServerConfig {
+        McpServerConfig {
+            url: Some("http://127.0.0.1:9/mcp".to_string()),
+            connect_timeout: 1,
+            ..Default::default()
+        }
+    }
+
+    fn two_server_configs() -> HashMap<String, McpServerConfig> {
+        HashMap::from([
+            ("a".to_string(), unreachable_http_config()),
+            ("b".to_string(), unreachable_http_config()),
+        ])
+    }
+
+    async fn task_token(manager: &McpManager, name: &str) -> Option<CancellationToken> {
+        manager
+            .tasks
+            .lock()
+            .await
+            .get(name)
+            .map(|(_, cancel, _)| cancel.clone())
+    }
+
+    #[tokio::test]
+    async fn restart_server_restarts_only_the_named_server() {
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+        manager.start_all(two_server_configs()).await;
+
+        let old_a = task_token(&manager, "a").await.expect("a started");
+        let old_b = task_token(&manager, "b").await.expect("b started");
+
+        manager.restart_server("a", unreachable_http_config()).await;
+
+        assert!(old_a.is_cancelled(), "a's old task must be cancelled");
+        let new_a = task_token(&manager, "a").await.expect("a restarted");
+        assert!(!new_a.is_cancelled(), "a's new task must be live");
+        assert!(!old_b.is_cancelled(), "b must not be touched");
+        let new_b = task_token(&manager, "b").await.expect("b still present");
+        assert!(!new_b.is_cancelled());
+
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn restart_server_starts_an_absent_server() {
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+
+        manager.restart_server("c", unreachable_http_config()).await;
+
+        assert!(
+            task_token(&manager, "c").await.is_some(),
+            "an absent server must be started by restart_server"
+        );
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn restart_server_unregisters_only_that_servers_tools() {
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let mut guard = registry.write().await;
+            for server in ["a", "b"] {
+                guard.register_dynamic(Box::new(crate::tool::McpTool::new(
+                    server,
+                    "probe",
+                    "stub tool",
+                    serde_json::json!({"type": "object"}),
+                    tx.clone(),
+                )));
+            }
+        }
+        let manager = McpManager::new(registry.clone());
+        manager.start_all(two_server_configs()).await;
+
+        manager.restart_server("a", unreachable_http_config()).await;
+
+        let names: Vec<String> = registry
+            .read()
+            .await
+            .get_definitions(None)
+            .iter()
+            .map(|t| t.function.name.clone())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "b__probe"),
+            "b's tool must survive a restart of a; got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "a__probe"),
+            "a's tool must be unregistered by its restart; got {names:?}"
+        );
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn restart_server_skips_disabled_config() {
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+        manager.start_all(two_server_configs()).await;
+        let old_a = task_token(&manager, "a").await.expect("a started");
+
+        let disabled = McpServerConfig {
+            enabled: false,
+            ..unreachable_http_config()
+        };
+        manager.restart_server("a", disabled).await;
+
+        assert!(old_a.is_cancelled(), "the old task must be stopped");
+        assert!(
+            task_token(&manager, "a").await.is_none(),
+            "a disabled config must not start a new task"
+        );
+        assert!(task_token(&manager, "b").await.is_some(), "b untouched");
+        manager.shutdown_all().await;
+    }
+
+    // -------------------------------------------------------------------
+    // MCP server-config screening (Phase 57 plan 08, D-04c, research OQ6
+    // POSITIVE: tirith flags hostile servers when the text is named mcp.json)
+    // -------------------------------------------------------------------
+
+    use crate::security::test_support::{ScreenTestGuard, ScriptFake, block_always, high};
+
+    fn evil_and_good() -> HashMap<String, McpServerConfig> {
+        HashMap::from([
+            ("evil".to_string(), unreachable_http_config()),
+            ("good".to_string(), unreachable_http_config()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn mcp_config_screen_blocks_hostile_server() {
+        let guard = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("\"evil\"", "McpSuspiciousArgs", block_always);
+        guard.install(&fake);
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+        manager.start_all(evil_and_good()).await;
+
+        assert!(
+            task_token(&manager, "evil").await.is_none(),
+            "a Block-verdict server must not be started"
+        );
+        assert!(
+            task_token(&manager, "good").await.is_some(),
+            "the other servers still start"
+        );
+        let rows = guard.audit_rows();
+        let row = rows
+            .iter()
+            .find(|r| r["kind"] == "security_verdict")
+            .unwrap_or_else(|| panic!("expected a security_verdict row, got {rows:?}"));
+        assert_eq!(row["tool"], "mcp_config");
+        assert_eq!(row["server"], "evil");
+        assert_eq!(row["decision"], "blocked");
+        assert!(
+            row["reason"]
+                .as_str()
+                .unwrap()
+                .contains("McpSuspiciousArgs")
+        );
+        let seen = fake.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "each configured server is screened once");
+        assert!(seen.iter().all(|t| t.contains("mcpServers")), "{seen:?}");
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_config_screen_warn_starts_server_with_a_row() {
+        let guard = ScreenTestGuard::new();
+        guard.set_level(5);
+        let fake = ScriptFake::with_rule("\"evil\"", "McpUntrustedServer", high);
+        guard.install(&fake);
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+        manager.start_all(evil_and_good()).await;
+
+        assert!(
+            task_token(&manager, "evil").await.is_some(),
+            "High is Warn at DEFCON 5: the server starts"
+        );
+        let rows = guard.audit_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["decision"], "warned");
+        assert_eq!(rows[0]["tool"], "mcp_config");
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_config_screen_unavailable_follows_level() {
+        let guard = ScreenTestGuard::new();
+        let fake = ScriptFake::unavailable("timeout");
+        guard.install(&fake);
+
+        // Level 3 (Warn-class, D-12): every server is skipped, with a reason row each.
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+        manager.start_all(evil_and_good()).await;
+        assert!(task_token(&manager, "evil").await.is_none());
+        assert!(task_token(&manager, "good").await.is_none());
+        let rows = guard.audit_rows();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|r| r["kind"] == "sidecar_unavailable"));
+        assert!(
+            rows.iter()
+                .all(|r| r["reason"].as_str().unwrap().contains("timeout"))
+        );
+
+        // Level 5: the servers start, still with a reason row.
+        guard.set_level(5);
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager5 = McpManager::new(registry);
+        manager5.start_all(evil_and_good()).await;
+        assert!(task_token(&manager5, "evil").await.is_some());
+        assert!(task_token(&manager5, "good").await.is_some());
+        assert_eq!(guard.audit_rows().len(), 4);
+        manager5.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn no_screen_installed_starts_servers_as_before() {
+        let guard = ScreenTestGuard::new();
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+        manager.start_all(evil_and_good()).await;
+        assert!(task_token(&manager, "evil").await.is_some());
+        assert!(task_token(&manager, "good").await.is_some());
+        assert!(guard.audit_rows().is_empty(), "no screen, no audit rows");
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_config_screen_also_guards_start_all_and_wait() {
+        let guard = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("\"evil\"", "McpSuspiciousArgs", block_always);
+        guard.install(&fake);
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry);
+        let _ = manager.start_all_and_wait(evil_and_good()).await;
+        assert!(task_token(&manager, "evil").await.is_none());
+        assert!(task_token(&manager, "good").await.is_some());
+        manager.shutdown_all().await;
     }
 }

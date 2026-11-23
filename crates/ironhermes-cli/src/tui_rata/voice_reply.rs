@@ -137,6 +137,46 @@ fn truncate_on_word(s: &str, max: usize) -> String {
     }
 }
 
+/// Phase 54.7 (D-19): the TTS provider spoken replies use — the configured provider when
+/// available (vault-aware, `openai_compatible` included), else Edge.
+pub fn reply_tts_provider(config: &Config) -> Option<Arc<dyn ironhermes_core::TtsProvider>> {
+    let registry = ironhermes_tools::tts::build_tts_registry_with_vault(
+        &config.tts,
+        ironhermes_core::voice_http::voice_vault_config(config),
+    );
+    registry
+        .get(&config.tts.provider)
+        .filter(|p| p.is_available())
+        .or_else(|| registry.get("edge"))
+}
+
+/// Phase 54.7 (D-19): where a spoken reply is synthesized —
+/// `audio_cache/{uuid}.{ext}` with the extension from `tts::audio_format`.
+///
+/// `provider` is the name of the provider that will ACTUALLY synthesize (WR-05):
+/// `reply_tts_provider` falls back to Edge (MP3) when the configured provider is
+/// unavailable, so the configured provider's format must not name the file.
+pub fn reply_audio_path(config: &Config, provider: &str, home: &Path) -> std::path::PathBuf {
+    home.join("audio_cache").join(format!(
+        "{}.{}",
+        uuid::Uuid::new_v4(),
+        ironhermes_tools::tts::audio_format::extension_for_provider(&config.tts, provider)
+    ))
+}
+
+/// Phase 54.7 (D-19): the STT provider the record key transcribes with — the shared
+/// `select_stt_provider` choice resolved through the vault-aware registry, `None` when
+/// nothing is configured or the selected provider is unavailable.
+pub fn record_stt_provider(config: &Config) -> Option<Arc<dyn ironhermes_core::SttProvider>> {
+    let name = ironhermes_tools::stt::select_stt_provider(&config.stt)?;
+    ironhermes_tools::stt::build_stt_registry_with_vault(
+        &config.stt,
+        ironhermes_core::voice_http::voice_vault_config(config),
+    )
+    .get(&name)
+    .filter(|p| p.is_available())
+}
+
 /// Synthesize `text` with the configured TTS provider and play it locally.
 ///
 /// Provider selection follows `config.tts.provider` (default `"edge"`, keyless)
@@ -152,13 +192,9 @@ pub async fn speak_reply(config: Arc<Config>, home: &Path, text: &str) {
     use ironhermes_tools::registry::Tool;
     use ironhermes_tools::send_audio_tool::SendAudioTool;
 
-    // Select provider: configured-if-available, else Edge fallback.
-    let registry = ironhermes_tools::tts::build_tts_registry(&config.tts);
-    let provider = registry
-        .get(&config.tts.provider)
-        .filter(|p| p.is_available())
-        .or_else(|| registry.get("edge"));
-    let Some(provider) = provider else {
+    // Select provider: configured-if-available (vault-aware, openai_compatible
+    // included), else Edge fallback.
+    let Some(provider) = reply_tts_provider(&config) else {
         tracing::warn!("speak_reply: no TTS provider available; skipping spoken reply");
         return;
     };
@@ -169,7 +205,8 @@ pub async fn speak_reply(config: Arc<Config>, home: &Path, text: &str) {
         tracing::warn!("speak_reply: cannot create audio_cache dir: {e}");
         return;
     }
-    let out_path = audio_dir.join(format!("{}.mp3", uuid::Uuid::new_v4()));
+    // The file name follows the provider's audio format (e.g. `.wav` / `.opus`).
+    let out_path = reply_audio_path(&config, provider.name(), home);
     let written = match provider.synthesize(text, &out_path).await {
         Ok(p) => p,
         Err(e) => {
@@ -254,5 +291,116 @@ mod tests {
     fn spoken_text_plain_prose_passes_through() {
         let spoken = spoken_text("Hello, can you hear me?");
         assert_eq!(spoken, "Hello, can you hear me?");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 54.7 Plan 09 (D-19): the TUI uses the shared, vault-aware seams.
+    // -----------------------------------------------------------------------
+
+    /// Serialises tests that clear/restore STT key variables.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Clears the named variables and restores their previous values on drop.
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn clear(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|n| (*n, std::env::var_os(n)))
+                .collect::<Vec<_>>();
+            for n in names {
+                // SAFETY: serialised by `env_lock`, restored on drop.
+                unsafe { std::env::remove_var(n) };
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (n, v) in self.0.drain(..) {
+                // SAFETY: serialised by `env_lock`.
+                unsafe {
+                    match v {
+                        Some(v) => std::env::set_var(n, v),
+                        None => std::env::remove_var(n),
+                    }
+                }
+            }
+        }
+    }
+
+    fn oc_tts_config(base_url: &str, format: &str) -> Config {
+        let mut config = Config::default();
+        config.tts.provider = "openai_compatible".to_string();
+        config.tts.openai_compatible.base_url = base_url.to_string();
+        config.tts.openai_compatible.format = format.to_string();
+        config
+    }
+
+    #[test]
+    fn reply_tts_provider_picks_openai_compatible_when_configured() {
+        let config = oc_tts_config("http://localhost:8880/v1", "mp3");
+        let provider = reply_tts_provider(&config).expect("a provider");
+        assert_eq!(provider.name(), "openai_compatible");
+    }
+
+    #[test]
+    fn reply_tts_provider_falls_back_to_edge() {
+        let config = oc_tts_config("", "mp3");
+        let provider = reply_tts_provider(&config).expect("edge fallback");
+        assert_eq!(
+            provider.name(),
+            "edge",
+            "an unavailable configured provider falls back to Edge"
+        );
+    }
+
+    #[test]
+    fn reply_audio_path_follows_format() {
+        let config = oc_tts_config("http://localhost:8880/v1", "opus");
+        let home = Path::new("/tmp/ironhermes-home-for-test");
+        let path = reply_audio_path(&config, "openai_compatible", home);
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("opus"));
+        assert_eq!(path.parent(), Some(home.join("audio_cache").as_path()));
+    }
+
+    /// WR-05: when the configured provider is unavailable the reply falls back to
+    /// Edge, which returns MP3 -- the file must be `.mp3`, not the configured
+    /// provider's `.opus`.
+    #[test]
+    fn reply_audio_path_follows_the_provider_that_synthesizes() {
+        // openai_compatible with an EMPTY base_url is unavailable -> Edge fallback.
+        let config = oc_tts_config("", "opus");
+        let provider = reply_tts_provider(&config).expect("edge fallback");
+        assert_eq!(provider.name(), "edge");
+        let home = Path::new("/tmp/ironhermes-home-for-test");
+        let path = reply_audio_path(&config, provider.name(), home);
+        assert_eq!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("mp3"),
+            "Edge writes MP3 bytes; the extension must say so"
+        );
+    }
+
+    #[test]
+    fn record_stt_provider_selects_openai_compatible() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvRestore::clear(&["GROQ_API_KEY", "VOICE_TOOLS_OPENAI_KEY"]);
+
+        let mut config = Config::default();
+        config.stt.provider = "auto".to_string();
+        assert!(
+            record_stt_provider(&config).is_none(),
+            "nothing configured -> no provider"
+        );
+
+        config.stt.openai_compatible.base_url = "http://localhost:8178".to_string();
+        let provider = record_stt_provider(&config).expect("openai_compatible selected");
+        assert_eq!(provider.name(), "openai_compatible");
     }
 }

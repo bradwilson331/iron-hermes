@@ -31,13 +31,17 @@ pub mod image_gen; // Phase 01 — fal.ai text-to-image LLM tool (ImageGenTool)
 pub mod memory_manager_handle;
 pub mod memory_tool;
 pub mod not_supported_dispatcher; // Phase 36.17.7 D-03-b — zero-impl AudioDispatcher stub for Discord/Slack
+pub mod realtime; // Phase 54.7 D-10/D-12 — RealtimeProvider trait + OpenAI-compatible impl
 pub mod registry;
+pub mod report; // Phase 54.10 D-09..D-12 — report_publish tool + per-profile report store
+pub mod ros2; // Phase 49.8 D-01/D-05/D-14 — rosbridge WebSocket tooling (ros2, rospider)
 pub mod send_audio_tool; // Phase 36.17.5 D-14/D-15 — SendAudioTool + AudioDispatcher
 pub mod send_message_tool; // Phase 36.3.8 D-01/D-02/D-03 — SendMessageTool + MessageDispatcher
 pub mod skill_manage; // Phase 33 — learning toolset (LEARN-04, LEARN-05)
 pub mod skills_tool;
 pub mod stt; // Phase 36.17.8 — STT provider impls (groq, openai)
 pub mod terminal;
+pub mod tier2_tools; // Phase 58.2 D-12 — memory_search (Tier 2 long-term memory)
 pub mod toolset_session; // Phase 25.2 Plan 15 — production ToolsetSessionHandle impl (UAT Issue 2)
 pub mod tts; // Phase 36.17.5 — TTS provider impls (edge, elevenlabs)
 pub mod tts_tool; // Phase 36.17.5 D-05/D-06/D-07 — TextToSpeechTool LLM tool
@@ -45,7 +49,9 @@ pub mod vad; // Phase 36.17.8 — Voice Activity Detection
 pub mod venice; // Phase 47 Plan 02 — Venice.ai HTTP client (VeniceClient)
 pub mod video_gen; // Phase 36.3.3 Plan 02 — fal.ai video LLM tools (VideoGenerateTool, VideoAnimateTool)
 pub mod video_to_video; // Phase 47 Plan 07 D-14 — net-new video-to-video LLM tool (VideoToVideoTool)
+pub mod voice_discovery; // Phase 54.7 D-06/D-08 — server-side model/voice discovery
 pub mod web_answer; // Phase 41.3 D-07/D-13 (Plan 08) — synthesized-answer half of the web_search/web_answer split
+pub mod web_client; // Phase 54 Plan 03 D-13/D-14 — shared SSRF-safe reqwest client (build_ssrf_safe_client)
 pub mod web_extract; // Phase 25.2
 pub mod web_local; // Phase 25.2 — shared HTML→Markdown helpers (extract_content_local target)
 pub mod web_read;

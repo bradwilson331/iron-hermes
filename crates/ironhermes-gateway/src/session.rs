@@ -577,8 +577,10 @@ impl SessionStore {
     }
 
     /// Remove all sessions that have been inactive longer than `timeout_hours`.
-    /// Also ends expired sessions in SQLite.
-    pub fn expire_stale(&mut self, timeout_hours: u64) {
+    /// Also ends expired sessions in SQLite. Returns the number of sessions
+    /// evicted, so 49.8-08's runner sweep can decide whether the D-10 ros2
+    /// session-end stop is worth awaiting (skip when nothing expired).
+    pub fn expire_stale(&mut self, timeout_hours: u64) -> usize {
         let before = self.sessions.len();
         let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
         let expired_keys: Vec<String> = self
@@ -601,5 +603,6 @@ impl SessionStore {
         if evicted > 0 {
             debug!("Evicted {} stale session(s)", evicted);
         }
+        evicted
     }
 }

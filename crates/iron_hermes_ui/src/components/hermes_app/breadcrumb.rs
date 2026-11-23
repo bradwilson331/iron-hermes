@@ -1,47 +1,20 @@
-//! Top-left breadcrumb chip — `NODE HERMES-7 › BRIDGE › {SCREEN}`.
+//! Screen -> short-name map for the header's MODULE segment.
 //!
-//! The rightmost crumb tracks the active `Screen` via the context-provided
-//! `Signal<Screen>` published by `HermesApp`. The Screen→short-name map
-//! is local to this file because Breadcrumb is the only consumer — keeps
-//! `state.rs` minimal (the plan explicitly forbids adding a method on
-//! `Screen`).
-//!
-//! Markup mirrors `app.html` lines 338-346 (the `.breadcrumb` block).
-//! The leading `<span class="dot">` is preserved so the blink animation
-//! from `site.css` activates without further CSS edits.
+//! Phase 54.4 Plan 01 (D-07): the old top-left breadcrumb chip
+//! (`NODE HERMES-7 › BRIDGE › {SCREEN}`) is retired — the persistent header's
+//! status strip (`sys_meta.rs`) carries the active screen as its MODULE
+//! segment. This file now owns only the pure `Screen` -> short-name map. The
+//! map is local to this file (rather than a method on `Screen`) to keep
+//! `state.rs` minimal.
 
 use crate::state::Screen;
-use dioxus::prelude::*;
 
-#[component]
-pub fn Breadcrumb() -> Element {
-    // Fully-qualified path for the acceptance-criteria literal assertion
-    // (`use_context::<Signal<crate::state::Screen>>`).
-    let active = use_context::<Signal<crate::state::Screen>>();
-    let cur = *active.read();
-    let short_name = screen_short_name(cur);
-
-    rsx! {
-        div { class: "breadcrumb",
-            span { class: "dot" }
-            span { "NODE " span { class: "v", "HERMES-7" } }
-            span { class: "sep", "›" }
-            span { "BRIDGE" }
-            span { class: "sep", "›" }
-            span { class: "v", "{short_name}" }
-        }
-    }
-}
-
-/// Short-name map for the breadcrumb's rightmost crumb. Per the
-/// `<interfaces>` block in the plan: 4-7 char uppercase labels, with
-/// the off-wheel screens (`Soul`, `Schedules`, `Office`) defined locally
-/// since they are NOT `WheelWedge` variants (D-10).
-// Called only by Breadcrumb (HermesApp subtree); dead under `--all-features`
-// when `legacy-shell` mounts WarpHermes instead of HermesApp (bin crates do not
-// keep unreferenced `pub fn` alive). Live in the default build.
-#[allow(dead_code)]
-fn screen_short_name(s: Screen) -> &'static str {
+/// Short-name map for the status strip's MODULE segment. 4-9 char uppercase
+/// labels, with the off-wheel screens (`Soul`, `Schedules`, `Office`) defined
+/// locally since they are NOT `WheelWedge` variants (D-10). Never empty. The
+/// match is exhaustive on purpose: adding a `Screen` variant (plan 07 adds
+/// `Logs` => "LOGS") fails to compile until it is named here.
+pub(crate) fn screen_short_name(s: Screen) -> &'static str {
     match s {
         Screen::Chat => "CHAT",
         Screen::Sessions => "SESSIONS",
@@ -56,10 +29,26 @@ fn screen_short_name(s: Screen) -> &'static str {
         Screen::Office => "OFFICE",
         Screen::Settings => "SYSTEM",
         Screen::Providers => "PROVIDERS",
-        // Phase 36.3.7.11 D-02: Kanban wheel-nav + dashboard breadcrumb label.
+        // Phase 36.3.7.11 D-02: Kanban wheel-nav + dashboard label.
         Screen::Kanban => "KANBAN",
         // Phase 46.6 Plan 05 (D-07): Artifacts gallery + sandboxed viewer.
         Screen::Artifacts => "ARTIFACTS",
         Screen::ArtifactViewer => "ARTIFACT",
+        // Phase 54.4 Plan 07 (D-08): server / audit / agent-activity logs.
+        Screen::Logs => "LOGS",
+        // Phase 54.9 Plan 09 (D-13): generated views.
+        Screen::OpenUi => "OPENUI",
+        // Phase 54.10 Plan 01 (D-01): live boards.
+        Screen::Dashboard => "DASHBOARD",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_logs_short_name_is_logs() {
+        assert_eq!(screen_short_name(Screen::Logs), "LOGS");
     }
 }

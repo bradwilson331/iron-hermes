@@ -1469,6 +1469,7 @@ pub async fn commit_mcp_server(
                 draft.name
             )));
         }
+        let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
         let (mut config, target) = resolve_scope_target(&scope).map_err(ServerFnError::new)?;
         check_mcp_write_gate().map_err(ServerFnError::new)?;
         // CR-01: reject a name that collides with a DIFFERENT
@@ -1493,6 +1494,7 @@ pub async fn commit_mcp_server(
         let cfg = draft_to_server_config(&draft);
         write_server_into(&mut config, &draft.name, &cfg).map_err(ServerFnError::new)?;
         save_scoped(&config, &target).map_err(ServerFnError::new)?;
+        drop(_root_write);
         reload_mcp_and_report(&scope, &config).await;
         row_for(&draft.name, &config)
             .await
@@ -1515,6 +1517,7 @@ pub async fn set_mcp_server_enabled(
 ) -> Result<McpServerRow, ServerFnError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
         let (mut config, target) = resolve_scope_target(&scope).map_err(ServerFnError::new)?;
         check_mcp_write_gate().map_err(ServerFnError::new)?;
         let raw = config
@@ -1526,6 +1529,7 @@ pub async fn set_mcp_server_enabled(
         cfg.enabled = enabled;
         write_server_into(&mut config, &name, &cfg).map_err(ServerFnError::new)?;
         save_scoped(&config, &target).map_err(ServerFnError::new)?;
+        drop(_root_write);
         reload_mcp_and_report(&scope, &config).await;
         row_for(&name, &config).await.map_err(ServerFnError::new)
     }
@@ -1542,10 +1546,12 @@ pub async fn set_mcp_server_enabled(
 pub async fn remove_mcp_server(scope: ConfigScope, name: String) -> Result<(), ServerFnError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
         let (mut config, target) = resolve_scope_target(&scope).map_err(ServerFnError::new)?;
         check_mcp_write_gate().map_err(ServerFnError::new)?;
         config.mcp_servers.remove(&name);
         save_scoped(&config, &target).map_err(ServerFnError::new)?;
+        drop(_root_write);
         reload_mcp_and_report(&scope, &config).await;
         Ok(())
     }
@@ -1888,6 +1894,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2647,6 +2654,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2857,6 +2865,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2962,6 +2971,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -3015,6 +3025,7 @@ mod tests {
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
                 remote_loop_enabled: false,
+                ..Default::default()
             },
             ..Default::default()
         };

@@ -38,7 +38,6 @@ use crate::tui_rata::stream_events::StreamEvent;
 
 // Concrete paths — grep-verified iteration 2.
 use ironhermes_agent::AgentRuntime;
-use ironhermes_agent::AnyClient;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::memory::MemoryManager;
 use ironhermes_agent::personality::PersonalityRegistry;
@@ -81,18 +80,14 @@ pub struct AppDeps {
     pub history_path: PathBuf,
     pub status_initial: StatusLineState,
     pub cancel_parent: CancellationToken,
-    /// Mutable client for /model and /fast slash commands that rebuild the
-    /// AnyClient mid-session. The runtime owns its own client for turns; this
-    /// field tracks the slash-command-mutated client so spawn_turn can pass it
-    /// to TurnRequest when a model switch is in effect.
-    /// NOTE: Phase 28.1-05 decision — keep client on App because /model and
-    /// /fast mutate it interactively; routing through the runtime would require
-    /// a mutable runtime accessor which is architecturally heavyweight.
-    pub client: AnyClient,
-    /// ToolRegistry — kept for session-end hooks (registry.read().await.call_session_end_hooks())
-    /// and for slash-dispatch CommandContext. Runtime also holds this Arc via
-    /// runtime.registry(); App keeps its own clone for the end-hook call site
-    /// in run_with_deps without requiring a runtime borrow.
+    /// TUI-local `ToolRegistry` built in `build_app_deps` (49.8-23,
+    /// G-49.8-21). It is used by the MCP manager (`build_mcp_manager`) and
+    /// the `/toolset` session handle (`RegistryToolsetSession`), AND for
+    /// slash-dispatch `CommandContext`. Turns execute on
+    /// `agent_runtime.registry()`, a SEPARATE registry with its own
+    /// `Ros2Session` — `App.registry`'s `Ros2Session` is never driven by a
+    /// turn. Session-end hooks and the robot stop therefore go through
+    /// `event_loop::session_end_registry`, NOT this field (G-49.8-21).
     pub registry: Arc<RwLock<ToolRegistry>>,
     /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
     /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
@@ -119,10 +114,9 @@ pub struct AppDeps {
     /// PersonalityRegistry for `/personality` (Phase 15 PRMT-06/PRMT-07).
     pub personality_overlay: Arc<PersonalityRegistry>,
 
-    // ── Phase 22.4.2 Plan 00: D-09 six session-toggle Arc fields ────────────
-    /// `/yolo` toggle — upgraded from `bool` to `Arc<AtomicBool>` (D-09).
-    /// (Replaces the plain `yolo_enabled: bool` field.)
-    pub yolo_enabled: Arc<AtomicBool>,
+    // ── Phase 22.4.2 Plan 00: D-09 session-toggle Arc fields ────────────────
+    // (Phase 57: `/yolo` is no longer one of them — it is the audited session DEFCON
+    // dial, see `App::defcon`.)
     /// `/verbose` toggle (D-09).
     pub verbose_enabled: Arc<AtomicBool>,
     /// `/statusbar` toggle — initial value `true` (D-09).
@@ -254,8 +248,10 @@ pub struct App {
     pub cancel_child: Option<CancellationToken>,
 
     // — feature flags (Phase 22.4.2 Plan 00: D-09 upgrades) ─────────────────
-    /// `/yolo` toggle — upgraded from `bool` to `Arc<AtomicBool>` (D-09).
-    pub yolo_enabled: Arc<AtomicBool>,
+    /// The session's live DEFCON level (Phase 57 D-09): the handle the process-wide
+    /// registry holds for `session_id`. `/yolo <N>` is the core command and changes it
+    /// in place; every gate reads it at the decision (`GatePolicy::for_session`).
+    pub defcon: ironhermes_core::defcon::DefconHandle,
     /// `/verbose` toggle (D-09).
     pub verbose_enabled: Arc<AtomicBool>,
     /// `/statusbar` toggle — initial `true` (D-09).
@@ -264,6 +260,9 @@ pub struct App {
     pub debug_enabled: Arc<AtomicBool>,
     /// `/fast` preset toggle (D-09).
     pub fast_enabled: Arc<AtomicBool>,
+    /// (provider, model) the session ran on before `/fast` ON; `/fast` OFF
+    /// switches back to it. None while fast mode is off.
+    pub fast_restore: Option<(String, String)>,
     /// Phase 36.17.3 (D-03): shared FIFO queue keyed by SessionKey.
     pub queue: Arc<dyn MessageQueue<SessionKey>>,
     /// Phase 36.17.3 (D-03): fixed TUI session key. Constructed in `App::new`
@@ -298,9 +297,10 @@ pub struct App {
     pub subagent_registry: Arc<RwLock<SubagentRegistry>>,
     pub process_registry: Arc<RwLock<ProcessRegistry>>,
     pub command_router: Arc<CommandRouter>,
-    /// Mutable client for /model and /fast (see AppDeps.client doc).
-    pub client: AnyClient,
-    /// ToolRegistry clone for session-end hooks + slash-dispatch CommandContext.
+    /// TUI-local `ToolRegistry` — see the matching field doc on `AppDeps.registry`
+    /// above (49.8-23, G-49.8-21): used for the MCP manager, `/toolset`, and
+    /// slash-dispatch `CommandContext`, NOT for session-end hooks or the robot
+    /// stop (those target `event_loop::session_end_registry`, a different Arc).
     pub registry: Arc<RwLock<ToolRegistry>>,
     /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
     /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
@@ -561,6 +561,19 @@ pub struct App {
     /// is surfaced when the current overlay resolves; the footer shows
     /// `(+N more pending)` for the rest (UI-SPEC §2 queue discipline).
     pub approval_queue: Vec<ApprovalRequest>,
+
+    // ── Phase 54 Plan 02 (D-04): yolo-bypass notice plumbing ─────────────────
+    /// Sender half of the yolo-bypass notice channel, cloned by `spawn_turn` to
+    /// build the per-turn `TuiApprovalGate`'s notifier. Wired in `run_app_inner`
+    /// at startup — mirrors `approval_tx`. A `notify_yolo_bypass` call on that
+    /// gate sends a plain `String` here instead of writing directly to the
+    /// terminal (`println!`/`eprintln!` would corrupt the ratatui frame under
+    /// crossterm raw mode).
+    pub yolo_notice_tx: Option<UnboundedSender<String>>,
+    /// Receiver half — drained by `recv_yolo_notice` in `run_app_inner`'s
+    /// `select!`, mirroring `approval_rx`. Each received line is pushed into
+    /// the transcript as a `Role::System` message via `surface_yolo_notice`.
+    pub yolo_notice_rx: Option<UnboundedReceiver<String>>,
 
     // ── Phase 41.1 Plan 10 (G-41.1-1): clarify overlay plumbing ──────────────
     /// Sender half of the clarify channel, cloned by `spawn_turn` to build the
@@ -848,6 +861,10 @@ impl App {
         if let Some(sys) = deps.system_message {
             history.push(sys);
         }
+        // Phase 57 D-09: the session's live DEFCON handle, seeded from the process
+        // default on first lookup (so `--yolo` / the configured level reach the TUI).
+        let session_id = deps.session_id;
+        let defcon = ironhermes_core::defcon::session_defcon().handle_for(&session_id);
 
         Self {
             history,
@@ -860,7 +877,7 @@ impl App {
             pending_tx: None,
             assistant_buffer: None,
             should_quit: false,
-            session_id: deps.session_id,
+            session_id,
             history_store,
             history_path: deps.history_path,
             status: deps.status_initial,
@@ -869,11 +886,12 @@ impl App {
             cancel_parent: deps.cancel_parent,
             cancel_child: None,
             // Phase 22.4.2 Plan 00: D-09 toggle Arcs (cloned from deps)
-            yolo_enabled: deps.yolo_enabled,
+            defcon,
             verbose_enabled: deps.verbose_enabled,
             statusbar_enabled: deps.statusbar_enabled,
             debug_enabled: deps.debug_enabled,
             fast_enabled: deps.fast_enabled,
+            fast_restore: None,
             // Phase 36.17.3 (D-03): queue + fixed TUI key + Arc<AtomicBool> pause toggle.
             queue: deps.queue,
             queue_key: SessionKey::new(Platform::Local, "local").with_user("local"),
@@ -895,7 +913,6 @@ impl App {
             subagent_registry: deps.subagent_registry,
             process_registry: deps.process_registry,
             command_router: deps.command_router,
-            client: deps.client,
             registry: deps.registry,
             browser_session: deps.browser_session,
             mouse_capture_enabled: deps.mouse_capture_enabled,
@@ -970,6 +987,10 @@ impl App {
             approval_rx: None,
             pending_approval_resolve: None,
             approval_queue: Vec::new(),
+            // Phase 54 Plan 02 (D-04): yolo-bypass notice channel wired in
+            // run_app_inner at startup; no notice in flight at session start.
+            yolo_notice_tx: None,
+            yolo_notice_rx: None,
             // Phase 41.1 Plan 10 (G-41.1-1): clarify channel wired in
             // run_app_inner at startup; the registry is constructed once here
             // and its Arc clone is threaded into spawn_turn's messaging_wiring
@@ -1921,6 +1942,16 @@ impl App {
                 };
                 let provider = row.name.clone();
                 let model = row.default_model.clone();
+                if model.trim().is_empty() {
+                    // G-58.3.1-10: no default model to apply, so choose one in step 2.
+                    self.model_picker_filter.clear();
+                    self.model_picker_selected = 0;
+                    self.active_overlay = Some(OverlayKind::ModelPicker {
+                        step: PickerStep::Model,
+                        selected_provider: Some(provider),
+                    });
+                    return;
+                }
                 self.apply_model_picker_selection(step, provider, model);
             }
             PickerStep::Model => {
@@ -1935,11 +1966,104 @@ impl App {
         }
     }
 
+    /// The one model-switch path for `/model <name>`, the picker and `/fast`
+    /// (D-12/D-13, G-58.3.1-6). Re-resolves config + resolver for
+    /// `provider`/`model` and swaps them, plus a rebuilt client, into the
+    /// `AgentRuntime` (the object every turn reads) via
+    /// `reload_config_and_resolver`; only then updates `self.resolver`
+    /// (what `/usage` reads) and the status line.
+    ///
+    /// Nothing is changed unless every step succeeds: a blank model is
+    /// refused first (G-58.3.1-10), then validation and the runtime reload
+    /// (which builds the client before taking any lock, D-09) all run before
+    /// any App state is touched.
+    ///
+    /// Returns `Some(note)` when `model` is missing from the ids `provider`
+    /// served at the last `/models refresh`. The note never blocks: a server
+    /// may list only loaded models, so an unlisted id can still be valid.
+    pub(crate) fn apply_model_switch(
+        &mut self,
+        provider: &str,
+        model: &str,
+    ) -> anyhow::Result<Option<String>> {
+        use std::task::{Context, Poll, Waker};
+
+        if model.trim().is_empty() {
+            anyhow::bail!(
+                "provider {provider} has no model to switch to: pick one with /model (run /models refresh to list the ids its server serves) or set providers.{provider}.default_model"
+            );
+        }
+
+        // Validate as the slash path always has; an unknown provider is an Err.
+        ironhermes_agent::build_client(&self.resolver, provider, model)?;
+
+        let outgoing = self.outgoing_model();
+        let mut config = (*self.agent_runtime.config()).clone();
+        record_switch(&mut config, (&outgoing.0, &outgoing.1), provider, model);
+
+        // One cache read serves both the resolver build and the served-id note.
+        let cache = ironhermes_core::models_cache::ModelsCache::load();
+        let served = cache
+            .served_models
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        let resolver = ironhermes_core::ProviderResolver::build_with_cache(&config, cache)?;
+
+        let runtime = self.agent_runtime.clone();
+        let mut reload = std::pin::pin!(
+            runtime.reload_config_and_resolver(Arc::new(config), Arc::new(resolver.clone()))
+        );
+        // reload never awaits, so one poll completes it from the sync
+        // `handle_key` path; Pending means it gained an await and this must change.
+        match reload
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => result?,
+            Poll::Pending => {
+                anyhow::bail!("runtime reload did not complete synchronously")
+            }
+        }
+
+        self.status.tokens_limit = resolver.resolve_for_main().context_length();
+        self.status.model_short = model.to_string();
+        self.status.provider = provider.to_string();
+        self.resolver = resolver;
+
+        if served.is_empty() || served.iter().any(|id| id == model) {
+            return Ok(None);
+        }
+        let shown = served
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(Some(format!(
+            "Note: {model} is not in the model list {provider} served at the last /models refresh ({shown}). The server may reject it."
+        )))
+    }
+
+    /// The provider and model the session is configured on, for
+    /// [`record_switch`]. While `/fast` is ON the live model is the transient
+    /// fast one, so the pre-fast selection it will restore is used instead
+    /// (WR-08): a fast model must never be persisted as a provider's default.
+    fn outgoing_model(&self) -> (String, String) {
+        self.fast_restore.clone().unwrap_or_else(|| {
+            (
+                self.resolver.main_provider().to_string(),
+                self.resolver.resolve_for_main().default_model.clone(),
+            )
+        })
+    }
+
     /// Apply a chosen provider+model (D-06/D-07/D-11): hot-swaps the LIVE
-    /// session via `ironhermes_agent::build_client` — the SAME resolver +
-    /// AnyClient rebuild `handle_subsystem_mutator`'s `"model"` arm uses for
-    /// `/model <name>` (no parallel preview path) — then persists the
-    /// choice to `config.yaml` (`persist_model_picker_selection`, D-11).
+    /// session via [`App::apply_model_switch`] — the SAME runtime reload
+    /// `handle_subsystem_mutator`'s `"model"` arm uses for `/model <name>`
+    /// (no parallel preview path), so window, compact profile and client
+    /// follow — then persists the choice to `config.yaml`
+    /// (`persist_model_picker_selection`, D-11).
     ///
     /// On success: close the overlay, clear filter/selection, and push the
     /// Copywriting-contract System-role success line via the SAME
@@ -1948,11 +2072,15 @@ impl App {
     /// try again — not a dead-end) and the error surfaces VERBATIM through
     /// that identical `SlashOutcome::Error` path (no new copy).
     fn apply_model_picker_selection(&mut self, step: PickerStep, provider: String, model: String) {
-        match ironhermes_agent::build_client(&self.resolver, &provider, &model) {
-            Ok(new_client) => {
-                self.client = new_client;
-
-                if let Err(e) = persist_model_picker_selection(&provider, &model) {
+        // Read the outgoing model BEFORE the switch replaces the resolver.
+        let outgoing = self.outgoing_model();
+        match self.apply_model_switch(&provider, &model) {
+            Ok(note) => {
+                // An explicit pick ends fast mode: `/fast` OFF must not undo it.
+                self.fast_restore = None;
+                if let Err(e) =
+                    persist_model_picker_selection((&outgoing.0, &outgoing.1), &provider, &model)
+                {
                     tracing::warn!(
                         error = %e,
                         provider = %provider,
@@ -1971,7 +2099,9 @@ impl App {
                     }
                     _ => format!("Switched to {provider}/{model}."),
                 };
-                self.apply_slash_outcome(crate::tui_rata::commands::SlashOutcome::Handled(text));
+                self.apply_slash_outcome(crate::tui_rata::commands::SlashOutcome::Handled(
+                    crate::tui_rata::commands::with_note(text, note),
+                ));
             }
             Err(e) => {
                 self.apply_slash_outcome(crate::tui_rata::commands::SlashOutcome::Error(
@@ -1996,6 +2126,18 @@ impl App {
             self.active_overlay = Some(kind);
             self.pending_approval_resolve = Some(req.resolve);
         }
+    }
+
+    /// Surface a yolo-bypass notice (D-04, Phase 54 Finding 1) as a `Role::System`
+    /// transcript line — called from the `recv_yolo_notice` `select!` arm in
+    /// `run_app_inner`. Mirrors `apply_slash_outcome`'s `Role::System` push
+    /// exactly: never a modal, never a direct terminal write (which would
+    /// corrupt the ratatui frame under crossterm raw mode).
+    pub fn surface_yolo_notice(&mut self, text: String) {
+        let mut msg = ChatMessage::user(&text);
+        msg.role = Role::System;
+        self.history.push(msg);
+        self.scroll_to_bottom();
     }
 
     /// Resolve the currently-surfaced approval request with `outcome`, close the
@@ -2695,17 +2837,28 @@ impl App {
                 // `ironhermes-agent/tests/turn_request_gating_sweep.rs`,
                 // which is why both are wired here rather than left at
                 // `TurnRequest::default()`.
-                let yolo_now = self
-                    .yolo_enabled
-                    .load(std::sync::atomic::Ordering::SeqCst);
                 let tui_gate: Option<Arc<dyn ironhermes_core::ApprovalGate>> =
                     self.approval_tx.clone().map(|tx| {
-                        Arc::new(crate::tui_rata::approval_gate_tui::TuiApprovalGate::new(
-                            tx,
-                            self.approvals_store.clone(),
-                            self.yolo_enabled.clone(),
-                        )) as Arc<dyn ironhermes_core::ApprovalGate>
+                        Arc::new(
+                            crate::tui_rata::approval_gate_tui::TuiApprovalGate::new_with_notice_tx(
+                                tx,
+                                self.approvals_store.clone(),
+                                self.yolo_notice_tx.clone(),
+                            ),
+                        ) as Arc<dyn ironhermes_core::ApprovalGate>
                     });
+                // Phase 54.3 D-03: the flush-time yolo-bypass notice target. The goal
+                // loop leaves `TurnRequest.approval_gate` unset (the gate lives inside
+                // the intercept closures), so without this the per-turn notice would
+                // have nowhere to go. Reuses the SAME `TuiApprovalGate` — hence the
+                // same `yolo_notice_tx` channel as main-turn bypasses. Notice target
+                // only; never consulted for an approval decision.
+                let goal_yolo_notifier: Arc<dyn ironhermes_core::ApprovalGate> = match &tui_gate {
+                    Some(gate) => gate.clone(),
+                    None => Arc::new(crate::approval_gate::CliApprovalGate::from_shared(
+                        self.approvals_store.clone(),
+                    )),
+                };
                 let (terminal_intercept, execute_code_intercept) = match tui_gate {
                     Some(gate) => (
                         Some(
@@ -2715,7 +2868,6 @@ impl App {
                                 session_id.clone(),
                                 "tui",
                                 session_id.clone(),
-                                yolo_now,
                                 gate.clone(),
                             ),
                         ),
@@ -2726,7 +2878,6 @@ impl App {
                                 session_id.clone(),
                                 "tui",
                                 session_id.clone(),
-                                yolo_now,
                                 gate,
                             ),
                         ),
@@ -2738,7 +2889,6 @@ impl App {
                             session_id.clone(),
                             "tui",
                             session_id.clone(),
-                            yolo_now,
                             self.approvals_store.clone(),
                         )),
                         Some(crate::approval_gate::build_gated_execute_code_intercept(
@@ -2747,7 +2897,6 @@ impl App {
                             session_id.clone(),
                             "tui",
                             session_id.clone(),
-                            yolo_now,
                             self.approvals_store.clone(),
                         )),
                     ),
@@ -2761,6 +2910,8 @@ impl App {
                     let local_history = local_history.clone();
                     let terminal_intercept = terminal_intercept.clone();
                     let execute_code_intercept = execute_code_intercept.clone();
+                    let goal_yolo_notifier = goal_yolo_notifier.clone();
+                    let notice_tx = tx.clone();
                     Box::new(move |messages: Vec<String>| {
                         let message_text = messages.last().cloned().unwrap_or_default();
                         let agent_runtime = agent_runtime.clone();
@@ -2770,6 +2921,8 @@ impl App {
                         let local_history = local_history.clone();
                         let terminal_intercept = terminal_intercept.clone();
                         let execute_code_intercept = execute_code_intercept.clone();
+                        let goal_yolo_notifier = goal_yolo_notifier.clone();
+                        let notice_tx = notice_tx.clone();
                         Box::pin(async move {
                             // Register-before-spawn: THIS iteration's
                             // TurnEntry, under the surrounding session's
@@ -2838,9 +2991,14 @@ impl App {
                                 cancel_token: Some(loop_cancel.clone()),
                                 terminal_intercept: terminal_intercept.clone(),
                                 execute_code_intercept: execute_code_intercept.clone(),
+                                // Phase 54.3 D-03: flush-time notice target (see
+                                // `goal_yolo_notifier` above); NOT `approval_gate`.
+                                yolo_notifier: Some(goal_yolo_notifier.clone()),
                                 ..Default::default()
                             };
                             let result = agent_runtime.run_turn(request).await?;
+                            // D-05: a /goal turn uses up the once-per-session notice, so it is shown here.
+                            goal_turn_notice(&result, &notice_tx);
                             if !result.appended.is_empty() {
                                 let mut guard = local_history.lock().await;
                                 guard.extend(result.appended.clone());
@@ -2902,7 +3060,10 @@ impl App {
                         progress_tx,
                     )
                     .await;
-                    let _ = tx.send(StreamEvent::Finished { total_tokens: 0 });
+                    let _ = tx.send(StreamEvent::Finished {
+                        total_tokens: 0,
+                        context_warnings: Vec::new(),
+                    });
                 });
             }
         }
@@ -2971,9 +3132,21 @@ impl App {
                 self.status.hint = format!("{icon} {name}");
                 self.thinking_lines.push(format!("{icon} {name}"));
             }
-            StreamEvent::Finished { total_tokens } => {
+            StreamEvent::Finished {
+                total_tokens,
+                context_warnings,
+            } => {
                 self.thinking_lines.push("✓ turn finished".to_string());
                 self.commit_assistant_buffer();
+                // D-05: the turn's context warnings shown after the reply, like the gateway and web block.
+                if !context_warnings.is_empty() {
+                    let lines: Vec<String> =
+                        context_warnings.iter().map(|w| format!("- {w}")).collect();
+                    let text = format!("--- Context Warnings ---\n{}", lines.join("\n"));
+                    let mut msg = ChatMessage::user(&text);
+                    msg.role = Role::System;
+                    self.history.push(msg);
+                }
                 // D-08: snap-to-bottom safety net — defense-in-depth against future
                 // line-count drift. Cheap because reconcile_scroll runs every render tick anyway.
                 if self.auto_follow {
@@ -3287,16 +3460,11 @@ impl App {
             silence_duration_secs: config.voice.silence_duration,
         };
 
-        // Build SttRegistry and select a provider.
-        use ironhermes_tools::stt::{build_stt_registry, select_stt_provider};
-        let registry = build_stt_registry(&config.stt);
-        let provider_name = select_stt_provider(&config.stt);
-        let provider = provider_name.and_then(|name| registry.get(&name));
-
-        let Some(provider) = provider else {
+        // Phase 54.7 (D-19): shared selection + vault-aware registry.
+        let Some(provider) = crate::tui_rata::voice_reply::record_stt_provider(&config) else {
             // No provider available — push a warning into transcript display.
             tracing::warn!(
-                "handle_record_key: no STT provider available (set GROQ_API_KEY or VOICE_TOOLS_OPENAI_KEY)"
+                "handle_record_key: no STT provider available (set GROQ_API_KEY or VOICE_TOOLS_OPENAI_KEY, or stt.openai_compatible.base_url)"
             );
             return;
         };
@@ -4308,6 +4476,16 @@ impl App {
         Self::new(test_deps())
     }
 
+    /// Construct an empty App for session `session_id` (Phase 57 plan 13): the
+    /// process-wide DEFCON registry is keyed by session id, so a test that sets a
+    /// level needs a session id of its own rather than the shared `"test-session"`.
+    #[cfg(feature = "test-support")]
+    pub fn new_test_with_session(session_id: &str) -> Self {
+        let mut deps = test_deps();
+        deps.session_id = session_id.to_string();
+        Self::new(deps)
+    }
+
     /// Construct an App pre-seeded with `(role, body)` message pairs.
     /// Role strings: `"user"`, `"assistant"`, `"tool"`, `"system"`.
     #[cfg(feature = "test-support")]
@@ -4495,12 +4673,82 @@ fn assistant_message(body: String) -> ChatMessage {
 /// partial `Config` (would drop mcp_servers/kanban/identities/etc — see the
 /// `Config::load` -> mutate -> `.save()` precedent at
 /// `memory_cmd.rs::handle_memory_off`). Mutates ONLY `model.provider` /
-/// `model.default`; every other key round-trips untouched.
-fn persist_model_picker_selection(provider: &str, model: &str) -> anyhow::Result<()> {
+/// `model.default` plus `providers.<p>.default_model` for the target and, when
+/// it had none, the provider being left ([`record_switch`]); every other key
+/// round-trips untouched.
+fn persist_model_picker_selection(
+    outgoing: (&str, &str),
+    provider: &str,
+    model: &str,
+) -> anyhow::Result<()> {
     let mut config = ironhermes_core::Config::load()?;
+    record_switch(&mut config, outgoing, provider, model);
+    config.save()
+}
+
+/// The `default_model` slot of `provider`: its `custom_providers` entry when it
+/// is one, else its `providers` entry (created on demand).
+fn provider_default_model_slot<'a>(
+    config: &'a mut ironhermes_core::Config,
+    provider: &str,
+) -> &'a mut Option<String> {
+    if let Some(i) = config
+        .custom_providers
+        .iter()
+        .position(|c| c.name == provider)
+    {
+        return &mut config.custom_providers[i].default_model;
+    }
+    &mut config
+        .providers
+        .entry(provider.to_string())
+        .or_default()
+        .default_model
+}
+
+/// The `default_model` slot of `provider` when it already has a
+/// `custom_providers` or `providers` entry; never creates one.
+fn existing_default_model_slot<'a>(
+    config: &'a mut ironhermes_core::Config,
+    provider: &str,
+) -> Option<&'a mut Option<String>> {
+    if let Some(i) = config
+        .custom_providers
+        .iter()
+        .position(|c| c.name == provider)
+    {
+        return Some(&mut config.custom_providers[i].default_model);
+    }
+    config
+        .providers
+        .get_mut(provider)
+        .map(|p| &mut p.default_model)
+}
+
+/// Record a provider/model switch on `config`. A provider-level default_model
+/// outranks `model.default`, and `model.default` only reaches the main provider
+/// (provider.rs step 3b), so the target names its model and a provider being
+/// left with no model of its own is pinned to the one it was running. The pin
+/// only fills an EXISTING entry (WR-08): a provider with no entry falls back to
+/// its own built-in default, so creating one would just shadow later
+/// `model.default` edits.
+fn record_switch(
+    config: &mut ironhermes_core::Config,
+    outgoing: (&str, &str),
+    provider: &str,
+    model: &str,
+) {
+    let (out_provider, out_model) = outgoing;
+    if out_provider != provider
+        && !out_model.trim().is_empty()
+        && let Some(slot) = existing_default_model_slot(config, out_provider)
+        && slot.as_deref().is_none_or(|m| m.trim().is_empty())
+    {
+        *slot = Some(out_model.to_string());
+    }
     config.model.provider = provider.to_string();
     config.model.default = model.to_string();
-    config.save()
+    *provider_default_model_slot(config, provider) = Some(model.to_string());
 }
 
 /// Count the terminal rows that `line` occupies when rendered by ratatui's
@@ -4990,20 +5238,19 @@ fn test_message(role: &str, body: &str) -> ChatMessage {
 
 #[cfg(feature = "test-support")]
 fn test_deps() -> AppDeps {
-    use ironhermes_agent::{AgentRuntime, AnyClient};
+    use ironhermes_agent::AgentRuntime;
     use ironhermes_core::commands::registry::build_registry;
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_tools::ToolRegistry;
 
-    let test_client = AnyClient::ChatCompletions(ironhermes_agent::client::LlmClient::new(
-        "http://localhost:11434",
-        "test-key",
-        "test-model",
-    ));
     let test_registry = Arc::new(tokio::sync::RwLock::new(ToolRegistry::new()));
-    // ProviderResolver::build with default Config — uses built-in defaults, no env vars needed.
-    let test_resolver = ProviderResolver::build(&Config::default())
-        .expect("ProviderResolver::build with default Config must not fail in test context");
+    // Default Config with an empty models cache — built-in defaults, no env vars, and a
+    // developer's real models-cache.json (served ids) cannot change picker lists.
+    let test_resolver = ProviderResolver::build_with_cache(
+        &Config::default(),
+        ironhermes_core::models_cache::ModelsCache::default(),
+    )
+    .expect("ProviderResolver::build with default Config must not fail in test context");
     // PersonalityRegistry with no custom presets (built-ins always available).
     let test_personality = Arc::new(PersonalityRegistry::load(
         &std::collections::HashMap::new(),
@@ -5028,7 +5275,6 @@ fn test_deps() -> AppDeps {
             .join(format!("tui_rata_hist_{}.txt", std::process::id())),
         status_initial: StatusLineState::default(),
         cancel_parent: CancellationToken::new(),
-        client: test_client,
         registry: test_registry,
         browser_session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         mouse_capture_enabled: Arc::new(AtomicBool::new(true)),
@@ -5038,7 +5284,6 @@ fn test_deps() -> AppDeps {
         context_compressor: None,
         personality_overlay: test_personality,
         // Phase 22.4.2 Plan 00: D-09 toggle Arcs
-        yolo_enabled: Arc::new(AtomicBool::new(false)),
         verbose_enabled: Arc::new(AtomicBool::new(false)),
         statusbar_enabled: Arc::new(AtomicBool::new(true)),
         debug_enabled: Arc::new(AtomicBool::new(false)),
@@ -5073,6 +5318,21 @@ fn test_deps() -> AppDeps {
         // pattern). Never `from_query_stdio()` in a test context.
         picker: ratatui_image::picker::Picker::halfblocks(),
     }
+}
+
+/// Phase 58.3.1 D-05: stream a /goal turn's `context_warnings` into the goal output.
+fn goal_turn_notice(
+    result: &ironhermes_agent::AgentResult,
+    render_tx: &UnboundedSender<StreamEvent>,
+) {
+    if result.context_warnings.is_empty() {
+        return;
+    }
+    let mut block = String::from("\n--- Context Warnings ---\n");
+    for w in &result.context_warnings {
+        block.push_str(&format!("- {w}\n"));
+    }
+    let _ = render_tx.send(StreamEvent::Delta(block));
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -5196,11 +5456,68 @@ mod scroll_tests {
         app.pending_rx = Some(rx);
         app.pending_tx = Some(tx);
         app.assistant_buffer = Some("response text".to_string());
-        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+        app.handle_stream_event(StreamEvent::Finished {
+            total_tokens: 0,
+            context_warnings: Vec::new(),
+        });
         assert!(app.pending_rx.is_none());
         assert!(app.assistant_buffer.is_none());
         assert_eq!(app.history.len(), 1);
         assert_eq!(app.history[0].role, Role::Assistant);
+    }
+
+    const TEST_NOTICE: &str =
+        "Small context window (32000 tokens): this session uses the compact profile";
+
+    /// Phase 58.3.1 D-05 (WR-03): a turn's context warnings show as one System line
+    /// right after the reply; a turn without warnings adds none.
+    #[test]
+    fn finished_event_shows_context_warnings_as_system_line() {
+        let mut app = App::new_test_empty();
+        app.handle_stream_event(StreamEvent::Started);
+        app.handle_stream_event(StreamEvent::Delta("reply text".to_string()));
+        app.handle_stream_event(StreamEvent::Finished {
+            total_tokens: 0,
+            context_warnings: vec![TEST_NOTICE.to_string()],
+        });
+        assert_eq!(app.history.len(), 2);
+        assert_eq!(app.history[0].role, Role::Assistant);
+        assert_eq!(app.history[0].content_text(), Some("reply text"));
+        assert_eq!(app.history[1].role, Role::System);
+        assert_eq!(
+            app.history[1].content_text(),
+            Some(format!("--- Context Warnings ---\n- {TEST_NOTICE}").as_str())
+        );
+
+        app.handle_stream_event(StreamEvent::Started);
+        app.handle_stream_event(StreamEvent::Delta("again".to_string()));
+        app.handle_stream_event(StreamEvent::Finished {
+            total_tokens: 0,
+            context_warnings: Vec::new(),
+        });
+        assert_eq!(app.history.len(), 3);
+        assert_eq!(app.history[2].role, Role::Assistant);
+    }
+
+    /// Phase 58.3.1 D-05 (WR-03): a /goal turn streams its warnings into the goal output.
+    #[test]
+    fn goal_turn_notice_streams_context_warnings() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+        let mut r = ironhermes_agent::AgentResult::budget_exhausted(Vec::new(), 0);
+        r.context_warnings = vec![TEST_NOTICE.to_string()];
+        goal_turn_notice(&r, &tx);
+        match rx.try_recv() {
+            Ok(StreamEvent::Delta(d)) => {
+                assert!(d.contains("--- Context Warnings ---"), "{d}");
+                assert!(d.contains(&format!("- {TEST_NOTICE}")), "{d}");
+            }
+            other => panic!("expected one Delta, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "exactly one event expected");
+
+        r.context_warnings.clear();
+        goal_turn_notice(&r, &tx);
+        assert!(rx.try_recv().is_err(), "no warnings, no event");
     }
 
     // — KeyEvent handlers ────────────────────────────────────────────────────
@@ -5871,8 +6188,8 @@ mod scroll_tests {
     }
 
     /// D-06/D-07: selecting a model at step 2 hot-swaps the LIVE session via
-    /// the same `ironhermes_agent::build_client` path `/model <name>` uses —
-    /// `app.client` reflects the applied model after Enter.
+    /// the same `App::apply_model_switch` path `/model <name>` uses — the
+    /// runtime's resolver reflects the applied model after Enter.
     #[test]
     fn model_picker_apply_hotswaps_session() {
         // Isolate IRONHERMES_HOME: a successful apply also persists to
@@ -5904,10 +6221,14 @@ mod scroll_tests {
             "a successful apply must close the overlay"
         );
         assert_eq!(
-            app.client.model(),
+            app.agent_runtime
+                .resolver()
+                .resolve_for_main()
+                .default_model,
             expected_model,
-            "the live AnyClient must reflect the applied model (hot-swap)"
+            "the runtime every turn reads must reflect the applied model (hot-swap)"
         );
+        assert_eq!(app.resolver.main_provider(), "anthropic");
     }
 
     /// D-11: selecting provider+model persists to `config.yaml` via
@@ -6020,6 +6341,444 @@ mod scroll_tests {
         );
     }
 
+    // — Phase 58.3.1 plan 11 (G-58.3.1-6): TUI model switch re-resolves the runtime —
+
+    /// Seed `app` (runtime AND `app.resolver`) with a config whose main provider
+    /// `local` serves `small-model` (8192) and `big-model` (200000) via per-model
+    /// window overrides; an optional `fast` role points at `big-model`.
+    async fn seed_local_switch_fixture(app: &mut App, with_fast_role: bool) {
+        use ironhermes_core::config::{ModelRoleConfig, ProviderConfig};
+        use ironhermes_core::config_extras::ProviderModelConfig;
+        let window = |n: usize| ProviderModelConfig {
+            context_length: Some(n),
+            ..Default::default()
+        };
+        let mut cfg = ironhermes_core::Config::default();
+        cfg.model.provider = "local".to_string();
+        cfg.model.default = "small-model".to_string();
+        cfg.providers.insert(
+            "local".to_string(),
+            ProviderConfig {
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                default_model: Some("small-model".to_string()),
+                models: [
+                    ("small-model".to_string(), window(8192)),
+                    ("big-model".to_string(), window(200_000)),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        );
+        if with_fast_role {
+            cfg.model.roles.insert(
+                "fast".to_string(),
+                ModelRoleConfig {
+                    provider: "local".to_string(),
+                    model: Some("big-model".to_string()),
+                },
+            );
+        }
+        let resolver =
+            ironhermes_core::ProviderResolver::build(&cfg).expect("seed resolver must build");
+        app.agent_runtime
+            .reload_config_and_resolver(Arc::new(cfg), Arc::new(resolver.clone()))
+            .await
+            .expect("seed: runtime reload must succeed");
+        app.resolver = resolver;
+    }
+
+    /// (model, window, source word) the NEXT turn would use, read from the runtime.
+    fn runtime_main(app: &App) -> (String, usize, &'static str) {
+        let resolver = app.agent_runtime.resolver();
+        let ep = resolver.resolve_for_main();
+        let (n, src) = ep.context_length_with_source();
+        (ep.default_model.clone(), n, src.label())
+    }
+
+    async fn slash_text(app: &mut App, input: &str) -> String {
+        match crate::tui_rata::commands::dispatch_slash(app, input).await {
+            crate::tui_rata::commands::SlashOutcome::Handled(t) => t,
+            crate::tui_rata::commands::SlashOutcome::Error(e) => panic!("{input} errored: {e}"),
+            _ => String::new(),
+        }
+    }
+
+    /// D-12: `/fast` ON/OFF switches the runtime's model through the same path.
+    #[tokio::test]
+    async fn tui_fast_toggle_switches_runtime_model() {
+        let mut app = App::new_test_empty();
+        seed_local_switch_fixture(&mut app, true).await;
+
+        let on = slash_text(&mut app, "/fast").await;
+        assert!(
+            on.starts_with("Fast mode ON — model big-model"),
+            "got: {on}"
+        );
+        assert_eq!(
+            runtime_main(&app),
+            ("big-model".to_string(), 200_000, "override"),
+            "/fast ON must switch the runtime to the fast role's model"
+        );
+        assert_eq!(app.status.model_short, "big-model");
+
+        let off = slash_text(&mut app, "/fast").await;
+        assert!(
+            off.starts_with("Fast mode OFF — restored to small-model"),
+            "got: {off}"
+        );
+        assert_eq!(
+            runtime_main(&app),
+            ("small-model".to_string(), 8192, "override"),
+            "/fast OFF must restore the previous model"
+        );
+        assert_eq!(app.status.tokens_limit, 8192);
+    }
+
+    /// D-12/D-13: `/model` in the TUI swaps the RUNTIME's resolver and client
+    /// (what every turn reads), then `/usage` and the status line follow.
+    #[tokio::test]
+    async fn tui_model_switch_reresolves_runtime_window() {
+        let mut app = App::new_test_empty();
+        seed_local_switch_fixture(&mut app, false).await;
+        assert_eq!(
+            runtime_main(&app),
+            ("small-model".to_string(), 8192, "override")
+        );
+
+        let _ = slash_text(&mut app, "/model big-model").await;
+        assert_eq!(
+            runtime_main(&app),
+            ("big-model".to_string(), 200_000, "override"),
+            "the runtime resolver must follow /model"
+        );
+        assert_eq!(app.resolver.resolve_for_main().default_model, "big-model");
+        assert_eq!(app.status.model_short, "big-model");
+        assert_eq!(app.status.tokens_limit, 200_000);
+        let usage = slash_text(&mut app, "/usage").await;
+        assert!(
+            usage.contains("Context window: 200,000 tokens (override)"),
+            "/usage must report the new window, got: {usage}"
+        );
+
+        let _ = slash_text(&mut app, "/model small-model").await;
+        assert_eq!(
+            runtime_main(&app),
+            ("small-model".to_string(), 8192, "override")
+        );
+        assert_eq!(app.status.model_short, "small-model");
+        assert_eq!(app.status.tokens_limit, 8192);
+        let usage = slash_text(&mut app, "/usage").await;
+        assert!(
+            usage.contains("Context window: 8,192 tokens (override)"),
+            "got: {usage}"
+        );
+    }
+
+    // — Phase 58.3.1 plan 15 (G-58.3.1-10): a switch never runs or persists a blank model —
+
+    /// Points IRONHERMES_HOME at a tempdir for the test body and restores it on drop.
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn new(home: &std::path::Path) -> Self {
+            let prior = std::env::var_os("IRONHERMES_HOME");
+            // SAFETY: callers hold crate::test_env_lock for the whole test; restored on drop.
+            unsafe { std::env::set_var("IRONHERMES_HOME", home) };
+            Self(prior)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: still under the caller's crate::test_env_lock guard (declared earlier).
+            match &self.0 {
+                Some(v) => unsafe { std::env::set_var("IRONHERMES_HOME", v) },
+                None => unsafe { std::env::remove_var("IRONHERMES_HOME") },
+            }
+        }
+    }
+
+    fn null_default_fixture_config(main: &str, main_model: &str) -> ironhermes_core::Config {
+        use ironhermes_core::config::ProviderConfig;
+        let mut cfg = ironhermes_core::Config::default();
+        cfg.model.provider = main.to_string();
+        cfg.model.default = main_model.to_string();
+        cfg.providers.insert(
+            "unsloth-mac-local".to_string(),
+            ProviderConfig {
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                default_model: None,
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "local".to_string(),
+            ProviderConfig {
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                default_model: Some("big-model".to_string()),
+                ..Default::default()
+            },
+        );
+        cfg
+    }
+
+    async fn seed_runtime_from(app: &mut App, cfg: &ironhermes_core::Config) {
+        let resolver = ironhermes_core::ProviderResolver::build(cfg).expect("seed resolver builds");
+        app.agent_runtime
+            .reload_config_and_resolver(Arc::new(cfg.clone()), Arc::new(resolver.clone()))
+            .await
+            .expect("seed: runtime reload");
+        app.resolver = resolver;
+    }
+
+    fn select_provider_row(app: &mut App, name: &str) {
+        let rows = crate::tui_rata::overlay::model_picker_providers_filtered(app);
+        app.model_picker_selected = rows
+            .iter()
+            .position(|r| r.name == name)
+            .unwrap_or_else(|| panic!("provider row {name} missing"));
+    }
+
+    /// G-58.3.1-10 / D-12: the UAT round trip. Leave a null-default local provider
+    /// (it was running on model.default) for another provider, then come back.
+    #[test]
+    fn tui_switch_back_to_null_default_provider_restores_its_model() {
+        let _lock = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = HomeGuard::new(home.path());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let cfg = null_default_fixture_config("unsloth-mac-local", "unsloth/flint-GGUF");
+            cfg.save().expect("config saves to the temp home");
+            let mut app = App::new_test_empty();
+            seed_runtime_from(&mut app, &cfg).await;
+            assert_eq!(runtime_main(&app).0, "unsloth/flint-GGUF");
+
+            app.active_overlay = Some(OverlayKind::ModelPicker {
+                step: PickerStep::ProviderOnly,
+                selected_provider: None,
+            });
+            select_provider_row(&mut app, "local");
+            app.handle_key(enter_key());
+            assert_eq!(runtime_main(&app).0, "big-model");
+
+            app.active_overlay = Some(OverlayKind::ModelPicker {
+                step: PickerStep::ProviderOnly,
+                selected_provider: None,
+            });
+            select_provider_row(&mut app, "unsloth-mac-local");
+            app.handle_key(enter_key());
+            assert_eq!(
+                runtime_main(&app).0,
+                "unsloth/flint-GGUF",
+                "switching back must restore the model the provider was running"
+            );
+            assert_eq!(app.resolver.main_provider(), "unsloth-mac-local");
+
+            let saved = ironhermes_core::Config::load().expect("config reloads");
+            assert_eq!(saved.model.provider, "unsloth-mac-local");
+            assert_eq!(saved.model.default, "unsloth/flint-GGUF");
+            assert_eq!(
+                saved.providers["unsloth-mac-local"]
+                    .default_model
+                    .as_deref(),
+                Some("unsloth/flint-GGUF")
+            );
+            assert_eq!(
+                saved.providers["local"].default_model.as_deref(),
+                Some("big-model")
+            );
+        });
+    }
+
+    /// WR-08: with `/fast` ON the live model is the transient fast one. A picker
+    /// switch away pins the provider being left to its PRE-fast model, not the
+    /// fast one, and ends fast mode so `/fast` OFF cannot undo the pick.
+    #[test]
+    fn picker_switch_during_fast_mode_pins_the_pre_fast_model() {
+        let _lock = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = HomeGuard::new(home.path());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let cfg = null_default_fixture_config("unsloth-mac-local", "unsloth/flint-GGUF");
+            cfg.save().expect("config saves to the temp home");
+            let mut app = App::new_test_empty();
+            seed_runtime_from(&mut app, &cfg).await;
+
+            // What `/fast` ON leaves behind: a transient live model plus the restore.
+            app.apply_model_switch("unsloth-mac-local", "fast-model")
+                .expect("fast switch applies");
+            app.fast_restore = Some((
+                "unsloth-mac-local".to_string(),
+                "unsloth/flint-GGUF".to_string(),
+            ));
+            assert_eq!(runtime_main(&app).0, "fast-model");
+
+            app.active_overlay = Some(OverlayKind::ModelPicker {
+                step: PickerStep::ProviderOnly,
+                selected_provider: None,
+            });
+            select_provider_row(&mut app, "local");
+            app.handle_key(enter_key());
+            assert_eq!(runtime_main(&app).0, "big-model");
+            assert_eq!(app.fast_restore, None, "an explicit pick ends fast mode");
+
+            let saved = ironhermes_core::Config::load().expect("config reloads");
+            assert_eq!(
+                saved.providers["unsloth-mac-local"]
+                    .default_model
+                    .as_deref(),
+                Some("unsloth/flint-GGUF"),
+                "the fast model must never be persisted as the provider's default"
+            );
+        });
+    }
+
+    /// WR-08: the outgoing pin only fills an EXISTING entry. A provider with no
+    /// entry keeps resolving its built-in default, so no entry is created that
+    /// would shadow later `model.default` edits.
+    #[test]
+    fn record_switch_never_creates_an_entry_for_the_provider_being_left() {
+        let mut config = ironhermes_core::Config::default();
+        config.model.provider = "openrouter".to_string();
+        config.model.default = "some/model".to_string();
+        record_switch(
+            &mut config,
+            ("openrouter", "some/model"),
+            "local",
+            "big-model",
+        );
+        assert!(!config.providers.contains_key("openrouter"));
+        assert_eq!(config.model.provider, "local");
+        assert_eq!(
+            config.providers["local"].default_model.as_deref(),
+            Some("big-model")
+        );
+    }
+
+    /// D-12 no half-swap: a blank model is refused before anything changes, and
+    /// `/provider` on a provider with no default model opens its model list.
+    #[test]
+    fn tui_switch_refuses_empty_model_and_keeps_prior_state() {
+        let _lock = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = HomeGuard::new(home.path());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let cfg = null_default_fixture_config("local", "big-model");
+            cfg.save().expect("config saves to the temp home");
+            let mut app = App::new_test_empty();
+            seed_runtime_from(&mut app, &cfg).await;
+            let status_before = app.status.model_short.clone();
+
+            app.active_overlay = Some(OverlayKind::ModelPicker {
+                step: PickerStep::ProviderOnly,
+                selected_provider: None,
+            });
+            select_provider_row(&mut app, "unsloth-mac-local");
+            app.handle_key(enter_key());
+            assert_eq!(
+                app.active_overlay,
+                Some(OverlayKind::ModelPicker {
+                    step: PickerStep::Model,
+                    selected_provider: Some("unsloth-mac-local".to_string()),
+                }),
+                "a provider with no default model must open step 2, not switch to \"\""
+            );
+            assert_eq!(runtime_main(&app).0, "big-model");
+            assert_eq!(
+                app.status.model_short, status_before,
+                "status line untouched"
+            );
+
+            for blank in ["", "   "] {
+                let err = app
+                    .apply_model_switch("unsloth-mac-local", blank)
+                    .expect_err("a blank model must be refused");
+                assert!(err.to_string().contains("unsloth-mac-local"), "got: {err}");
+                assert_eq!(runtime_main(&app).0, "big-model");
+                assert_eq!(app.resolver.main_provider(), "local");
+            }
+
+            let listed =
+                crate::tui_rata::overlay::model_picker_models_filtered(&app, "unsloth-mac-local");
+            assert!(!listed.iter().any(|m| m.is_empty()), "got: {listed:?}");
+        });
+    }
+
+    /// G-58.3.1-10: switching to an id the provider did not serve at the last
+    /// `/models refresh` still switches, and says which ids it did serve.
+    #[test]
+    fn tui_model_switch_warns_when_id_not_served() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _lock = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = HomeGuard::new(home.path());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/models"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{"id": "unsloth/flint-GGUF", "context_length": 8192}]
+                })))
+                .mount(&server)
+                .await;
+
+            let mut cfg = ironhermes_core::Config::default();
+            cfg.model.provider = "unsloth-mac-local".to_string();
+            cfg.model.default = "unsloth/flint-GGUF".to_string();
+            cfg.providers.insert(
+                "unsloth-mac-local".to_string(),
+                ironhermes_core::config::ProviderConfig {
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    default_model: Some("unsloth/flint-GGUF".to_string()),
+                    ..Default::default()
+                },
+            );
+            cfg.save().expect("config saves to the temp home");
+
+            // Produce the served list through the same path `/models refresh` uses.
+            let probes = ironhermes_core::models_cache::probe_configured_providers(
+                &cfg,
+                &mut std::collections::HashMap::new(),
+            )
+            .await;
+            let mut cache = ironhermes_core::models_cache::ModelsCache::load();
+            cache.record_served_ids(&probes);
+            cache.save().expect("cache saves to the temp home");
+
+            let mut app = App::new_test_empty();
+            seed_runtime_from(&mut app, &cfg).await;
+
+            let text = slash_text(&mut app, "/model flint-GGUF:UD-Q3_K_XL").await;
+            assert!(
+                text.contains("may reject") && text.contains("unsloth/flint-GGUF"),
+                "got: {text}"
+            );
+            assert_eq!(runtime_main(&app).0, "flint-GGUF:UD-Q3_K_XL");
+
+            let text = slash_text(&mut app, "/model unsloth/flint-GGUF").await;
+            assert!(!text.contains("may reject"), "got: {text}");
+        });
+    }
+
     // — Phase 21.8.3 RED tests — line-count parity, snap-on-Finished, submit helper, End key ──
 
     #[test]
@@ -6065,7 +6824,10 @@ mod scroll_tests {
         app.handle_stream_event(StreamEvent::Delta("some text".to_string()));
         // Simulate user re-engaging auto_follow before stream finishes
         app.auto_follow = true;
-        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
+        app.handle_stream_event(StreamEvent::Finished {
+            total_tokens: 0,
+            context_warnings: Vec::new(),
+        });
         assert_eq!(
             app.transcript_scroll(), 0,
             "Finished with auto_follow=true must call scroll_to_bottom() which zeros transcript_scroll"
@@ -8468,7 +9230,7 @@ mod chip_click_vs_rendered_frame_tests {
 
         let mut app = App::new_test_empty();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone(), Arc::new(AtomicBool::new(false)));
+        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone());
 
         // Spawn the blocked tool call awaiting the gate decision (real gate).
         let handle = tokio::spawn(async move {
@@ -8653,7 +9415,7 @@ mod chip_click_vs_rendered_frame_tests {
 
         let mut app = App::new_test_empty();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone(), Arc::new(AtomicBool::new(false)));
+        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone());
 
         // Open the Skills Hub via the real Ctrl+K path — an unrelated overlay
         // is active when the approval request arrives.
@@ -8726,7 +9488,7 @@ mod chip_click_vs_rendered_frame_tests {
 
         let mut app = App::new_test_empty();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone(), Arc::new(AtomicBool::new(false)));
+        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone());
 
         app.handle_key(ap_ctrl(crossterm::event::KeyCode::Char('k')));
         assert!(matches!(app.active_overlay, Some(OverlayKind::SkillsHub)));

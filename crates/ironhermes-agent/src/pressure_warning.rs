@@ -39,6 +39,8 @@ struct SessionState {
     /// `AgentResult.context_warnings` at run() end so the surfaces (CLI / TUI
     /// / gateway / web UI) can render them on the existing Phase 34b channel.
     pending_cache_break_warnings: Vec<String>,
+    /// Phase 58.3.1 D-05: the compact-profile notice has been shown this session.
+    compact_notice_shown: bool,
 }
 
 /// Thread-safe per-session pressure tracker.
@@ -297,6 +299,19 @@ impl PressureTracker {
         map.get_mut(session_id)
             .map(|s| std::mem::take(&mut s.pending_cache_break_warnings))
             .unwrap_or_default()
+    }
+
+    /// Phase 58.3.1 D-05: true only the first time it is called for a session, so the
+    /// compact-profile notice is shown once per session, not every turn.
+    pub fn mark_compact_notice(&self, session_id: &str) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        !std::mem::replace(
+            &mut map
+                .entry(session_id.to_string())
+                .or_default()
+                .compact_notice_shown,
+            true,
+        )
     }
 }
 

@@ -91,8 +91,10 @@ impl ironhermes_tools::AudioDispatcher for WebAudioDispatcher {
             .unwrap_or("unknown")
             .to_string();
 
+        // Phase 54.7 D-09: the MIME follows the file extension (mp3 audio/mpeg,
+        // opus audio/ogg, wav audio/wav) so the browser decodes what it receives.
         let event = ChatStreamEvent::AudioOut {
-            mime: "audio/mpeg".to_string(),
+            mime: ironhermes_tools::tts::audio_format::mime_for_path(path).to_string(),
             uuid,
             bytes,
         };
@@ -156,6 +158,35 @@ mod tests {
                 );
             }
             other => panic!("Expected ChatStreamEvent::AudioOut, got {other:?}"),
+        }
+    }
+
+    /// Phase 54.7 D-09: the AudioOut MIME follows the file extension
+    /// (mp3 audio/mpeg, opus audio/ogg, wav audio/wav), never a fixed value.
+    #[tokio::test]
+    async fn dispatcher_mime_follows_extension() {
+        for (ext, expected_mime) in [
+            ("mp3", "audio/mpeg"),
+            ("opus", "audio/ogg"),
+            ("wav", "audio/wav"),
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+            let temp_dir = TempDir::new().expect("create temp dir");
+            let file = temp_dir.path().join(format!("clip-{ext}.{ext}"));
+            std::fs::write(&file, [1u8, 2, 3, 4]).expect("write audio file");
+
+            let dispatcher = WebAudioDispatcher::new(tx, temp_dir.path().to_path_buf());
+            dispatcher
+                .send_audio_file("session", &file, None)
+                .await
+                .expect("send_audio_file");
+
+            match rx.recv().await.expect("must receive AudioOut event") {
+                ChatStreamEvent::AudioOut { mime, .. } => {
+                    assert_eq!(mime, expected_mime, "mime for .{ext}");
+                }
+                other => panic!("Expected ChatStreamEvent::AudioOut, got {other:?}"),
+            }
         }
     }
 }

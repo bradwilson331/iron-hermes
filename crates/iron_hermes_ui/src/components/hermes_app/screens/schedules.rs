@@ -523,6 +523,12 @@ pub fn ScreenSchedules(is_active: bool) -> Element {
     // signal instead.
     let mut list_error: Signal<Option<String>> = use_signal(|| None);
     let mut retrying = use_signal(|| false);
+    // Phase 54.10 Plan 04 (D-19): the selected job (`selection_key`) and the
+    // HISTORY panel's open flag. The button's MountedData is kept so closing
+    // the panel can return focus to it.
+    let mut selected_job: Signal<Option<String>> = use_signal(|| None);
+    let mut history_open = use_signal(|| false);
+    let mut history_btn: Signal<Option<std::rc::Rc<MountedData>>> = use_signal(|| None);
     {
         let loaded = match schedules_resource() {
             Some(Ok(ref view)) => Some(view.clone()),
@@ -810,6 +816,18 @@ pub fn ScreenSchedules(is_active: bool) -> Element {
     let tz_name_for_save = tz_name_val.clone();
     let tz_name_for_edit = tz_name_val.clone();
 
+    let selected_val = selected_job.read().clone();
+    let history_open_val = *history_open.read();
+    let mut close_history = move |_: ()| {
+        history_open.set(false);
+        let btn = history_btn.peek().clone();
+        if let Some(btn) = btn {
+            spawn(async move {
+                let _ = btn.set_focus(true).await;
+            });
+        }
+    };
+
     rsx! {
         section {
             class: "screen",
@@ -823,7 +841,17 @@ pub fn ScreenSchedules(is_active: bool) -> Element {
                     h1 { class: "screen-title", "Cron Schedules" }
                 }
                 div { class: "screen-actions",
-                    button { class: "btn btn--ghost btn--sm", "⏵ HISTORY" }
+                    HistoryButton {
+                        has_selection: selected_val.is_some(),
+                        onclick: move |_| {
+                            if *history_open.peek() {
+                                close_history(());
+                            } else {
+                                history_open.set(true);
+                            }
+                        },
+                        onmounted: move |m| history_btn.set(Some(m)),
+                    }
                     button {
                         class: "btn btn--sm",
                         onclick: move |_| {
@@ -872,6 +900,16 @@ pub fn ScreenSchedules(is_active: bool) -> Element {
                                 }
                             });
                         },
+                    }
+                }
+            }
+
+            if history_open_val {
+                if let Some(key) = selected_val.clone() {
+                    LastRunView {
+                        selected_key: key,
+                        rows: schedule_list.clone(),
+                        on_close: close_history,
                     }
                 }
             }
@@ -1657,6 +1695,8 @@ pub fn ScreenSchedules(is_active: bool) -> Element {
                         ScheduleRowView {
                             key: "{row.id}",
                             schedule: row.clone(),
+                            selected: selected_val.as_deref() == Some(selection_key(row).as_str()),
+                            on_select: move |k: String| selected_job.set(Some(k)),
                             on_edit: move |r: ScheduleRow| {
                                 editor_is_new.set(false);
                                 editor_current_row.set(Some(r.clone()));
@@ -2363,9 +2403,154 @@ fn SaveBlueprintDialog(
     }
 }
 
+/// Phase 54.10 Plan 04 (D-19): outcome of a job's last run, derived only from
+/// `ScheduleRow::last_run_failed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LastRunStatus {
+    Ok,
+    Failed,
+    NeverRun,
+}
+
+pub(crate) fn last_run_status(row: &ScheduleRow) -> LastRunStatus {
+    match row.last_run_failed {
+        Some(true) => LastRunStatus::Failed,
+        Some(false) => LastRunStatus::Ok,
+        None => LastRunStatus::NeverRun,
+    }
+}
+
+/// Selection key: the aggregate scope can list the same job id under several
+/// profiles, so the profile is part of the key.
+fn selection_key(row: &ScheduleRow) -> String {
+    format!("{}:{}", row.profile, row.id)
+}
+
+const LAST_RUN_FOOTNOTE: &str = "Showing the last run only. Run history is not recorded yet.";
+
+/// The header `HISTORY` button. A component (not inline rsx) so its disabled
+/// state is SSR-testable. The label is locked.
+#[component]
+fn HistoryButton(
+    has_selection: bool,
+    onclick: EventHandler<()>,
+    onmounted: EventHandler<std::rc::Rc<MountedData>>,
+) -> Element {
+    rsx! {
+        button {
+            class: "btn btn--ghost btn--sm",
+            disabled: !has_selection,
+            title: if has_selection { "Shows the last run of the selected job." } else { "Select a job first." },
+            onmounted: move |e| onmounted.call(e.data()),
+            onclick: move |_| onclick.call(()),
+            "⏵ HISTORY"
+        }
+    }
+}
+
+/// Looks the selected job up in the current rows; a selection that vanished
+/// after a refresh degrades to an honest message instead of a stale panel.
+#[component]
+fn LastRunView(
+    selected_key: String,
+    rows: Vec<ScheduleRow>,
+    on_close: EventHandler<()>,
+) -> Element {
+    match rows.into_iter().find(|r| selection_key(r) == selected_key) {
+        Some(row) => rsx! { LastRunPanel { row, on_close } },
+        None => rsx! {
+            div {
+                class: "panel sched-lastrun",
+                tabindex: "-1",
+                onkeydown: move |e| {
+                    if e.key() == Key::Escape {
+                        on_close.call(());
+                    }
+                },
+                onmounted: move |e| async move {
+                    let _ = e.data().set_focus(true).await;
+                },
+                div { class: "sched-lastrun-head",
+                    div { class: "panel-title", "Last run" }
+                    button {
+                        class: "btn btn--ghost btn--sm",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+                div { class: "panel-sub", "Could not load this job: job is no longer listed." }
+            }
+        },
+    }
+}
+
+/// D-19: inline last-run detail of the selected job, built only from fields
+/// `ScheduleRow` already carries. `last_error` is rendered as a text node
+/// (escaped) — it can hold arbitrary job/tool output (T-54.10-14).
+#[component]
+fn LastRunPanel(row: ScheduleRow, on_close: EventHandler<()>) -> Element {
+    let status = last_run_status(&row);
+    let (pill_class, pill_text) = match status {
+        LastRunStatus::Ok => ("pill green", "OK"),
+        LastRunStatus::Failed => ("pill red", "FAILED"),
+        LastRunStatus::NeverRun => ("pill ended", "NEVER RUN"),
+    };
+    let last_run_text = match status {
+        LastRunStatus::NeverRun => "This job has not run yet.".to_string(),
+        _ => row.last_run_at.clone().unwrap_or_else(|| "—".to_string()),
+    };
+    // `last_error` is not cleared by a later success in the store, so it is
+    // only shown when the last run actually failed.
+    let error_text = (status == LastRunStatus::Failed).then(|| {
+        row.last_error
+            .clone()
+            .unwrap_or_else(|| "No error text was recorded.".to_string())
+    });
+
+    rsx! {
+        div {
+            class: "panel sched-lastrun",
+            tabindex: "-1",
+            onkeydown: move |e| {
+                if e.key() == Key::Escape {
+                    on_close.call(());
+                }
+            },
+            onmounted: move |e| async move {
+                let _ = e.data().set_focus(true).await;
+            },
+            div { class: "sched-lastrun-head",
+                div { class: "panel-title", "Last run: {row.name}" }
+                button {
+                    class: "btn btn--ghost btn--sm",
+                    onclick: move |_| on_close.call(()),
+                    "Close"
+                }
+            }
+            div { class: "panel-sub", "{LAST_RUN_FOOTNOTE}" }
+            dl { class: "sched-lastrun-list",
+                dt { "Status" }
+                dd { span { class: "{pill_class}", "{pill_text}" } }
+                dt { "Last run" }
+                dd { "{last_run_text}" }
+                if let Some(err) = error_text {
+                    dt { "Error" }
+                    dd { class: "sched-lastrun-error", "{err}" }
+                }
+                dt { "Schedule" }
+                dd { "{row.schedule_display}" }
+            }
+        }
+    }
+}
+
 #[component]
 fn ScheduleRowView(
     schedule: ScheduleRow,
+    /// Phase 54.10 Plan 04 (D-19): whether this row is the selected job, and
+    /// the handler that selects it (payload: the row's `selection_key`).
+    selected: bool,
+    on_select: EventHandler<String>,
     on_edit: EventHandler<ScheduleRow>,
     on_delete: EventHandler<ScheduleRow>,
     /// Phase 49.6 Plan 04 (D-15): opens the shared `SaveBlueprintDialog`
@@ -2387,6 +2572,7 @@ fn ScheduleRowView(
     let toggling_val = *toggling.read();
     let running_val = *running.read();
 
+    let select_key = selection_key(&schedule);
     let row_for_edit = schedule.clone();
     let row_for_delete = schedule.clone();
     let row_for_blueprint = schedule.clone();
@@ -2441,9 +2627,28 @@ fn ScheduleRowView(
         div {
             class: "sched-row",
             class: if !schedule.is_valid { "is-invalid" },
+            class: if selected { "is-active" },
+            role: "row",
+            "aria-selected": "{selected}",
             "aria-label": if is_non_root_row { "{NON_ROOT_SENTENCE}" },
             span { style: if schedule.enabled { "color:var(--green);" } else { "color:var(--amber);" }, "●" }
-            div { class: "row-main",
+            // D-19: the row's main area selects the job (pointer or Enter /
+            // Space); the action buttons keep their own handlers.
+            div {
+                class: "row-main",
+                tabindex: "0",
+                onclick: {
+                    let key = select_key.clone();
+                    move |_| on_select.call(key.clone())
+                },
+                onkeydown: move |e| {
+                    if matches!(e.key(), Key::Enter)
+                        || matches!(e.key(), Key::Character(ref c) if c == " ")
+                    {
+                        e.prevent_default();
+                        on_select.call(select_key.clone());
+                    }
+                },
                 span { class: "row-title", "{schedule.name}" }
                 span { class: "row-sub", "—" }
             }
@@ -2642,5 +2847,144 @@ mod editor_prefill_tests {
     #[test]
     fn display_schedule_text_falls_through_to_humanize_for_non_weekly_shapes() {
         assert_eq!(display_schedule_text("every 30m"), "every 30 min");
+    }
+}
+
+/// Phase 54.10 Plan 04 (D-19): the Schedules `HISTORY` last-run view.
+#[cfg(test)]
+mod last_run_tests {
+    use super::*;
+
+    fn row(failed: Option<bool>, error: Option<&str>) -> ScheduleRow {
+        ScheduleRow {
+            id: "job-1".into(),
+            name: "Nightly digest".into(),
+            schedule_display: "0 9 * * *".into(),
+            schedule_raw: "0 9 * * *".into(),
+            prompt: String::new(),
+            deliver: String::new(),
+            last_run_at: failed.map(|_| "2026-10-30 09:00 UTC".to_string()),
+            next_run_at: None,
+            enabled: true,
+            is_valid: true,
+            last_run_at_raw: None,
+            last_run_failed: failed,
+            last_error: error.map(str::to_string),
+            next_run_at_raw: None,
+            skills: Vec::new(),
+            provider: None,
+            model: None,
+            base_url: None,
+            script: None,
+            workdir: None,
+            no_agent: false,
+            context_from: None,
+            enabled_toolsets: None,
+            continuity: false,
+            profile: "default".into(),
+        }
+    }
+
+    fn render_panel(r: ScheduleRow) -> String {
+        fn app(r: ScheduleRow) -> Element {
+            rsx! { LastRunPanel { row: r, on_close: |_| {} } }
+        }
+        let mut dom = VirtualDom::new_with_props(app, r);
+        dom.rebuild_in_place();
+        dioxus::ssr::render(&dom)
+    }
+
+    fn render_view(key: &str, rows: Vec<ScheduleRow>) -> String {
+        fn app((key, rows): (String, Vec<ScheduleRow>)) -> Element {
+            rsx! { LastRunView { selected_key: key, rows, on_close: |_| {} } }
+        }
+        let mut dom = VirtualDom::new_with_props(app, (key.to_string(), rows));
+        dom.rebuild_in_place();
+        dioxus::ssr::render(&dom)
+    }
+
+    fn render_button(has_selection: bool) -> String {
+        fn app(has_selection: bool) -> Element {
+            rsx! { HistoryButton { has_selection, onclick: |_| {}, onmounted: |_| {} } }
+        }
+        let mut dom = VirtualDom::new_with_props(app, has_selection);
+        dom.rebuild_in_place();
+        dioxus::ssr::render(&dom)
+    }
+
+    #[test]
+    fn last_run_status_maps_failed_flag() {
+        assert_eq!(
+            last_run_status(&row(Some(true), None)),
+            LastRunStatus::Failed
+        );
+        assert_eq!(last_run_status(&row(Some(false), None)), LastRunStatus::Ok);
+        assert_eq!(last_run_status(&row(None, None)), LastRunStatus::NeverRun);
+    }
+
+    #[test]
+    fn last_run_panel_renders_failed_job() {
+        let html = render_panel(row(Some(true), Some("boom")));
+        for needle in [
+            "Last run: Nightly digest",
+            "Showing the last run only. Run history is not recorded yet.",
+            "FAILED",
+            "2026-10-30 09:00 UTC",
+            "boom",
+            "0 9 * * *",
+        ] {
+            assert!(html.contains(needle), "missing `{needle}` in {html}");
+        }
+    }
+
+    #[test]
+    fn history_button_disabled_without_selection() {
+        let html = render_button(false);
+        assert!(html.contains("disabled"), "{html}");
+        assert!(html.contains("Select a job first."), "{html}");
+        assert!(html.contains("⏵ HISTORY"), "{html}");
+    }
+
+    #[test]
+    fn last_run_panel_never_run() {
+        let html = render_panel(row(None, None));
+        assert!(html.contains("NEVER RUN"), "{html}");
+        assert!(html.contains("This job has not run yet."), "{html}");
+        assert!(!html.contains("Error"), "{html}");
+    }
+
+    #[test]
+    fn last_run_panel_ok_hides_stale_error() {
+        let html = render_panel(row(Some(false), Some("stale failure")));
+        assert!(html.contains(">OK<"), "{html}");
+        assert!(!html.contains("stale failure"), "{html}");
+        assert!(!html.contains("Error"), "{html}");
+    }
+
+    #[test]
+    fn last_run_panel_missing_row() {
+        let html = render_view("default:gone", vec![row(Some(false), None)]);
+        assert!(
+            html.contains("Could not load this job: job is no longer listed."),
+            "{html}"
+        );
+        let found = render_view("default:job-1", vec![row(Some(false), None)]);
+        assert!(found.contains("Last run: Nightly digest"), "{found}");
+    }
+
+    #[test]
+    fn history_button_title_with_selection() {
+        let html = render_button(true);
+        assert!(
+            html.contains("Shows the last run of the selected job."),
+            "{html}"
+        );
+        assert!(!html.contains("disabled"), "{html}");
+    }
+
+    #[test]
+    fn last_error_is_escaped_text() {
+        let html = render_panel(row(Some(true), Some("<script>alert(1)</script>")));
+        assert!(!html.contains("<script>alert"), "{html}");
     }
 }

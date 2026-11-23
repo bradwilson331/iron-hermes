@@ -17,7 +17,7 @@
 // Captured state is threaded through SlackClientEventsListenerEnvironment::with_user_state<T>()
 // and read from the SlackClientEventsUserState parameter inside the callback.
 
-use crate::adapter::PlatformAdapter;
+use crate::adapter::{DirectMessageSender, PlatformAdapter};
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal::ProcessedAttachments;
 use anyhow::Result;
@@ -44,6 +44,38 @@ pub struct SlackAdapter {
 impl SlackAdapter {
     pub fn new(client: Arc<SlackHyperClient>, bot_token: SlackApiToken) -> Self {
         Self { client, bot_token }
+    }
+}
+
+#[async_trait]
+impl DirectMessageSender for SlackAdapter {
+    fn platform(&self) -> Platform {
+        Platform::Slack
+    }
+
+    /// `conversations.open` with the user id returns the user's IM channel (reused if
+    /// it exists); the message is posted there, never to a channel.
+    async fn send_direct_message(&self, user_id: &str, content: &str) -> Result<MessageResponse> {
+        let session = self.client.open_session(&self.bot_token);
+        let open = session
+            .conversations_open(
+                &SlackApiConversationsOpenRequest::new().with_users(vec![user_id.into()]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Slack conversations.open failed: {e}"))?;
+        let im = open.channel.id.to_string();
+        let resp = session
+            .chat_post_message(&SlackApiChatPostMessageRequest::new(
+                im.as_str().into(),
+                SlackMessageContent::new().with_text(content.to_string()),
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("Slack DM send failed: {e}"))?;
+        Ok(MessageResponse {
+            message_id: resp.ts.to_string(),
+            chat_id: im,
+            platform: Platform::Slack,
+        })
     }
 }
 

@@ -1,7 +1,7 @@
 //! Phase 26.2.1 Plan 06 — Chat screen + chat-protocol UI types.
 //!
 //! This file owns the small data types consumed by the WebSocket receive
-//! loop in `hermes_app/mod.rs` (`ChatBubble`, `ChatBubbleKind`, `ToolRow`)
+//! loop in `hermes_app/mod.rs` (`ChatBubble`, `ChatBubbleKind`)
 //! plus the `ChatSendHandler` newtype that disambiguates the send-fn
 //! context provider from any future `EventHandler<String>` in the tree.
 //!
@@ -11,7 +11,18 @@
 //! `chat-mini` + `chat-stream` + `chat-input-pill` layout that consumes
 //! these types via context.
 
-use std::collections::HashMap;
+// Phase 54.4 Plan 06: the chat-dashboard chrome (agent tab strip, parked-card
+// widget column, non-live banner) lives in submodules. None of them provides a
+// context — they only consume the roots `HermesApp` provides — and none touches
+// the chat singletons (D-10).
+pub(crate) mod agent_tab_strip;
+pub(crate) mod agent_widgets;
+pub(crate) mod approval_card;
+pub(crate) mod critical_row;
+pub(crate) mod defcon_chip;
+pub(crate) mod logs_mini_panel;
+pub(crate) mod non_live_banner;
+pub(crate) mod turn_status_dot;
 
 #[cfg(target_arch = "wasm32")]
 use dioxus::core::use_drop;
@@ -30,20 +41,18 @@ use crate::protocol::ChatAttachmentRow;
 // `legacy-shell` mounts WarpHermes instead of HermesApp") — that feature and
 // WarpHermes were removed in this same phase (see `components/mod.rs`'s own
 // removal note), so that rationale no longer describes anything that exists.
-// The chat-screen types below (AVATAR_LOGO, ChatBubbleKind, ToolRow, ChatBubble +
-// its constructors) are all consumed by the HermesApp subtree (mod.rs receive
-// loop / send handler construct ChatBubble at 204/246/302/356/369, ToolRow at
-// 212; ScreenChat renders AVATAR_LOGO) — HermesApp is now the crate's ONLY
-// root, unconditionally, so most of this cluster is live on every build and
-// its allow is vestigial. The genuinely still-dead members of this cluster
-// (the Audio/Image/Video bubble variant + constructors, and
-// `auto_follow_scrollable_progress_tail`'s native no-op) are constructed only
-// from `#[cfg(target_arch = "wasm32")]` branches of mod.rs's WebSocket
-// receive loop — a native (non-wasm32) compile of this crate, e.g. `cargo
-// clippy -p iron_hermes_ui --features server`, never reaches those branches,
-// so `pub` alone (this is a binary crate) does not keep them referenced
-// there. That wasm32-vs-native split, not any feature flag, is the real
-// reason an allow is still needed on those specific items.
+// The chat-screen types below (AVATAR_LOGO, ChatBubbleKind, ChatBubble + its
+// constructors) are all consumed by the HermesApp subtree (the mod.rs receive loop
+// and send handler construct ChatBubble; ScreenChat renders AVATAR_LOGO) —
+// HermesApp is now the crate's ONLY root, unconditionally, so most of this cluster
+// is live on every build and its allow is vestigial. The genuinely still-dead
+// members of this cluster (the Audio/Image/Video bubble variant + constructors)
+// are constructed only from `#[cfg(target_arch = "wasm32")]` branches of mod.rs's
+// WebSocket receive loop — a native (non-wasm32) compile of this crate, e.g.
+// `cargo clippy -p iron_hermes_ui --features server`, never reaches those
+// branches, so `pub` alone (this is a binary crate) does not keep them referenced
+// there. That wasm32-vs-native split, not any feature flag, is the real reason an
+// allow is still needed on those specific items.
 #[allow(dead_code)]
 const AVATAR_LOGO: Asset = asset!("/assets/i_hermes_logo.png");
 
@@ -83,117 +92,21 @@ pub enum ChatBubbleKind {
     // `MentionHandoffBlock` via the `mention_*` fields on `ChatBubble`
     // below instead of `text`.
     MentionHandoff,
+    // Phase 57 D-16 / UI-SPEC C2, R3: one critical-event row (blocked command,
+    // blocked scheduled job, scanner outage, detected credential, DEFCON change).
+    // No avatar, no bubble-wrap — rendered as `CriticalRow`, modeled on `Meta`.
+    // The label comes from `critical_kind`, the summary from `text`.
+    Critical,
+    // Phase 57 D-14 / UI-SPEC C3, R3: the Approve/Deny card for one parked web approval.
+    // No avatar, no bubble-wrap — rendered as `ApprovalCard` from the model keyed by
+    // `approval_id` in `ApprovalCardsCtx`; it stays in the transcript as the record.
+    Approval,
 }
 
-/// One tool-call progress row inside an assistant bubble.
+/// One bubble in the chat stream — user, assistant, error, or a critical row.
 ///
-/// `done` flips to `true` when the matching `ChatStreamEvent::ToolCallEnd`
-/// arrives; `success` carries the server-reported outcome. Renders as
-/// `.chat-progress-row.is-running` / `.is-done.is-success` / `.is-done.is-error`.
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-#[derive(Clone, PartialEq, Debug)]
-pub struct ToolRow {
-    pub name: String,
-    pub args: String,
-    pub done: bool,
-    pub success: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Tool-call grouping transform (Phase 49.4 Plan 06, D-01..D-04)
-// ---------------------------------------------------------------------------
-
-/// Threshold at which consecutive tool-call rows collapse into one counted,
-/// capped group region (D-04) instead of rendering as individual capped
-/// panes. Below this count, each row renders as its own pane.
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-pub const TOOL_GROUP_THRESHOLD: usize = 3;
-
-/// Output item of `group_tool_rows` — either one ungrouped tool call
-/// (renders as a single capped pane) or a run of
-/// [`TOOL_GROUP_THRESHOLD`] or more consecutive calls (renders as one
-/// capped, counted group region with each member as its own pane inside).
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-#[derive(Clone, PartialEq, Debug)]
-pub enum ToolGroup {
-    /// A single tool call, not part of a group.
-    Single(ToolRow),
-    /// Three or more consecutive tool calls, rendered as one grouped region.
-    Group(Vec<ToolRow>),
-}
-
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-impl ToolGroup {
-    /// True when any member (or the single row) has not yet completed.
-    pub fn is_running(&self) -> bool {
-        match self {
-            ToolGroup::Single(row) => !row.done,
-            ToolGroup::Group(rows) => rows.iter().any(|r| !r.done),
-        }
-    }
-
-    /// True when at least one completed member reported failure — used so
-    /// the group header can show the error icon without expanding, so a
-    /// collapsed group never hides a failure.
-    pub fn has_failure(&self) -> bool {
-        match self {
-            ToolGroup::Single(row) => row.done && !row.success,
-            ToolGroup::Group(rows) => rows.iter().any(|r| r.done && !r.success),
-        }
-    }
-
-    /// Number of tool calls this item represents (always 1 for `Single`).
-    pub fn member_count(&self) -> usize {
-        match self {
-            ToolGroup::Single(_) => 1,
-            ToolGroup::Group(rows) => rows.len(),
-        }
-    }
-
-    /// Human-readable group-header label carrying the live member count
-    /// (e.g. "3 tool calls"). `None` for an ungrouped single pane, which
-    /// has no group-head chrome to label.
-    pub fn group_label(&self) -> Option<String> {
-        match self {
-            ToolGroup::Single(_) => None,
-            ToolGroup::Group(rows) => Some(format!("{} tool calls", rows.len())),
-        }
-    }
-}
-
-/// Group consecutive tool-call rows per D-04.
-///
-/// Every row inside a single bubble's `tool_rows` is consecutive by
-/// construction (the receive loop only ever pushes onto the currently
-/// streaming bubble), so the rule reduces to a slice-length check rather
-/// than a run-detection pass over a mixed sequence: fewer than
-/// [`TOOL_GROUP_THRESHOLD`] rows each become their own [`ToolGroup::Single`];
-/// at or above the threshold, all rows become one [`ToolGroup::Group`].
-/// Written as a slice transform (not bubble-aware) so a future caller
-/// spanning multiple bubbles can reuse it unchanged. Member order within a
-/// group preserves input order.
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-pub fn group_tool_rows(rows: &[ToolRow]) -> Vec<ToolGroup> {
-    if rows.is_empty() {
-        return Vec::new();
-    }
-    if rows.len() < TOOL_GROUP_THRESHOLD {
-        rows.iter().cloned().map(ToolGroup::Single).collect()
-    } else {
-        vec![ToolGroup::Group(rows.to_vec())]
-    }
-}
-
-/// One bubble in the chat stream — user, assistant, or error.
-///
-/// `tool_rows` is mutated in-place by the receive loop in `mod.rs` when
-/// `ChatStreamEvent::ToolCallStart` / `ToolCallEnd` arrive for the
-/// currently-streaming assistant bubble.
+/// Routine tool calls are never stored on a bubble (Phase 57 D-17): they show only as the
+/// turn's status dot, and the Logs screen keeps the full record.
 // stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
@@ -201,7 +114,6 @@ pub struct ChatBubble {
     pub id: u64,
     pub kind: ChatBubbleKind,
     pub text: String,
-    pub tool_rows: Vec<ToolRow>,
     // Phase 36.17.7 D-02-a: Blob URL produced by the WS Binary recv arm
     // (from create_object_url_with_blob) plus MIME type for the <audio> tag.
     pub audio_src: Option<String>,
@@ -226,6 +138,20 @@ pub struct ChatBubble {
     pub mention_message: Option<String>,
     pub mention_state: Option<crate::protocol::MentionHandoffState>,
     pub mention_reply: Option<String>,
+    // Phase 57 R14: the turn an assistant bubble belongs to. `Some` only for a bubble
+    // created by a live stream event (`assistant_for_turn`) or a turn-scoped critical
+    // row; `None` for history, user, error and every other bubble. A bubble renders a
+    // status dot iff its turn id has an entry in the per-turn severity map.
+    pub turn_id: Option<uuid::Uuid>,
+    // Phase 57 C2: the `CriticalEvent.kind` of a `ChatBubbleKind::Critical` bubble;
+    // `None` for every other kind. The summary text lives in `text`.
+    pub critical_kind: Option<String>,
+    // Phase 57 R9a: how many consecutive identical critical events this row stands for
+    // (1 for a fresh Critical bubble, 0 for every other kind).
+    pub critical_repeat: u32,
+    // Phase 57 C3: the `approval_id` of a `ChatBubbleKind::Approval` bubble; `None` for
+    // every other kind. The card's tool, reason and state live in `ApprovalCardsCtx`.
+    pub approval_id: Option<String>,
 }
 
 // constructors: stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
@@ -236,7 +162,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::User,
             text,
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: None,
@@ -246,6 +171,10 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
     /// Phase 46.7 Plan 05 (D-06/D-07): a user bubble carrying attachments sent
@@ -260,7 +189,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::User,
             text,
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: None,
@@ -270,6 +198,10 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
     pub fn assistant(id: u64, text: String) -> Self {
@@ -277,7 +209,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::Assistant,
             text,
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: None,
@@ -287,14 +218,41 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
+    }
+    /// Phase 57 R14: an assistant bubble created by a live stream event for turn
+    /// `turn_id`, so it can render that turn's status dot.
+    pub fn assistant_for_turn(id: u64, turn_id: uuid::Uuid, text: String) -> Self {
+        let mut b = Self::assistant(id, text);
+        b.turn_id = Some(turn_id);
+        b
+    }
+    /// Phase 57 C2 / R3: one critical transcript row. `turn_id` is `None` for an
+    /// out-of-turn row (a blocked scheduled job, a `/yolo` level change).
+    pub fn critical(id: u64, turn_id: Option<uuid::Uuid>, kind: &str, summary: String) -> Self {
+        let mut b = Self::assistant(id, summary);
+        b.kind = ChatBubbleKind::Critical;
+        b.turn_id = turn_id;
+        b.critical_kind = Some(kind.to_string());
+        b.critical_repeat = 1;
+        b
+    }
+    /// Phase 57 C3 / R3: the transcript slot of one approval card, keyed by `approval_id`.
+    pub fn approval(id: u64, approval_id: &str) -> Self {
+        let mut b = Self::assistant(id, String::new());
+        b.kind = ChatBubbleKind::Approval;
+        b.approval_id = Some(approval_id.to_string());
+        b
     }
     pub fn error(id: u64, text: String) -> Self {
         Self {
             id,
             kind: ChatBubbleKind::Error,
             text,
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: None,
@@ -304,6 +262,10 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
     /// Phase 36.17.7 D-02-a/b: audio bubble carrying a Blob URL and MIME.
@@ -314,7 +276,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::Audio,
             text: String::new(),
-            tool_rows: vec![],
             audio_src: Some(src),
             audio_mime: Some(mime),
             image_src: None,
@@ -324,6 +285,10 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
     /// Phase 01-04 (DLV-03 web): image bubble carrying a Blob URL.
@@ -334,7 +299,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::Image,
             text: String::new(),
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: Some(src),
@@ -344,6 +308,10 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
     /// Phase 36.3.3 (D-08 web): video bubble carrying a Blob URL.
@@ -354,7 +322,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::Video,
             text: String::new(),
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: None,
@@ -364,6 +331,10 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
     /// Phase 41.1 Plan 03 (SKILL-13 web / D-06, UI-SPEC §C): DIM run-turn meta
@@ -375,7 +346,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::Meta,
             text,
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: None,
@@ -385,6 +355,10 @@ impl ChatBubble {
             mention_message: None,
             mention_state: None,
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
     /// Phase 50.2 Plan 07 (D-20, UI-SPEC Component Inventory §2): an
@@ -402,7 +376,6 @@ impl ChatBubble {
             id,
             kind: ChatBubbleKind::MentionHandoff,
             text: String::new(),
-            tool_rows: vec![],
             audio_src: None,
             audio_mime: None,
             image_src: None,
@@ -412,8 +385,105 @@ impl ChatBubble {
             mention_message: Some(message),
             mention_state: Some(state),
             mention_reply: None,
+            turn_id: None,
+            critical_kind: None,
+            critical_repeat: 0,
+            approval_id: None,
         }
     }
+}
+
+/// The session id a turn-scoped stream event names, when it names one.
+fn event_session(ev: &crate::protocol::ChatStreamEvent) -> Option<&str> {
+    use crate::protocol::ChatStreamEvent as E;
+    match ev {
+        E::TurnStarted { session_id, .. }
+        | E::TurnEnded { session_id, .. }
+        | E::TurnSeverity { session_id, .. }
+        | E::CriticalEvent { session_id, .. }
+        | E::YoloBypassNotice { session_id, .. }
+        | E::ApprovalResolved { session_id, .. } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Allocate the next bubble id.
+fn alloc_bubble_id(next_id: &mut u64) -> u64 {
+    let id = *next_id;
+    *next_id += 1;
+    id
+}
+
+/// Phase 57 D-16/D-17: the transcript side of the HermesApp receive loop, as one pure fn
+/// so the tests drive the same code the loop runs.
+///
+/// Routine tool traffic adds nothing to the transcript: `ToolCallStart` only makes sure the
+/// turn's assistant bubble exists (so its dot can spin while tools run before the first
+/// token) and stores nothing about the tool; `ToolCallEnd` changes nothing here. A `Delta`
+/// appends to the streaming bubble or opens one for its turn; `Finished` and `Error` end the
+/// stream (an `Error` also pushes the one Error bubble a turn-ending failure gets);
+/// `CriticalEvent` pushes one critical row when its kind renders one. A turn-scoped event
+/// that names another session than `on_screen_session` is ignored. Every event also folds
+/// into the per-turn dot map.
+pub fn apply_transcript_event(
+    bubbles: &mut Vec<ChatBubble>,
+    next_id: &mut u64,
+    streaming_id: &mut Option<u64>,
+    dots: &mut turn_status_dot::TurnDots,
+    on_screen_session: &str,
+    ev: &crate::protocol::ChatStreamEvent,
+) {
+    use crate::protocol::ChatStreamEvent as E;
+    if let Some(sid) = event_session(ev) {
+        if !sid.is_empty() && !on_screen_session.is_empty() && sid != on_screen_session {
+            return;
+        }
+    }
+    let turn_of = |turn_id: &uuid::Uuid| (!turn_id.is_nil()).then_some(*turn_id);
+    match ev {
+        E::Delta { turn_id, text } => {
+            if let Some(id) = *streaming_id {
+                if let Some(b) = bubbles.iter_mut().find(|b| b.id == id) {
+                    b.text.push_str(text);
+                }
+            } else {
+                let id = alloc_bubble_id(next_id);
+                *streaming_id = Some(id);
+                let mut b = ChatBubble::assistant(id, text.clone());
+                b.turn_id = turn_of(turn_id);
+                bubbles.push(b);
+            }
+        }
+        E::ToolCallStart { turn_id, .. } => {
+            if streaming_id.is_none() {
+                let id = alloc_bubble_id(next_id);
+                *streaming_id = Some(id);
+                let mut b = ChatBubble::assistant(id, String::new());
+                b.turn_id = turn_of(turn_id);
+                bubbles.push(b);
+            }
+        }
+        E::Finished { .. } => {
+            *streaming_id = None;
+        }
+        E::Error { message, .. } => {
+            let id = alloc_bubble_id(next_id);
+            bubbles.push(ChatBubble::error(id, message.clone()));
+            *streaming_id = None;
+        }
+        // Only the kinds that render a transcript row push one; any other kind is ignored
+        // here (the activity rail still records it).
+        E::CriticalEvent {
+            turn_id,
+            kind,
+            summary,
+            ..
+        } if critical_row::critical_row_style(kind).is_some() => {
+            critical_row::push_critical(bubbles, next_id, turn_of(turn_id), kind, summary.clone());
+        }
+        _ => {}
+    }
+    turn_status_dot::fold_turn_event(dots, ev);
 }
 
 /// Newtype wrapper around the chat send handler so `use_context` lookup
@@ -686,11 +756,20 @@ fn spawn_chat_attachment_reads(
 /// (`"\n[Artifact published: {title} — /artifacts/{id}]\n"`, appended to the
 /// assistant bubble's streamed text by
 /// `state.rs::capture_turn_deliverable_note` via the shared `stream_cb_arc`
-/// out-of-band channel — mirrors the WR-01 context_warnings mechanism, see
-/// 46.7-04-SUMMARY.md D-16 decision) out of the display text, returning
-/// `(display_text_without_the_note, Some((title, id)))` when present. Manual
-/// substring parse (no regex dep in this crate) — the note format is a
-/// fixed, server-controlled literal, not user input.
+/// assistant-token stream callback after the turn returns — mirrors the WR-01
+/// context_warnings mechanism, see 46.7-04-SUMMARY.md D-16 decision) out of the
+/// display text, returning `(display_text_without_the_note, Some((title, id)))`
+/// when present. Manual substring parse (no regex dep in this crate) — the note
+/// format is a fixed, server-controlled literal, not user input.
+///
+/// This text-marker approach is safe only because the note is a single post-turn
+/// tail marker (emitted by `state.rs`'s post-turn block). Used mid-turn it would
+/// show a half-received marker as visible prose, handle only the first of N
+/// markers, and glue the surrounding sentence fragments together when stripped.
+/// Security signals (a yolo bypass, a block, an approval) deliberately do NOT use
+/// this mechanism: they arrive as typed `ChatStreamEvent` variants and drive the
+/// turn's status dot and critical rows, and this function must not be extended for
+/// them.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn extract_artifact_chip(text: &str) -> (String, Option<(String, String)>) {
     const PREFIX: &str = "[Artifact published: ";
@@ -758,8 +837,8 @@ fn write_workspace_path_to_clipboard(text: &str) {
 // Renders the full `<section id="screen-chat">` layout from `app.html`:
 // a screen-header (with session-id label + READY/STREAMING status + token
 // budget), a `.chat-mini` container that holds the `.chat-stream` (per-
-// bubble `chat-msg.{user|assistant|error}` rows with embedded
-// `.chat-progress` tool-call rows), and the `.chat-input-pill` composer.
+// bubble `chat-msg.{user|assistant|error}` rows, each assistant bubble carrying
+// its turn's status dot, plus critical rows), and the `.chat-input-pill` composer.
 //
 // All chat state is consumed from the context providers established by
 // HermesApp in `hermes_app/mod.rs`:
@@ -910,259 +989,6 @@ fn is_unauthorized_error<T>(result: &dioxus::Result<T>) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tool-call pane/group rendering + auto-follow-tail (Phase 49.4 Plan 06)
-// ---------------------------------------------------------------------------
-
-/// Record whether the operator has scrolled away from the tail of a
-/// running tool-call pane or group, so auto-follow-tail can suppress
-/// itself and never yank a manual scroll-up back to the bottom
-/// (UI-SPEC E1 loading). No-op off wasm — there is no scrollable DOM there.
-#[cfg(target_arch = "wasm32")]
-fn on_scrollable_progress_scroll(
-    dom_id: &str,
-    state_key: &str,
-    mut scrolled_away_state: Signal<HashMap<String, bool>>,
-) {
-    if let Some(window) = web_sys::window() {
-        if let Some(doc) = window.document() {
-            if let Some(el) = doc.get_element_by_id(dom_id) {
-                let distance_from_bottom =
-                    el.scroll_height() - (el.scroll_top() + el.client_height());
-                scrolled_away_state
-                    .write()
-                    .insert(state_key.to_string(), distance_from_bottom > 24);
-            }
-        }
-    }
-}
-
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-#[cfg(not(target_arch = "wasm32"))]
-fn on_scrollable_progress_scroll(
-    _dom_id: &str,
-    _state_key: &str,
-    _scrolled_away_state: Signal<HashMap<String, bool>>,
-) {
-}
-
-/// Pin a running tool-call pane/group's own scroll container to the tail
-/// as content grows. Scoped to that single element only (queried by id) —
-/// never the page; the page-level bubble-stream auto-scroll above this
-/// component is a separate, pre-existing effect. No-op off wasm.
-#[cfg(target_arch = "wasm32")]
-fn auto_follow_scrollable_progress_tail(dom_id: &str) {
-    if let Some(window) = web_sys::window() {
-        if let Some(doc) = window.document() {
-            if let Some(el) = doc.get_element_by_id(dom_id) {
-                el.set_scroll_top(el.scroll_height());
-            }
-        }
-    }
-}
-
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-#[cfg(not(target_arch = "wasm32"))]
-fn auto_follow_scrollable_progress_tail(_dom_id: &str) {}
-
-/// Walk every bubble's grouped tool rows and auto-follow the tail of every
-/// pane/group that is still running and that the operator has not
-/// scrolled away from. Called from a `use_effect` that subscribes to
-/// `bubbles` + the scrolled-away map, so it reruns as new tool rows
-/// stream in. wasm-only — there is no scrollable DOM to pin off wasm.
-#[cfg(target_arch = "wasm32")]
-fn auto_follow_running_tool_panes(bubbles: &[ChatBubble], scrolled_away: &HashMap<String, bool>) {
-    for b in bubbles.iter() {
-        let groups = group_tool_rows(&b.tool_rows);
-        for (idx, item) in groups.iter().enumerate() {
-            match item {
-                ToolGroup::Single(row) => {
-                    if row.done {
-                        continue;
-                    }
-                    let key = format!("{}-{idx}", b.id);
-                    if !*scrolled_away.get(&key).unwrap_or(&false) {
-                        auto_follow_scrollable_progress_tail(&format!("tool-pane-{key}"));
-                    }
-                }
-                ToolGroup::Group(members) => {
-                    let group_key = format!("{}-{idx}-group", b.id);
-                    if item.is_running() && !*scrolled_away.get(&group_key).unwrap_or(&false) {
-                        auto_follow_scrollable_progress_tail(&format!("tool-group-{group_key}"));
-                    }
-                    for (j, member) in members.iter().enumerate() {
-                        if member.done {
-                            continue;
-                        }
-                        let member_key = format!("{}-{idx}-{j}", b.id);
-                        if !*scrolled_away.get(&member_key).unwrap_or(&false) {
-                            auto_follow_scrollable_progress_tail(&format!("tool-pane-{member_key}"));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Render one tool-call row as a capped, scrollable pane with an inline
-/// expand toggle (D-01/D-02). Shared by an ungrouped single pane and a
-/// member pane inside a grouped region — the pane shape (and its toggle)
-/// is identical in both cases; only the surrounding chrome differs.
-///
-/// `key` must be stable across re-renders as new rows stream in — callers
-/// derive it from the bubble id plus the item's position (see
-/// `render_tool_group` and the `.chat-progress` render call site).
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-fn render_tool_pane(
-    tr: &ToolRow,
-    key: &str,
-    mut expanded_state: Signal<HashMap<String, bool>>,
-    scrolled_away_state: Signal<HashMap<String, bool>>,
-) -> Element {
-    let expanded = *expanded_state.read().get(key).unwrap_or(&false);
-    let state_class = if tr.done {
-        if tr.success {
-            "is-done is-success"
-        } else {
-            "is-done is-error"
-        }
-    } else {
-        "is-running"
-    };
-    // Fix: a done-but-failed call previously rendered the same green
-    // "done" icon as a success (icon color only ever keyed off `done`,
-    // never `success`) — the failure was visible only via `state_class`,
-    // which no CSS rule consumed. `icon error` restores the error signal
-    // the D-03/T-49.4-06-03 must-haves assume already exists.
-    let icon_class = if tr.done {
-        if tr.success {
-            "icon done"
-        } else {
-            "icon error"
-        }
-    } else {
-        "icon spin"
-    };
-    let icon_glyph = if tr.done { "\u{25cf}" } else { "\u{25d0}" };
-    let mut pane_class = String::from("chat-progress-pane");
-    if expanded {
-        pane_class.push_str(" is-expanded");
-    }
-    if tr.done && !tr.success {
-        pane_class.push_str(" has-error");
-    }
-    let dom_id = format!("tool-pane-{key}");
-    let scroll_dom_id = dom_id.clone();
-    let scroll_key = key.to_string();
-    let toggle_key = key.to_string();
-    rsx! {
-        div {
-            key: "{key}",
-            id: "{dom_id}",
-            class: "{pane_class}",
-            onscroll: move |_evt| {
-                on_scrollable_progress_scroll(&scroll_dom_id, &scroll_key, scrolled_away_state);
-            },
-            div {
-                class: "chat-progress-row {state_class}",
-                span { class: "{icon_class}", "{icon_glyph}" }
-                span { class: "tp-name", "{tr.name}" }
-                if !tr.args.is_empty() {
-                    span { class: "tp-args", " \u{b7} {tr.args}" }
-                }
-                button {
-                    class: "chat-progress-toggle",
-                    r#type: "button",
-                    "aria-label": if expanded { "Collapse tool output" } else { "Expand tool output" },
-                    onclick: move |_| {
-                        let cur = *expanded_state.read().get(&toggle_key).unwrap_or(&false);
-                        expanded_state.write().insert(toggle_key.clone(), !cur);
-                    },
-                    if expanded { "\u{2212}" } else { "+" }
-                }
-            }
-        }
-    }
-}
-
-/// Render a grouped region of [`TOOL_GROUP_THRESHOLD`] or more consecutive
-/// tool calls (D-04): a capped, scrollable `.chat-progress-group` with a
-/// sticky `.chat-progress-group-head` (live member count, running
-/// spinner, error icon) followed by each member as its own
-/// [`render_tool_pane`]. A collapsed group can never hide a failure — the
-/// header derives `has_failure` from every member, not just visible ones.
-// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
-#[allow(dead_code)]
-fn render_tool_group(
-    group: &ToolGroup,
-    key_prefix: &str,
-    mut expanded_state: Signal<HashMap<String, bool>>,
-    scrolled_away_state: Signal<HashMap<String, bool>>,
-) -> Element {
-    let members: &[ToolRow] = match group {
-        ToolGroup::Group(rows) => rows.as_slice(),
-        ToolGroup::Single(row) => std::slice::from_ref(row),
-    };
-    let group_key = format!("{key_prefix}-group");
-    let expanded = *expanded_state.read().get(&group_key).unwrap_or(&false);
-    let is_running = group.is_running();
-    let has_failure = group.has_failure();
-    let label = group.group_label().unwrap_or_default();
-    let mut group_class = String::from("chat-progress-group");
-    if expanded {
-        group_class.push_str(" is-expanded");
-    }
-    if has_failure {
-        group_class.push_str(" has-error");
-    }
-    let dom_id = format!("tool-group-{group_key}");
-    let scroll_dom_id = dom_id.clone();
-    let scroll_key = group_key.clone();
-    let toggle_key = group_key.clone();
-    rsx! {
-        div {
-            key: "{key_prefix}",
-            id: "{dom_id}",
-            class: "{group_class}",
-            onscroll: move |_evt| {
-                on_scrollable_progress_scroll(&scroll_dom_id, &scroll_key, scrolled_away_state);
-            },
-            div {
-                class: "chat-progress-group-head",
-                if is_running {
-                    span { class: "icon spin", "\u{25d0}" }
-                } else {
-                    span { class: "icon done", "\u{25cf}" }
-                }
-                span { class: "tp-name", "{label}" }
-                if has_failure {
-                    span { class: "icon error", "!" }
-                }
-                button {
-                    class: "chat-progress-toggle",
-                    r#type: "button",
-                    "aria-label": if expanded { "Collapse tool call group" } else { "Expand tool call group" },
-                    onclick: move |_| {
-                        let cur = *expanded_state.read().get(&toggle_key).unwrap_or(&false);
-                        expanded_state.write().insert(toggle_key.clone(), !cur);
-                    },
-                    if expanded { "\u{2212}" } else { "+" }
-                }
-            }
-            for (j , tr) in members.iter().enumerate() {
-                {
-                    let member_key = format!("{key_prefix}-{j}");
-                    render_tool_pane(tr, &member_key, expanded_state, scrolled_away_state)
-                }
-            }
-        }
-    }
-}
-
 #[component]
 pub fn ScreenChat(is_active: bool) -> Element {
     // Context lookups — every read drops its borrow before the rsx tree
@@ -1199,6 +1025,14 @@ pub fn ScreenChat(is_active: bool) -> Element {
     // `/logout` (below) and by the session-death redirect. Provided at the
     // HermesApp root (mod.rs) per the Dioxus context-panic rule.
     let mut authed = use_context::<crate::components::hermes_app::AuthedContext>().0;
+
+    // Phase 57 D-17: the per-turn status-dot map, written by the HermesApp receive loop.
+    // Consumed only — created and provided at the root.
+    let turn_dots_ctx = use_context::<turn_status_dot::TurnDotsCtx>().0;
+
+    // Phase 57 D-14: the approval-card map, written by the HermesApp receive loop and by the
+    // cards' own buttons. Consumed only — created and provided at the root.
+    let approval_cards_ctx = use_context::<approval_card::ApprovalCardsCtx>().0;
 
     // Local composer state — text being typed in the `chat-input-pill`
     // textarea. Cleared on submit (Enter or the SEND button).
@@ -1240,6 +1074,28 @@ pub fn ScreenChat(is_active: bool) -> Element {
         }
     });
 
+    // Phase 57 UI-SPEC R9c / D-09 / D-21: the chat-header DEFCON chip. The on-screen session's
+    // live level is fetched through the authenticated `session_defcon_level` server fn. The
+    // synchronous prefix reads the session id and the socket state, so the fetch re-runs on
+    // mount, on every session switch and after every reconnect; `DefconChipCtx` pushes (a
+    // `/yolo` level change) are layered on top by `chip_level`. The result carries the id it
+    // was fetched for, so a value that lands after a session switch is never shown for the
+    // new session. No signal borrow is held across the await.
+    let defcon_push_ctx = use_context::<defcon_chip::DefconChipCtx>().0;
+    let defcon_fetch = use_resource(move || {
+        let sid = session_id.read().clone();
+        let _connected = *is_ws_connected.read();
+        async move {
+            if sid.is_empty() || sid == "pending" {
+                return None;
+            }
+            crate::server::approval_api::session_defcon_level(sid.clone())
+                .await
+                .ok()
+                .map(|info| (sid, info))
+        }
+    });
+
     // Phase 46.7 Plan 05 (D-05/D-06/D-08): composer attachment state.
     // `local_uploads` — in-flight/failed uploads (uploading/error, not yet
     // settled). `pending_attached` — settled, queued-to-send rows (cleared
@@ -1249,22 +1105,13 @@ pub fn ScreenChat(is_active: bool) -> Element {
     let mut local_uploads: Signal<Vec<LocalUpload>> = use_signal(Vec::new);
     let mut pending_attached: Signal<Vec<ChatAttachmentRow>> = use_signal(Vec::new);
     let mut file_drag_active: Signal<bool> = use_signal(|| false);
+    // Phase 54.4 Plan 11 (D-14): the header Logs shortcut's drag flag lives on
+    // the root tab model (`dragging_logs_widget`, transient); `logs_drop_hover`
+    // is this screen's local "the Logs drag is over the chat body" highlight.
+    let mut tabs = use_context::<crate::components::hermes_app::agent_tabs::AgentTabsCtx>().0;
+    let mut logs_drop_hover: Signal<bool> = use_signal(|| false);
     let mut toast_msg: Signal<Option<String>> = use_signal(|| None);
     let toast_token: Signal<u64> = use_signal(|| 0_u64);
-
-    // Phase 49.4 Plan 06 (D-01/D-02): per-block expand-toggle state, keyed
-    // by "{bubble_id}-{item_index}" (see render_tool_pane/render_tool_group)
-    // so the key survives re-renders as new tool rows stream in. Local UI
-    // state only — no server round-trip — so a plain signal is enough; no
-    // optimistic/confirmed split (contrast skills.rs's toggle_states/
-    // confirmed_states, which exists there because that state reconciles
-    // against a server call). Claude's Discretion: expansion does NOT
-    // persist across a page reload — this map is in-memory only.
-    let tool_pane_expanded: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
-    // Per-pane/group "operator scrolled away from the tail while running"
-    // flag, same key scheme — suppresses auto-follow-tail so a manual
-    // scroll-up inside a running pane is never yanked back to bottom.
-    let tool_pane_scrolled_away: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
 
     // Fixed, single-instance id — ScreenChat is always-mounted exactly once
     // (unlike kanban's per-card ids, which need per-task uniqueness).
@@ -1287,7 +1134,8 @@ pub fn ScreenChat(is_active: bool) -> Element {
                 if let Some(window) = web_sys::window() {
                     if let Some(doc) = window.document() {
                         if let Ok(Some(el)) =
-                            doc.query_selector(".chat-stream .chat-msg:last-child")
+                            // Phase 57: any last row (a critical row is not a `.chat-msg`).
+                            doc.query_selector(".chat-stream > :last-child")
                         {
                             el.scroll_into_view_with_bool(false);
                         }
@@ -1298,27 +1146,6 @@ pub fn ScreenChat(is_active: bool) -> Element {
             {
                 let _ = len; // suppress unused-variable on host builds
             }
-        }
-    });
-
-    // Phase 49.4 Plan 06 (D-01/D-02): auto-follow-tail for running
-    // tool-call panes/groups. Scoped to each pane/group's own scroll
-    // container by id — never the page (that is the effect above, left
-    // untouched). Subscribes to `bubbles` and the scrolled-away map so it
-    // reruns as new tool rows stream in or the operator scrolls within a
-    // running pane; there is no existing auto-scroll hook for this in the
-    // file to reuse, so this is implemented fresh.
-    use_effect(move || {
-        let bubbles_snapshot = bubbles.read().clone();
-        let scrolled_away_snapshot = tool_pane_scrolled_away.read().clone();
-        #[cfg(target_arch = "wasm32")]
-        {
-            auto_follow_running_tool_panes(&bubbles_snapshot, &scrolled_away_snapshot);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = bubbles_snapshot;
-            let _ = scrolled_away_snapshot;
         }
     });
 
@@ -1389,7 +1216,6 @@ pub fn ScreenChat(is_active: bool) -> Element {
                         id: id_val,
                         kind: ChatBubbleKind::Divider,
                         text: String::new(),
-                        tool_rows: vec![],
                         // Phase 36.17.7 D-02-a/b/f: dividers don't carry audio.
                         audio_src: None,
                         audio_mime: None,
@@ -1406,6 +1232,12 @@ pub fn ScreenChat(is_active: bool) -> Element {
                         mention_message: None,
                         mention_state: None,
                         mention_reply: None,
+                        // Phase 57 R14: history bubbles never carry a turn id, so
+                        // they never render a status dot.
+                        turn_id: None,
+                        critical_kind: None,
+                        critical_repeat: 0,
+                        approval_id: None,
                     });
                     id_val += 1;
 
@@ -1592,6 +1424,24 @@ pub fn ScreenChat(is_active: bool) -> Element {
     // Pattern B: no Signal borrow is held across any closure or async boundary.
     let queue_depth = queue_state.read().0;
 
+    // Phase 57 D-17: snapshot the per-turn severity map into an owned local (Pattern B)
+    // so each assistant bubble can look up its dot without holding a Signal borrow
+    // across the rsx tree. Re-reading here subscribes this component, so a severity
+    // change re-renders the dots.
+    let turn_dots_snapshot: turn_status_dot::TurnDots = turn_dots_ctx.read().clone();
+    // Phase 57 D-14: same Pattern B snapshot for the approval cards, so a state change
+    // (Submitted, Resolved) re-renders the card without a Signal borrow in the rsx tree.
+    let approval_cards_snapshot: approval_card::ApprovalCards = approval_cards_ctx.read().clone();
+    // Phase 57 R9c: the DEFCON chip's level, resolved into owned locals before the rsx tree
+    // (a push for the on-screen session wins over the fetched value; unknown = no chip).
+    let defcon_pushed: Option<defcon_chip::DefconPush> = defcon_push_ctx.read().clone();
+    let defcon_fetched: Option<crate::protocol::SessionDefconInfo> = defcon_fetch.value()()
+        .flatten()
+        .filter(|(fetched_for, _)| *fetched_for == sid_full)
+        .map(|(_, info)| info);
+    let defcon_view =
+        defcon_chip::chip_level(&sid_full, defcon_pushed.as_ref(), defcon_fetched.as_ref());
+
     // Phase 46.7 Plan 05: snapshot the attachment signals into owned Vecs
     // before the rsx tree (mirrors card.rs's persisted_attachments /
     // local_uploads_snapshot pattern) — the `for` loops below must not hold
@@ -1657,8 +1507,63 @@ pub fn ScreenChat(is_active: bool) -> Element {
                     } else {
                         span { class: "screen-meta", "READY" }
                     }
+                    // Phase 57 UI-SPEC R9c: the always-visible DEFCON level chip, in the slot
+                    // the removed 54.3 yolo chip occupied. Rendered once the level is known.
+                    if let Some((level, bypass)) = defcon_view {
+                        defcon_chip::DefconChip { level, bypass }
+                    }
                 }
             }
+
+            // Phase 54.4 (user decision): the agent tab strip is the first row
+            // BELOW the wheel, full width, directly above the chat body.
+            div { class: "ih-tabstrip-row", agent_tab_strip::AgentTabStrip {} }
+
+            // Phase 54.4 Plan 06 (D-10/D-13): the chat body. The chat column
+            // below wraps the chat container; the screen header now sits above
+            // the tab strip, in the wheel band.
+            //
+            // Phase 54.4 Plan 11 (D-14): the body is also the drop zone for the
+            // header's Logs shortcut. It acts ONLY while the in-app drag flag is
+            // set (T-54.4-37): a foreign drop (files, text) is not touched here
+            // and keeps going to the composer's own file-drop handlers. The
+            // payload is never read.
+            div {
+                class: "ih-chat-body",
+                class: if *logs_drop_hover.read() { "is-logs-drop-target" },
+                ondragover: move |evt: DragEvent| {
+                    if !tabs.peek().dragging_logs_widget {
+                        return;
+                    }
+                    evt.prevent_default();
+                    if !*logs_drop_hover.peek() {
+                        logs_drop_hover.set(true);
+                    }
+                },
+                ondragleave: move |_| {
+                    if *logs_drop_hover.peek() {
+                        logs_drop_hover.set(false);
+                    }
+                },
+                ondrop: move |evt: DragEvent| {
+                    if !tabs.peek().dragging_logs_widget {
+                        return;
+                    }
+                    evt.prevent_default();
+                    let mut next = tabs.peek().clone();
+                    let added = next.set_logs_widget(true);
+                    let cleared = next.set_dragging(false);
+                    if added || cleared {
+                        tabs.set(next);
+                    }
+                    logs_drop_hover.set(false);
+                },
+                if *logs_drop_hover.read() {
+                    div { class: "ih-logs-drop-hint", "Drop to add the Logs panel" }
+                }
+            agent_widgets::AgentWidgetColumn {}
+            div { class: "ih-chat-col",
+            non_live_banner::NonLiveBanner {}
 
             // Chat container — `.chat-mini > .chat-main > (chat-stream + chat-input-pill)`
             // per app.html. Class strings match the screens.css selectors
@@ -1672,6 +1577,12 @@ pub fn ScreenChat(is_active: bool) -> Element {
                 class: "chat-mini",
                 "data-drop-active": if *file_drag_active.read() { "true" },
                 ondragover: move |evt: DragEvent| {
+                    // Phase 54.4 Plan 11: the header Logs-shortcut drag is not a
+                    // file drop. Leave it alone (no default prevented, no
+                    // file-attach overlay) so it bubbles to `.ih-chat-body`.
+                    if tabs.peek().dragging_logs_widget {
+                        return;
+                    }
                     evt.prevent_default();
                     file_drag_active.set(true);
                 },
@@ -1679,6 +1590,9 @@ pub fn ScreenChat(is_active: bool) -> Element {
                     file_drag_active.set(false);
                 },
                 ondrop: move |evt: DragEvent| {
+                    if tabs.peek().dragging_logs_widget {
+                        return;
+                    }
                     evt.prevent_default();
                     file_drag_active.set(false);
                     // UAT gap fix precedent (card.rs): `evt.files()` (the
@@ -1726,6 +1640,8 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     // supplies its own `.kn-mention-handoff`
                                     // class.
                                     ChatBubbleKind::MentionHandoff => "chat-mention",
+                                    ChatBubbleKind::Critical  => "chat-critical",
+                                    ChatBubbleKind::Approval  => "chat-approval",
                                 },
 
                                 // Avatar — the shield-caduceus PNG for the
@@ -1748,6 +1664,10 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     ChatBubbleKind::Meta => rsx! {},
                                     // Phase 50.2 Plan 07: mention-handoff block has no avatar.
                                     ChatBubbleKind::MentionHandoff => rsx! {},
+                                    // Phase 57 R3: a critical row has no avatar.
+                                    ChatBubbleKind::Critical => rsx! {},
+                                    // Phase 57 R3: an approval card has no avatar.
+                                    ChatBubbleKind::Approval => rsx! {},
                                     ChatBubbleKind::Audio => rsx! {
                                         div { class: "avatar logo",
                                             img { src: AVATAR_LOGO, alt: "" }
@@ -1782,9 +1702,12 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     } else {
                                         (b.text.clone(), None)
                                     };
+                                    // Phase 57 R14: an assistant bubble renders a status
+                                    // dot iff its turn has an entry in the severity map.
+                                    let bubble_dot = turn_status_dot::dot_for_bubble(b, &turn_dots_snapshot);
 
-                                // Bubble body + embedded tool-call progress
-                                // rows for assistant bubbles (D-19).
+                                // Bubble body for assistant bubbles (routine tool
+                                // calls show only as the turn's status dot, D-17).
                                 // Phase 26.7.2 D-02: Divider variant renders a
                                 // section-label rule instead of a bubble body.
                                 //
@@ -1799,6 +1722,8 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     ChatBubbleKind::Divider
                                         | ChatBubbleKind::Meta
                                         | ChatBubbleKind::MentionHandoff
+                                        | ChatBubbleKind::Critical
+                                        | ChatBubbleKind::Approval
                                 ) {
                                     rsx! {
                                     div { class: "chat-bubble-wrap",
@@ -1863,7 +1788,9 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                             }
                                         }
                                         div {
-                                            class: match b.kind {
+                                            // Phase 57 R2: `has-turn-dot` reserves room for the
+                                            // top-right status dot (min-height + padding-right).
+                                            class: format!("{}{}", match b.kind {
                                                 ChatBubbleKind::User      => "chat-bubble is-user",
                                                 ChatBubbleKind::Assistant => "chat-bubble is-assistant",
                                                 ChatBubbleKind::Error     => "chat-bubble is-error",
@@ -1876,7 +1803,14 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                                 // exhaustive-match compliance.
                                                 ChatBubbleKind::Meta      => "chat-bubble is-meta",
                                                 ChatBubbleKind::MentionHandoff => "chat-bubble is-mention",
-                                            },
+                                                ChatBubbleKind::Critical  => "chat-bubble is-critical",
+                                                ChatBubbleKind::Approval  => "chat-bubble is-approval",
+                                            }, if bubble_dot.is_some() { " has-turn-dot" } else { "" }),
+                                            // Phase 57 D-17 / UI-SPEC C1: one status dot per
+                                            // assistant turn, overlaid top-right, first child.
+                                            if let Some(dot) = bubble_dot {
+                                                turn_status_dot::TurnStatusDot { worst: dot.worst, active: dot.active }
+                                            }
                                             // Phase 36.17.7 D-02-a/b/f: render inline <audio controls>
                                             // when this bubble carries a Blob URL. In Dioxus RSX, the
                                             // {audio_src} expression is RSX interpolation of the local
@@ -1972,50 +1906,11 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                             // out (rendered as the chip below instead).
                                             "{display_text}"
 
-                                            // Phase 49.4 Plan 06 (D-01..D-04): group_tool_rows
-                                            // runs BEFORE this render loop — grouping is a
-                                            // data transform, not a CSS effect. Each item
-                                            // renders as its own capped, scrollable pane
-                                            // (Single) or a capped, counted group region
-                                            // (Group), never as one unbounded `.chat-progress`
-                                            // dump — the fix for the operator's off-screen
-                                            // terminal-dump screenshots.
-                                            if !b.tool_rows.is_empty() {
-                                                div { class: "chat-progress",
-                                                    {
-                                                        let bubble_id = b.id;
-                                                        let groups = group_tool_rows(&b.tool_rows);
-                                                        rsx! {
-                                                            for (idx , item) in groups.iter().enumerate() {
-                                                                {
-                                                                    let key_prefix = format!("{bubble_id}-{idx}");
-                                                                    match item {
-                                                                        ToolGroup::Single(row) => render_tool_pane(
-                                                                            row,
-                                                                            &key_prefix,
-                                                                            tool_pane_expanded,
-                                                                            tool_pane_scrolled_away,
-                                                                        ),
-                                                                        ToolGroup::Group(_) => render_tool_group(
-                                                                            item,
-                                                                            &key_prefix,
-                                                                            tool_pane_expanded,
-                                                                            tool_pane_scrolled_away,
-                                                                        ),
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-
                                             // Phase 46.7 Plan 05 (D-16): assistant-bubble
                                             // artifact chip — the LAST element inside
-                                            // `.chat-bubble.is-assistant`, after text and
-                                            // any `.chat-progress` rows (UI-SPEC placement
-                                            // contract), opening the 46.6 sandboxed viewer
-                                            // via SelectedArtifactCtx.
+                                            // `.chat-bubble.is-assistant`, after the text
+                                            // (UI-SPEC placement contract), opening the
+                                            // 46.6 sandboxed viewer via SelectedArtifactCtx.
                                             if let Some((artifact_title, artifact_id)) = artifact_chip {
                                                 button {
                                                     class: "chat-artifact-chip",
@@ -2079,6 +1974,37 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                         }
                                     } else {
                                         rsx! {}
+                                    }
+                                } else if b.kind == ChatBubbleKind::Critical {
+                                    // Phase 57 D-16 / UI-SPEC C2, R3: one critical row — no
+                                    // avatar, no bubble. The summary is `b.text`, rendered
+                                    // as a text node by `CriticalRow` (never raw HTML).
+                                    rsx! {
+                                        critical_row::CriticalRow {
+                                            kind: b.critical_kind.clone().unwrap_or_default(),
+                                            summary: b.text.clone(),
+                                            repeat: b.critical_repeat,
+                                        }
+                                    }
+                                } else if b.kind == ChatBubbleKind::Approval {
+                                    // Phase 57 D-14 / UI-SPEC C3, R3: one Approve/Deny card —
+                                    // no avatar, no bubble. Tool, reason and state come from
+                                    // the model keyed by the bubble's approval id; a bubble
+                                    // whose model is missing renders nothing.
+                                    match b
+                                        .approval_id
+                                        .as_ref()
+                                        .and_then(|id| approval_cards_snapshot.get(id).map(|m| (id.clone(), m.clone())))
+                                    {
+                                        Some((approval_id, model)) => rsx! {
+                                            approval_card::ApprovalCard {
+                                                approval_id,
+                                                tool: model.tool,
+                                                reason: model.reason,
+                                                state: model.state,
+                                            }
+                                        },
+                                        None => rsx! {},
                                     }
                                 } else if b.kind == ChatBubbleKind::Meta {
                                     // Phase 41.1 Plan 03 (SKILL-13 web / D-06, UI-SPEC §C):
@@ -2435,6 +2361,14 @@ pub fn ScreenChat(is_active: bool) -> Element {
                 }
             }
 
+            } // .ih-chat-col
+            } // .ih-chat-body
+
+            // Phase 54.4 Plan 09 (D-16): the per-agent settings slide-over
+            // (position: fixed; non-modal). Mounted only while a gear has
+            // opened it, keyed by agent so a retarget gets a fresh working copy.
+            AgentSettingsMount {}
+
             // Phase 41.1 Plan 06 (D-05): the `/` command palette overlay. The
             // wrapper `onkeydown` closes it on Esc (the palette component does
             // not own the open signal — legacy split preserved). On pick,
@@ -2502,132 +2436,103 @@ pub fn ScreenChat(is_active: bool) -> Element {
     }
 }
 
+/// Phase 54.4 Plan 09 (D-16): mounts the per-agent settings slide-over while a
+/// tab gear has it open. A tiny wrapper so only this node (not the whole chat
+/// screen) subscribes to the tab model's panel state. The panel is keyed by
+/// agent: a retarget (Interaction Rule 2) remounts it with a fresh working copy.
+#[component]
+fn AgentSettingsMount() -> Element {
+    let tabs = use_context::<crate::components::hermes_app::agent_tabs::AgentTabsCtx>().0;
+    let target = tabs.read().panel.settings_for.clone();
+    match target {
+        Some(agent) => rsx! {
+            crate::components::hermes_app::screens::profile_shared::agent_settings::AgentSettingsPanel { key: "{agent}", agent }
+        },
+        None => rsx! {},
+    }
+}
+
 #[cfg(test)]
-mod group_tool_rows_tests {
-    use super::{group_tool_rows, ToolGroup, ToolRow, TOOL_GROUP_THRESHOLD};
+mod chat_layout_tests {
+    /// 54.4: the screen header is the section's first child (it sits in the
+    /// wheel band), then the tab-strip row, then the chat body.
+    #[test]
+    fn chat_header_then_tab_strip_row_precede_chat_body() {
+        const CHAT_RS: &str = include_str!("chat.rs");
+        let code = &CHAT_RS[..CHAT_RS.find("#[cfg(test)]").unwrap_or(CHAT_RS.len())];
+        let header = [r#"class: ""#, "screen-header", r#"""#].concat();
+        let row = [r#"class: ""#, "ih-tabstrip-row", r#"""#].concat();
+        let old_band = [r#"class: ""#, "ih-band-row", r#"""#].concat();
+        let strip = ["agent_tab_strip::", "AgentTabStrip {"].concat();
+        let mini = [r#"class: ""#, "chat-mini", r#"""#].concat();
+        assert_eq!(code.matches(row.as_str()).count(), 1, "one tab-strip row");
+        assert_eq!(code.matches(old_band.as_str()).count(), 0, "no band-row spacer");
+        let header_at = code.find(&header).expect("screen-header must exist");
+        let row_at = code.find(&row).unwrap();
+        let strip_at = code.find(&strip).expect("the tab strip must be mounted");
+        let mini_at = code.find(&mini).expect("chat-mini must exist");
+        assert!(header_at < row_at, "header precedes the tab-strip row");
+        assert!(row_at < strip_at && strip_at < mini_at, "strip row precedes the chat body");
+    }
+}
 
-    fn row(name: &str, done: bool, success: bool) -> ToolRow {
-        ToolRow {
-            name: name.to_string(),
-            args: String::new(),
-            done,
-            success,
+/// Phase 54.4 Plan 11 (D-14, T-54.4-37): the Chat drop zone for the header's
+/// Logs shortcut, and its separation from the composer's OS-file drop overlay.
+/// Source-text tests, region-scoped to the handlers they pin.
+#[cfg(test)]
+mod logs_drop_zone_tests {
+    const CHAT_RS: &str = include_str!("chat.rs");
+
+    /// Source before the first test module.
+    fn code() -> &'static str {
+        &CHAT_RS[..CHAT_RS.find("#[cfg(test)]").unwrap_or(CHAT_RS.len())]
+    }
+
+    /// The text between `from` and the next `to` after it.
+    fn between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+        let start = src.find(from).unwrap_or_else(|| panic!("missing `{from}`"));
+        let rest = &src[start..];
+        let end = rest[from.len()..]
+            .find(to)
+            .unwrap_or_else(|| panic!("missing `{to}` after `{from}`"));
+        &rest[..from.len() + end]
+    }
+
+    /// Only the in-app drag flag may add the panel; a drop from outside the
+    /// app never does, and the drop handler never reads the payload.
+    #[test]
+    fn chat_drop_zone_requires_the_logs_drag_flag() {
+        let body = between(code(), r#"class: "ih-chat-body""#, r#"class: "ih-chat-col""#);
+        let drop = between(body, "ondrop:", "Drop to add the Logs panel");
+        let flag_at = drop.find("dragging_logs_widget").expect("flag check in ondrop");
+        let add_at = drop.find("set_logs_widget(true)").expect("ondrop adds the panel");
+        assert!(flag_at < add_at, "the flag check precedes set_logs_widget");
+        assert!(drop.contains("return"), "no flag: the handler does nothing");
+        for banned in ["data_transfer", "files()", "text/plain"] {
+            assert!(
+                !drop.contains(banned),
+                "the drop handler must not read the payload (`{banned}`)"
+            );
         }
+        let over = between(body, "ondragover:", "ondragleave:");
+        assert!(over.contains("dragging_logs_widget"), "dragover checks the flag too");
+        assert!(code().contains("is-logs-drop-target"));
+        assert!(code().contains("Drop to add the Logs panel"));
     }
 
+    /// The composer's file-drop overlay must not react to the Logs drag.
     #[test]
-    fn threshold_is_three() {
-        assert_eq!(TOOL_GROUP_THRESHOLD, 3);
-    }
-
-    #[test]
-    fn empty_slice_produces_empty_output() {
-        let rows: Vec<ToolRow> = vec![];
-        assert_eq!(group_tool_rows(&rows), Vec::new());
-    }
-
-    #[test]
-    fn one_row_produces_one_single_pane_item() {
-        let rows = vec![row("read_file", true, true)];
-        let out = group_tool_rows(&rows);
-        assert_eq!(out.len(), 1);
-        assert!(matches!(out[0], ToolGroup::Single(_)));
-    }
-
-    #[test]
-    fn two_rows_produce_two_single_pane_items_no_group() {
-        let rows = vec![row("a", true, true), row("b", true, true)];
-        let out = group_tool_rows(&rows);
-        assert_eq!(out.len(), 2);
-        assert!(out.iter().all(|g| matches!(g, ToolGroup::Single(_))));
-    }
-
-    #[test]
-    fn three_rows_produce_one_group_item_with_member_count_three() {
-        let rows = vec![row("a", true, true), row("b", true, true), row("c", true, true)];
-        let out = group_tool_rows(&rows);
-        assert_eq!(out.len(), 1);
-        assert!(matches!(out[0], ToolGroup::Group(_)));
-        assert_eq!(out[0].member_count(), 3);
-    }
-
-    #[test]
-    fn five_rows_produce_one_group_item_with_member_count_five() {
-        let rows: Vec<ToolRow> = (0..5).map(|i| row(&format!("t{i}"), true, true)).collect();
-        let out = group_tool_rows(&rows);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].member_count(), 5);
-    }
-
-    #[test]
-    fn group_label_carries_live_member_count_for_three_and_five() {
-        let three: Vec<ToolRow> = (0..3).map(|i| row(&format!("t{i}"), true, true)).collect();
-        let five: Vec<ToolRow> = (0..5).map(|i| row(&format!("t{i}"), true, true)).collect();
-        assert_eq!(
-            group_tool_rows(&three)[0].group_label(),
-            Some("3 tool calls".to_string())
-        );
-        assert_eq!(
-            group_tool_rows(&five)[0].group_label(),
-            Some("5 tool calls".to_string())
-        );
-    }
-
-    #[test]
-    fn single_pane_has_no_group_label() {
-        let rows = vec![row("a", true, true)];
-        assert_eq!(group_tool_rows(&rows)[0].group_label(), None);
-    }
-
-    #[test]
-    fn group_reports_running_when_any_member_not_done() {
-        let rows = vec![row("a", true, true), row("b", false, false), row("c", true, true)];
-        let out = group_tool_rows(&rows);
-        assert!(out[0].is_running());
-    }
-
-    #[test]
-    fn group_reports_done_when_every_member_done() {
-        let rows = vec![row("a", true, true), row("b", true, true), row("c", true, true)];
-        let out = group_tool_rows(&rows);
-        assert!(!out[0].is_running());
-    }
-
-    #[test]
-    fn group_reports_has_failure_when_any_done_member_unsuccessful() {
-        let rows = vec![row("a", true, true), row("b", true, false), row("c", true, true)];
-        let out = group_tool_rows(&rows);
-        assert!(out[0].has_failure());
-    }
-
-    #[test]
-    fn group_reports_no_failure_when_all_done_members_succeeded() {
-        let rows = vec![row("a", true, true), row("b", true, true), row("c", true, true)];
-        let out = group_tool_rows(&rows);
-        assert!(!out[0].has_failure());
-    }
-
-    #[test]
-    fn grouping_is_stable_under_mid_turn_growth() {
-        let five: Vec<ToolRow> = (0..5).map(|i| row(&format!("t{i}"), true, true)).collect();
-        let first_three = &five[..3];
-        let out_three = group_tool_rows(first_three);
-        let out_five = group_tool_rows(&five);
-        assert_eq!(out_three.len(), 1);
-        assert_eq!(out_five.len(), 1);
-        assert!(matches!(out_three[0], ToolGroup::Group(_)));
-        assert!(matches!(out_five[0], ToolGroup::Group(_)));
-    }
-
-    #[test]
-    fn member_order_within_group_preserves_input_order() {
-        let rows = vec![row("first", true, true), row("second", true, true), row("third", true, true)];
-        let out = group_tool_rows(&rows);
-        if let ToolGroup::Group(members) = &out[0] {
-            let names: Vec<&str> = members.iter().map(|r| r.name.as_str()).collect();
-            assert_eq!(names, vec!["first", "second", "third"]);
-        } else {
-            panic!("expected a Group variant");
-        }
+    fn chat_mini_ignores_the_logs_widget_drag() {
+        let mini = between(code(), r#"class: "chat-mini""#, "Drop to attach");
+        let over = between(mini, "ondragover:", "ondragleave:");
+        let flag_at = over.find("dragging_logs_widget").expect("dragover checks the flag");
+        let prevent_at = over.find("prevent_default").expect("dragover prevents default");
+        let set_at = over.find("file_drag_active.set(true)").expect("dragover sets the overlay");
+        assert!(flag_at < prevent_at && flag_at < set_at, "flag check comes first");
+        assert!(over.contains("return"), "dragover returns early for the Logs drag");
+        let drop = between(mini, "ondrop:", "if *file_drag_active.read()");
+        let dflag = drop.find("dragging_logs_widget").expect("ondrop checks the flag");
+        let dprevent = drop.find("prevent_default").expect("ondrop prevents default");
+        assert!(dflag < dprevent, "ondrop checks the flag before prevent_default");
     }
 }

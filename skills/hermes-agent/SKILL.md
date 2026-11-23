@@ -290,16 +290,16 @@ Type these during an interactive chat session.
 ## Key Paths & Config
 
 ```
-~/.hermes/config.yaml       Main configuration
-~/.hermes/.env              API keys and secrets
-~/.hermes/skills/           Installed skills
-~/.hermes/sessions/         Session transcripts
-~/.hermes/logs/             Gateway and error logs
-~/.hermes/auth.json         OAuth tokens and credential pools
-~/.hermes/hermes-agent/     Source code (if git-installed)
+${IRONHERMES_HOME:-$HOME/.ironhermes}/config.yaml       Main configuration
+${IRONHERMES_HOME:-$HOME/.ironhermes}/.env              API keys and secrets
+~/.ironhermes/skills/           Installed skills
+${IRONHERMES_HOME:-$HOME/.ironhermes}/sessions/         Session transcripts
+${IRONHERMES_HOME:-$HOME/.ironhermes}/logs/             Gateway and error logs
+${IRONHERMES_HOME:-$HOME/.ironhermes}/auth.json         OAuth tokens and credential pools
+${IRONHERMES_HOME:-$HOME/.ironhermes}/hermes-agent/     Source code (if git-installed)
 ```
 
-Profiles use `~/.hermes/profiles/<name>/` with the same layout.
+Profiles use `${IRONHERMES_HOME:-$HOME/.ironhermes}/profiles/<name>/` with the same layout.
 
 ### Config Sections
 
@@ -518,7 +518,7 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 ### Gateway issues
 Check logs first:
 ```bash
-grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
+grep -i "failed to send\|error" ${IRONHERMES_HOME:-$HOME/.ironhermes}/logs/gateway.log | tail -20
 ```
 
 ---
@@ -539,9 +539,9 @@ grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
 | Memory | `hermes memory status` or [Memory docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) |
 | Env variables | `hermes config env-path` or [Env vars reference](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) |
 | CLI commands | `hermes --help` or [CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) |
-| Gateway logs | `~/.hermes/logs/gateway.log` |
-| Session files | `~/.hermes/sessions/` or `hermes sessions browse` |
-| Source code | `~/.hermes/hermes-agent/` |
+| Gateway logs | `${IRONHERMES_HOME:-$HOME/.ironhermes}/logs/gateway.log` |
+| Session files | `${IRONHERMES_HOME:-$HOME/.ironhermes}/sessions/` or `hermes sessions browse` |
+| Source code | `${IRONHERMES_HOME:-$HOME/.ironhermes}/hermes-agent/` |
 
 ---
 
@@ -572,7 +572,7 @@ hermes-agent/
 └── website/              # Docusaurus docs site
 ```
 
-Config: `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys).
+Config: `${IRONHERMES_HOME:-$HOME/.ironhermes}/config.yaml` (settings), `${IRONHERMES_HOME:-$HOME/.ironhermes}/.env` (API keys).
 
 ### Adding a Tool (3 files)
 
@@ -632,7 +632,7 @@ python -m pytest tests/ -o 'addopts=' -q   # Full suite
 python -m pytest tests/tools/ -q            # Specific area
 ```
 
-- Tests auto-redirect `HERMES_HOME` to temp dirs — never touch real `~/.hermes/`
+- Tests auto-redirect `IRONHERMES_HOME` to temp dirs — never touch real `${IRONHERMES_HOME:-$HOME/.ironhermes}/`
 - Run full suite before pushing any change
 - Use `-o 'addopts='` to clear any baked-in pytest flags
 

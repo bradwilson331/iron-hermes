@@ -15,6 +15,11 @@ name = "ironhermes_cli"
 path = "src/lib.rs"
 
 [features]
+# 58.2 D-05: the built-in fastembed embedder for Tier 2 semantic search is default-on; compile it
+# out with `--no-default-features`. iron_hermes_ui depends on this crate with default features, so
+# `dx bundle` and the Docker image carry it too.
+default = ["builtin-embedder"]
+builtin-embedder = ["ironhermes-agent/builtin-embedder"]
 memory-sqlite = ["ironhermes-agent/memory-sqlite"]
 memory-duckdb = ["ironhermes-agent/memory-duckdb"]
 memory-grafeo = ["ironhermes-agent/memory-grafeo"]
@@ -60,6 +65,8 @@ buzz = ["ironhermes-gateway/buzz", "dep:nostr-sdk"]
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+# Phase 57 Plan 05 (D-02): every agent host reaches the tirith sidecar service through this crate.
+ironhermes-security = { path = "../ironhermes-security" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 # Phase 36.8 (D-07): `ironhermes acp` stdio server for Zed / VS Code / JetBrains editors.
@@ -134,6 +141,12 @@ rustls = "0.23"
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = "3"
+# Phase 54.1 Plan 04 (D-10): promoted from [dev-dependencies] below — the
+# on-disk skills path migration (`skills_migrate.rs`) walks the installed
+# `skills`/`optional-skills` trees from production code. Already resolved in
+# Cargo.lock as a dev dependency of this same crate, so this adds no new
+# package to the graph. Leave the [dev-dependencies] entry below in place.
+walkdir = "2"
 open = { workspace = true }
 # Phase 46.1 D-02: parse the issuer host for the new-issuer audit/confirm message
 url = { workspace = true }
@@ -181,3 +194,13 @@ tracing-test = { workspace = true }
 # source tree for the S-08 stdin gate.
 sysinfo = { workspace = true }
 walkdir = "2"
+# Phase 49.8 Plan 23 (D-17, gap G-49.8-21): the shared in-process mock
+# rosbridge (tests/support/mock_rosbridge.rs, lifted verbatim from
+# ironhermes-tools) needs futures for its Sink/Stream split. Dev-only --
+# production CLI code still avoids the `futures` crate (kanban/goal_loop.rs
+# comment). Already a workspace dependency; adds no new package.
+futures = { workspace = true }
+# Phase 49.8 Plan 23 (D-17): the mock rosbridge's WebSocket transport. Pin
+# matches ironhermes-tools' own dev-dependency; already resolved in
+# Cargo.lock, so this adds no new package.
+tokio-tungstenite = "0.28"

@@ -302,3 +302,165 @@ fn doctor_help_lists_the_browser_flag() {
         stdout
     );
 }
+
+// =============================================================================
+// Phase 57 (Plan 15, D-12): `ironhermes doctor` reports the security sidecar
+// =============================================================================
+
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+/// `target/<profile>/`, derived from this test binary's own location
+/// (`target/<profile>/deps/<test>`), so it also holds under a custom
+/// `CARGO_TARGET_DIR`.
+fn profile_dir() -> PathBuf {
+    let exe = std::env::current_exe().expect("current_exe");
+    exe.parent()
+        .and_then(Path::parent)
+        .expect("test binary lives in target/<profile>/deps")
+        .to_path_buf()
+}
+
+/// Build `bin` of `package` into this test's profile directory and return its
+/// path. `CARGO_BIN_EXE_*` only exists for binaries of the package under test,
+/// and the sidecar binaries belong to other packages, so a nested `cargo build`
+/// (a no-op when up to date) is the portable way to have them.
+fn ensure_built(package: &str, bin: &str) -> PathBuf {
+    static BUILD: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = BUILD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let dir = profile_dir();
+    let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cmd.args(["build", "-p", package, "--bin", bin]);
+    match dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") => {}
+        Some("release") => {
+            cmd.arg("--release");
+        }
+        other => panic!("unsupported cargo profile directory {other:?}"),
+    }
+    let out = cmd.output().expect("run cargo build");
+    assert!(
+        out.status.success(),
+        "cargo build -p {package} --bin {bin} failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let path = dir.join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
+    assert!(path.is_file(), "{} was not produced", path.display());
+    path
+}
+
+/// A directory holding only the `ironhermes` binary. The sidecar lookup tries a
+/// sibling of the running executable first, so running the binary in place
+/// would find `target/<profile>/ironhermes-tirith` and defeat every case that
+/// wants a different sidecar or none. Hard link (same inode, so the code
+/// signature stays valid), falling back to a copy across filesystems.
+fn isolated_ironhermes(bin: &str) -> (TempDir, PathBuf) {
+    let dir = TempDir::new_in(profile_dir()).expect("temp dir under target");
+    let linked = dir
+        .path()
+        .join(format!("ironhermes{}", std::env::consts::EXE_SUFFIX));
+    if std::fs::hard_link(bin, &linked).is_err() {
+        std::fs::copy(bin, &linked).expect("copy ironhermes binary");
+    }
+    (dir, linked)
+}
+
+/// Run `ironhermes doctor` from an isolated copy with the given sidecar
+/// override and `PATH`; returns (stdout, exited 0).
+fn run_doctor_with_sidecar(override_bin: &Path, path_var: Option<&str>) -> (String, bool) {
+    let bin = std::env::var("CARGO_BIN_EXE_ironhermes").expect("CARGO_BIN_EXE_ironhermes");
+    let (_keep, isolated) = isolated_ironhermes(&bin);
+    let home = TempDir::new().unwrap();
+    let mut cmd = Command::new(&isolated);
+    cmd.env("IRONHERMES_HOME", home.path())
+        .env("IRONHERMES_TIRITH_BIN", override_bin)
+        .env("NO_COLOR", "1")
+        .args(["doctor"]);
+    if let Some(p) = path_var {
+        cmd.env("PATH", p);
+    }
+    let out = cmd.output().expect("ironhermes doctor");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
+}
+
+/// D-12: with the real sidecar reachable, doctor reports it present, pinned,
+/// same build, threat DB state, a successful health round trip and the level.
+#[test]
+fn doctor_reports_present_pinned_sidecar() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let sidecar = ensure_built("ironhermes-tirith", "ironhermes-tirith");
+    let (stdout, ok) = run_doctor_with_sidecar(&sidecar, None);
+    for needle in [
+        "Security sidecar",
+        "sidecar present:",
+        "tirith-core 0.4.2 (pinned)",
+        "threat DB: absent",
+        "health: ok",
+        "DEFCON 3",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "doctor output must contain {needle:?}, got:\n{stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("will be blocked"),
+        "a healthy sidecar has no consequence line, got:\n{stdout}"
+    );
+    assert!(ok, "doctor must exit 0, got:\n{stdout}");
+}
+
+/// D-12 / T-57-61: an absent sidecar is reported with where doctor looked and
+/// what the absence means at level 3; doctor itself still exits 0 and never
+/// claims health.
+#[test]
+fn doctor_reports_absent_sidecar() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let missing = PathBuf::from("/nonexistent-57-15/ironhermes-tirith");
+    let (stdout, ok) = run_doctor_with_sidecar(&missing, Some("/usr/bin:/bin"));
+    assert!(
+        stdout.contains("Security sidecar") && stdout.contains("sidecar absent"),
+        "expected the absent report, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("/nonexistent-57-15/ironhermes-tirith"),
+        "must name the looked-up override path, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("terminal/execute_code will be blocked until the sidecar is installed"),
+        "must state the level-3 consequence, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("health: ok") && !stdout.contains("(pinned)"),
+        "an absent sidecar must not be reported healthy or pinned, got:\n{stdout}"
+    );
+    assert!(ok, "doctor must exit 0 even when the sidecar is absent");
+}
+
+/// D-12 / T-57-61 / T-57-62: a sidecar answering with a different tirith-core
+/// fails the pin check and the message names the pinned 0.4.2.
+#[test]
+fn doctor_reports_version_mismatch() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let fake = ensure_built("ironhermes-security", "ironhermes-tirith-fake");
+    let (stdout, ok) = run_doctor_with_sidecar(&fake, None);
+    let pin_line = stdout
+        .lines()
+        .find(|l| l.contains("tirith-core fake"))
+        .unwrap_or_else(|| panic!("no tirith-core line, got:\n{stdout}"));
+    assert!(
+        pin_line.contains("MISSING") && pin_line.contains("0.4.2"),
+        "the pin check must fail and name 0.4.2, got: {pin_line:?}"
+    );
+    assert!(
+        !stdout.contains("(pinned)"),
+        "a mismatched core must never read as pinned, got:\n{stdout}"
+    );
+    assert!(ok, "doctor must exit 0, got:\n{stdout}");
+}

@@ -457,7 +457,12 @@ pub fn validate_tool_call_pairing(messages: &[ChatMessage]) -> Result<(), String
                 }
                 pending.clear();
                 if let Some(ref calls) = msg.tool_calls {
-                    for c in calls {
+                    for (call_idx, c) in calls.iter().enumerate() {
+                        if c.id.is_empty() {
+                            return Err(format!(
+                                "assistant.tool_calls[{call_idx}] at messages[{idx}] has an empty id: a tool call was emitted without an id"
+                            ));
+                        }
                         pending.insert(c.id.clone());
                     }
                 }
@@ -466,6 +471,11 @@ pub fn validate_tool_call_pairing(messages: &[ChatMessage]) -> Result<(), String
                 let id = msg.tool_call_id.as_ref().ok_or_else(|| {
                     format!("tool message at messages[{idx}] has no tool_call_id")
                 })?;
+                if id.is_empty() {
+                    return Err(format!(
+                        "tool message at messages[{idx}] has an empty tool_call_id (present but blank)"
+                    ));
+                }
                 if !pending.remove(id) {
                     return Err(format!(
                         "orphan tool_call_id '{id}' at messages[{idx}]: tool message has no preceding (still-pending) assistant.tool_calls entry"
@@ -626,5 +636,100 @@ mod tool_pair_invariant_tests {
             err.contains("c2"),
             "diagnostic must reference 'c2'; got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_rejects_empty_tool_call_id_on_tool_message() {
+        // Assistant id is valid; the tool message's tool_call_id is Some("") — present but blank.
+        // The pre-existing `.ok_or_else` only rejects `None`, so this must be a NEW rejection with
+        // wording distinct from "has no tool_call_id" and from the orphan message.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("c1")]),
+            ChatMessage::tool_result("", "r"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(
+            err.contains("empty tool_call_id"),
+            "must use the new empty-tool_call_id wording, not the missing-id or orphan wording; got: {err}"
+        );
+        assert!(
+            !err.contains("has no tool_call_id"),
+            "must not be the missing-id (None) branch; got: {err}"
+        );
+        assert!(
+            !err.contains("orphan tool_call_id"),
+            "must not be the orphan branch — this id was never pending, since the valid 'c1' is still pending; got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_rejects_empty_id_in_assistant_tool_calls() {
+        // The assistant's own tool_calls[0].id is "" — must be rejected at the assistant arm,
+        // instead of silently inserting "" into `pending`.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("")]),
+            ChatMessage::tool_result("whatever", "r"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(
+            err.contains("tool_calls[0]") && err.contains("empty id"),
+            "must use the new assistant-arm empty-id wording naming the tool_calls index; got: {err}"
+        );
+        assert!(
+            !err.contains("orphan tool_call_id"),
+            "must not be the orphan branch; got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_rejects_all_empty_pair() {
+        // THE PRODUCTION CASE: assistant.tool_calls[0].id == "" AND the following tool message's
+        // tool_call_id == Some(""). Before this change, the assistant arm inserted "" into
+        // `pending`, and the tool arm's `pending.remove("")` succeeded — so this exact history
+        // read as Ok(()). This is the most important assertion in this task: it must now error.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("")]),
+            ChatMessage::tool_result("", "r"),
+        ];
+        let result = validate_tool_call_pairing(&msgs);
+        let err = match result {
+            Ok(()) => panic!(
+                "BLINDNESS CONFIRMED: all-empty pair returned Ok(()) — the validator is blind to \
+                 the exact history that fails in production"
+            ),
+            Err(e) => e,
+        };
+        // The assistant message (messages[2]) is processed before the tool message (messages[3]),
+        // so the assistant-arm rejection fires first. Either new wording is an acceptable pass
+        // condition here, but it must NOT be the pre-existing orphan wording (which would mean
+        // neither new check fired and some other path produced the error).
+        assert!(
+            !err.contains("orphan tool_call_id"),
+            "must be rejected by one of the two NEW empty-id checks, not the orphan branch; got: {err}"
+        );
+        assert!(
+            err.contains("empty id") || err.contains("empty tool_call_id"),
+            "must be rejected with one of the new empty-id wordings; got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_regression_pin_well_formed_pair_still_ok() {
+        // Regression pin: a well-formed assistant+tool pair with real, non-empty ids must still
+        // pass after the two new empty-id checks are added.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("call_real_id_123")]),
+            ChatMessage::tool_result("call_real_id_123", "r"),
+            ChatMessage::assistant("done"),
+        ];
+        assert!(validate_tool_call_pairing(&msgs).is_ok());
     }
 }

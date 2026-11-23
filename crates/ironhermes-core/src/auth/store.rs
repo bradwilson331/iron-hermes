@@ -8,16 +8,21 @@
 //! - `TokenEntry` and `DcrEntry` never derive `Debug` — manual impl emits `[REDACTED]` for all
 //!   secret fields so tracing/panic output cannot leak credentials (D-08, PITFALLS §A-1).
 //! - Atomic write: serialize → `.json.tmp` → fsync → rename → chmod 0600 (T-41-04).
+//! - Cross-process safety (54.8-16, D-14): `save_to_disk` takes an exclusive lock on
+//!   `auth.json.lock`, re-reads `auth.json` and overlays only the keys this process changed,
+//!   so two processes holding stale snapshots never delete each other's tokens (T-54.8-47).
 //! - wasm32: all I/O paths are no-ops; the store operates in-memory only (D-09).
 //! - Thundering-herd guard (Plan 02, T-41-05): `refresh()` uses `Arc<Mutex>` + `Arc<Notify>`
 //!   to ensure at most one concurrent token exchange per namespace. The Mutex is NEVER held
 //!   across the exchange call (PITFALLS §A-2).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -153,6 +158,16 @@ struct AuthFile {
 #[cfg(not(target_arch = "wasm32"))]
 static TMP_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Longest a save waits for the cross-process `auth.json.lock` (bounded wait, never a hang).
+///
+/// On expiry `save_to_disk` returns an error naming the lock file and keeps this
+/// process's changed keys pending so the next save retries them (T-54.8-48).
+pub const AUTH_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the lock wait re-polls `try_lock_exclusive`.
+#[cfg(not(target_arch = "wasm32"))]
+const AUTH_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory cache
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,6 +209,11 @@ struct AuthState {
     /// Per-namespace thundering-herd guard: keyed by `ns`. Each entry is created
     /// by that namespace's leader and removed on completion (success or error).
     refresh_in_flight: HashMap<String, Arc<RefreshSlot>>,
+    /// Token namespaces this process changed since its last successful save (D-14).
+    /// Only these keys are overlaid onto `auth.json`; every other key is adopted from disk.
+    dirty_tokens: HashSet<String>,
+    /// DCR server URLs this process changed since its last successful save (D-14).
+    dirty_clients: HashSet<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -214,6 +234,10 @@ pub struct AuthStore {
     /// Injected token-exchange seam. `open` installs a stub (D-08); Phase 43 wires
     /// the real OAuth flow via `open_with_refresh`.
     refresh_fn: RefreshFn,
+    /// Cross-process lock wait in milliseconds; initialised from [`AUTH_LOCK_TIMEOUT`].
+    lock_timeout_ms: AtomicU64,
+    /// Queues concurrent saves from this process so they do not spin on the file lock.
+    save_guard: Mutex<()>,
 }
 
 /// Manual Debug — hides `state` and `refresh_fn` entirely because they hold secret data.
@@ -258,7 +282,16 @@ impl AuthStore {
             state: Arc::new(Mutex::new(state)),
             auth_json_path: path,
             refresh_fn,
+            lock_timeout_ms: AtomicU64::new(AUTH_LOCK_TIMEOUT.as_millis() as u64),
+            save_guard: Mutex::new(()),
         }))
+    }
+
+    /// Test seam: shorten the cross-process lock wait.
+    #[doc(hidden)]
+    pub fn set_lock_timeout_for_tests(&self, d: Duration) {
+        self.lock_timeout_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -276,6 +309,7 @@ impl AuthStore {
         {
             let mut st = self.state.lock().await;
             st.tokens.insert(ns.to_string(), entry);
+            st.dirty_tokens.insert(ns.to_string());
         }
         self.save_to_disk().await
     }
@@ -368,6 +402,7 @@ impl AuthStore {
                 {
                     let mut st = self.state.lock().await;
                     st.tokens.insert(ns.to_string(), new_token.clone());
+                    st.dirty_tokens.insert(ns.to_string());
                     st.refresh_in_flight.remove(ns);
                     // lock released here before save_to_disk and notify_waiters
                 }
@@ -410,6 +445,7 @@ impl AuthStore {
         {
             let mut st = self.state.lock().await;
             st.clients.insert(url.to_string(), entry);
+            st.dirty_clients.insert(url.to_string());
         }
         self.save_to_disk().await
     }
@@ -556,6 +592,8 @@ impl AuthStore {
             tokens: file.tokens,
             clients: file.clients,
             refresh_in_flight: HashMap::new(),
+            dirty_tokens: HashSet::new(),
+            dirty_clients: HashSet::new(),
         })
     }
 
@@ -565,27 +603,47 @@ impl AuthStore {
         Ok(AuthState::default())
     }
 
-    /// Atomically serialize in-memory state to `auth_json_path` at mode 0600.
+    /// Persist this process's changes to `auth_json_path` without losing other writers' keys.
     ///
-    /// Write sequence (T-41-04):
-    /// 1. Snapshot state under lock, then release before I/O.
-    /// 2. Ensure parent directory exists; enforce 0700 unconditionally (M-03, T-41-01).
-    /// 3. Create a unique temp file at mode 0600 *before* writing (H-03), fsync,
-    ///    rename to final path.
-    /// 4. `chmod 0600` on final path — redundant safety net (T-41-01, PITFALLS §A-1).
+    /// # Why a locked read-modify-write (54.8-16, D-14, T-54.8-47)
+    ///
+    /// More than one process holds its own snapshot of the same `auth.json`: the gateway
+    /// and the web server run side by side in the container (`docker/web-entrypoint.sh`),
+    /// and the CLI paste-back flow adds a third writer on a host. Writing the whole
+    /// in-memory snapshot would let a stale process delete or revert a token another
+    /// process just wrote.
+    ///
+    /// The store only upserts (`put_token`, `put_client`, `refresh`) and never removes a
+    /// key, so a per-key merge is exact: overlay the keys THIS process changed since its
+    /// last save on top of what is on disk, and adopt every other key into memory. Two
+    /// processes changing different keys both survive; two changing the same key resolve
+    /// last-writer-wins, the right outcome for a re-authorization.
+    ///
+    /// # Write sequence
+    ///
+    /// 1. Queue behind `save_guard` (in-process saves run one at a time).
+    /// 2. Ensure the parent directory exists; enforce 0700 unconditionally (M-03, T-41-01).
+    /// 3. Take an exclusive `flock` on `<auth.json>.lock` (0600) by polling
+    ///    `try_lock_exclusive` every 25 ms, up to the lock timeout ([`AUTH_LOCK_TIMEOUT`],
+    ///    5 s). Expiry returns an error naming the lock file; the changed keys stay
+    ///    pending so the next save retries them (T-54.8-48). The wait is an async poll,
+    ///    never a blocking call on a runtime worker, and the state mutex is not held
+    ///    during it.
+    /// 4. Re-read `auth.json`. An unparseable file is logged and treated as an empty base
+    ///    (the pre-existing overwrite-on-corruption behavior); pending keys are never dropped.
+    /// 5. Under the state mutex: take the dirty sets, overlay those keys onto the disk
+    ///    maps, and replace the in-memory maps with the merge. A key held only in memory
+    ///    (absent from disk) is kept, so a re-created or externally truncated file is
+    ///    healed rather than shrinking the store.
+    /// 6. Temp file created 0600 with `create_new` (H-03) → fsync → rename → chmod 0600 (T-41-04).
+    /// 7. Any failure after step 5 puts the taken keys back into the dirty sets.
+    /// 8. Dropping the lock file handle releases the lock.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_to_disk(&self) -> Result<()> {
         use std::io::Write as _;
 
-        // 1. Snapshot under lock; release before blocking I/O.
-        let file_data = {
-            let st = self.state.lock().await;
-            AuthFile {
-                tokens: st.tokens.clone(),
-                clients: st.clients.clone(),
-            }
-        };
-        let json = serde_json::to_string_pretty(&file_data)?;
+        // 1. Serialize saves within this process.
+        let _save_guard = self.save_guard.lock().await;
 
         // 2. Ensure parent directory exists and enforce 0700 UNCONDITIONALLY (M-03).
         //    A pre-existing ~/.ironhermes (commonly created 0755 by other subsystems)
@@ -604,48 +662,150 @@ impl AuthStore {
             }
         }
 
-        // 3. Atomic write: temp file (created 0600 BEFORE any content) → fsync → rename.
+        // 3. Cross-process exclusive lock (bounded async poll).
+        let lock_path = {
+            let mut name = self
+                .auth_json_path
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_else(|| std::ffi::OsString::from("auth.json"));
+            name.push(".lock");
+            self.auth_json_path.with_file_name(name)
+        };
+        let lock_file = self.acquire_file_lock(&lock_path).await?;
+
+        // 4. Re-read the current file (other processes may have written since we loaded).
+        let mut merged = AuthFile::default();
+        if self.auth_json_path.exists() {
+            let content = std::fs::read_to_string(&self.auth_json_path)?;
+            match serde_json::from_str::<AuthFile>(&content) {
+                Ok(parsed) => merged = parsed,
+                Err(e) => tracing::warn!(
+                    "auth.json at {} is unparseable ({e}); rewriting it from this process's \
+                     in-memory entries",
+                    self.auth_json_path.display(),
+                ),
+            }
+        }
+
+        // 5. Overlay this process's changed keys; adopt everything else into memory.
+        let (taken_tokens, taken_clients) = {
+            let mut st = self.state.lock().await;
+            let taken_tokens = std::mem::take(&mut st.dirty_tokens);
+            let taken_clients = std::mem::take(&mut st.dirty_clients);
+            for (ns, entry) in &st.tokens {
+                if taken_tokens.contains(ns) || !merged.tokens.contains_key(ns) {
+                    merged.tokens.insert(ns.clone(), entry.clone());
+                }
+            }
+            for (url, entry) in &st.clients {
+                if taken_clients.contains(url) || !merged.clients.contains_key(url) {
+                    merged.clients.insert(url.clone(), entry.clone());
+                }
+            }
+            st.tokens = merged.tokens.clone();
+            st.clients = merged.clients.clone();
+            (taken_tokens, taken_clients)
+        };
+
+        // 6. Atomic write: temp file (created 0600 BEFORE any content) → fsync → rename.
         //    H-03: the secret must never sit in a world-readable temp file. Create the
         //    temp file with mode 0600 and O_CREAT|O_EXCL (`create_new`) so the bytes are
         //    protected from the instant the file exists, and a pre-planted tmp/symlink is
         //    refused. A unique per-write name avoids collisions between concurrent saves.
-        let counter = TMP_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp_path = self.auth_json_path.with_extension(format!(
-            "json.tmp.{}.{}",
-            std::process::id(),
-            counter
-        ));
-        let write_result = (|| -> std::io::Result<()> {
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create_new(true);
+        let write_all = || -> Result<()> {
+            let json = serde_json::to_string_pretty(&merged)?;
+            let counter = TMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let tmp_path = self.auth_json_path.with_extension(format!(
+                "json.tmp.{}.{}",
+                std::process::id(),
+                counter
+            ));
+            let write_result = (|| -> std::io::Result<()> {
+                let mut opts = std::fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    opts.mode(0o600);
+                }
+                let mut f = opts.open(&tmp_path)?;
+                f.write_all(json.as_bytes())?;
+                f.flush()?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                // Never leave a half-written temp file behind on failure.
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e.into());
+            }
+            std::fs::rename(&tmp_path, &self.auth_json_path)?;
+
+            // chmod 0600 on final path — redundant safety net now that the temp file is
+            // already 0600 (rename does not change mode), but kept to guarantee the
+            // invariant on the non-unix fallback and against any future write-path change.
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                opts.mode(0o600);
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(
+                    &self.auth_json_path,
+                    std::fs::Permissions::from_mode(0o600),
+                )?;
             }
-            let mut f = opts.open(&tmp_path)?;
-            f.write_all(json.as_bytes())?;
-            f.flush()?;
-            f.sync_all()?;
             Ok(())
-        })();
-        if let Err(e) = write_result {
-            // Never leave a half-written temp file behind on failure.
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e.into());
-        }
-        std::fs::rename(&tmp_path, &self.auth_json_path)?;
+        };
 
-        // 4. chmod 0600 on final path — redundant safety net now that the temp file is
-        //    already 0600 (rename does not change mode), but kept to guarantee the
-        //    invariant on the non-unix fallback and against any future write-path change.
+        let result = write_all();
+        if result.is_err() {
+            // 7. Keep this process's changes pending so the next save retries them.
+            let mut st = self.state.lock().await;
+            st.dirty_tokens.extend(taken_tokens);
+            st.dirty_clients.extend(taken_clients);
+        }
+
+        // 8. Release the cross-process lock only after the rename.
+        drop(lock_file);
+        result
+    }
+
+    /// Take an exclusive `flock` on `lock_path`, polling until the lock timeout.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn acquire_file_lock(&self, lock_path: &Path) -> Result<std::fs::File> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let file = opts.open(lock_path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&self.auth_json_path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(lock_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
-        Ok(())
+        let timeout = Duration::from_millis(self.lock_timeout_ms.load(Ordering::Relaxed));
+        let started = std::time::Instant::now();
+        loop {
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => return Ok(file),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    if started.elapsed() >= timeout {
+                        return Err(anyhow::anyhow!(
+                            "auth store is locked by another process ({}); try again",
+                            lock_path.display()
+                        ));
+                    }
+                    tokio::time::sleep(AUTH_LOCK_POLL_INTERVAL).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// wasm32 stub — no-op; store is in-memory only (D-09).

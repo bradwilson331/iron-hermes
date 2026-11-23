@@ -243,6 +243,7 @@ async fn set_api_server_edit_impl(
 ) -> Result<ApiServerConfigView, String> {
     let host = validate_api_server_edit(&payload)?;
 
+    let _root_write = crate::server::tools_config_api::lock_scope_write(&scope);
     let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     check_api_server_write_gate()?;
 
@@ -264,6 +265,7 @@ async fn set_api_server_edit_impl(
         .platforms
         .insert(API_SERVER_PLATFORM_KEY.to_string(), platform);
     crate::server::tools_config_api::save_scoped(&config, &target)?;
+    drop(_root_write);
 
     let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
     // Computed from the RE-READ config, not the pre-write one, so the

@@ -16,6 +16,9 @@ use ironhermes_hub::{
     SkillsShBlobSource, WellKnownSkillSource, install as hub_install, migrate_from_hub_manifest,
     strip_terminal_escapes, uninstall as hub_uninstall, update as hub_update,
 };
+// Phase 54.1 Plan 05 Task 3: needed to call `.execute()` on a `SkillsTool`
+// trait object in `cmd_tool_list` below.
+use ironhermes_tools::Tool as _;
 use std::sync::Arc;
 
 /// Return a terminal-safe version of an error string for display at a print
@@ -87,6 +90,66 @@ pub enum SkillsAction {
         #[arg(long)]
         restore: bool,
     },
+    /// One-shot, idempotent on-disk path migration for the installed `skills`
+    /// and `optional-skills` trees (Phase 54.1 Plan 04, D-10).
+    ///
+    /// Safe to re-run: a second run reports zero rewrites once the first has
+    /// completed. Rewrites only known stale `~/.hermes/` path patterns and
+    /// the removed `HERMES_HOME` env var — never a whole file. Backs up
+    /// every changed file into a mirrored sibling directory
+    /// (`<tree>.migration-backup-<unix timestamp>/`) unless `--no-backup` is
+    /// given. `--dry-run` reports what would change without writing
+    /// anything.
+    MigratePaths {
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip writing the pre-rewrite backup mirror.
+        #[arg(long)]
+        no_backup: bool,
+    },
+    /// Print the rendered TIERED prompt catalog (read-only evidence surface
+    /// for D-05/D-11 audit claims 2 and 6).
+    ///
+    /// `handlers.rs`'s `/skills` command prints the UNTIERED
+    /// `SkillRegistry::catalog_text()`; this subcommand prints
+    /// `filtered_catalog_text` — the render the prompt builder actually
+    /// sends — plus its line and byte counts. Strictly read-only.
+    Catalog {
+        #[arg(long, default_value = "text")]
+        format: Format,
+    },
+    /// Print the `skills` agent TOOL's own `list` action output — raw JSON,
+    /// unmodified (read-only evidence surface for D-05/D-11 audit claim 4,
+    /// Phase 54.1 Plan 05 Task 3).
+    ///
+    /// `cmd_list` above reads the Hub lock file, so it never shows a
+    /// locally-discovered skill (anything placed directly under `skills/` or
+    /// `optional-skills/` rather than installed through the Hub) at all.
+    /// `handle_list` in `ironhermes-tools::skills_tool` — the ONLY surface
+    /// the agent itself calls to enumerate skills — is what actually carries
+    /// a live `trust_level` per entry from the registry's `resolve_source`
+    /// relabeling (D-09's `optional-skills` -> `Official` among them). This
+    /// subcommand constructs the SAME `SkillsTool` the agent runtime
+    /// registers (`SkillRegistry::load_with_config` against the pivoted
+    /// home, `default_credential_dir`, no seeded `active_skills`) and prints
+    /// exactly what `tool.execute({"action":"list"})` returns, so the audit
+    /// has real tool-surface output rather than a registry-internals
+    /// approximation of it. Strictly read-only: `active_skills` starts and
+    /// ends empty, nothing is activated.
+    ToolList,
+    /// Print the `skills` agent TOOL's own `activate` action output for one
+    /// named skill — raw JSON, unmodified (read-only* evidence surface for
+    /// D-05/D-11 claim 6's "still resolvable" half, Phase 54.1 Plan 05 Task
+    /// 3). *Mutates only the SAME in-process `active_skills` list
+    /// `handle_activate` always mutates on a real agent turn — never a file
+    /// on disk — and that list is discarded when this process exits, so no
+    /// operator-owned state changes. Proves a `skills.disabled`-elided skill
+    /// (missing from the rendered catalog per D-12) is still reachable
+    /// exactly the way a real agent would reach it mid-conversation: by
+    /// calling this SAME tool action once it already knows the name (D-12 is
+    /// "hidden but reachable", never "off entirely").
+    ToolActivate { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -959,6 +1022,245 @@ async fn cmd_reset(_cfg: &Config, name: &str, restore: bool) -> anyhow::Result<i
     }
 }
 
+/// One-shot, idempotent on-disk migration for the installed `skills` and
+/// `optional-skills` trees (Phase 54.1 Plan 04, D-10).
+///
+/// Roots are `ironhermes_core::get_root_hermes_home().join("skills")` and
+/// `...join("optional-skills")` — the ROOT home, NOT `get_hermes_home()` (see
+/// `cmd_reset`'s doc comment for why that distinction matters), so a
+/// `--profile`-pivoted invocation still targets the one shared catalog
+/// (D-01/D-10).
+///
+/// `--dry-run` runs the PURE [`skills_migrate::rewrite_stale_paths`] over
+/// each walked file directly (never calling [`skills_migrate::migrate_tree`],
+/// which is the only fn that touches disk) and reports what would change
+/// without writing anything. Without `--dry-run`, delegates to
+/// [`skills_migrate::migrate_tree`] for each root and prints a
+/// `cmd_reload`-shaped report: one summary line, then one `  + <file> ->
+/// <backup>` line per rewritten file, one `  ! <file> (outside root,
+/// skipped)` line per escape, then the backup root(s) if any were created.
+///
+/// Returns `0` on success, `1` if any escape was skipped (on either path).
+pub fn cmd_migrate_paths(dry_run: bool, no_backup: bool) -> anyhow::Result<i32> {
+    let root_home = ironhermes_core::get_root_hermes_home();
+    let roots = [root_home.join("skills"), root_home.join("optional-skills")];
+
+    if dry_run {
+        let mut rewritten = 0usize;
+        let mut unchanged = 0usize;
+        let mut skipped = 0usize;
+        let mut lines: Vec<String> = Vec::new();
+
+        for root in &roots {
+            if !root.exists() {
+                continue;
+            }
+            let canonical_root = root.canonicalize()?;
+            for entry in walkdir::WalkDir::new(root) {
+                let entry = entry?;
+                if entry.file_type().is_dir() {
+                    continue;
+                }
+                let path = entry.path();
+                let canonical_path = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        skipped += 1;
+                        lines.push(format!("  ! {} (outside root, skipped)", path.display()));
+                        continue;
+                    }
+                };
+                if !canonical_path.starts_with(&canonical_root) {
+                    skipped += 1;
+                    lines.push(format!("  ! {} (outside root, skipped)", path.display()));
+                    continue;
+                }
+                let content = match std::fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        unchanged += 1;
+                        continue;
+                    }
+                };
+                match crate::skills_migrate::rewrite_stale_paths(&content) {
+                    None => unchanged += 1,
+                    Some(_) => {
+                        rewritten += 1;
+                        lines.push(format!("  + {} (would rewrite)", path.display()));
+                    }
+                }
+            }
+        }
+
+        println!(
+            "Migration dry-run: {rewritten} would be rewritten, {unchanged} unchanged, {skipped} skipped."
+        );
+        for line in &lines {
+            println!("{line}");
+        }
+        return Ok(if skipped > 0 { 1 } else { 0 });
+    }
+
+    let mode = if no_backup {
+        crate::skills_migrate::BackupMode::None
+    } else {
+        crate::skills_migrate::BackupMode::Mirror
+    };
+
+    let mut total_rewritten = 0usize;
+    let mut total_unchanged = 0usize;
+    let mut total_skipped = 0usize;
+    let mut lines: Vec<String> = Vec::new();
+    let mut backup_roots: Vec<std::path::PathBuf> = Vec::new();
+
+    for root in &roots {
+        let report = crate::skills_migrate::migrate_tree(root, mode)?;
+        for action in &report.actions {
+            match action {
+                crate::skills_migrate::MigrationAction::Rewritten { path, backup } => {
+                    total_rewritten += 1;
+                    match backup {
+                        Some(b) => lines.push(format!("  + {} -> {}", path.display(), b.display())),
+                        None => lines.push(format!("  + {}", path.display())),
+                    }
+                }
+                crate::skills_migrate::MigrationAction::Unchanged => total_unchanged += 1,
+                crate::skills_migrate::MigrationAction::SkippedOutsideRoot { path } => {
+                    total_skipped += 1;
+                    lines.push(format!("  ! {} (outside root, skipped)", path.display()));
+                }
+            }
+        }
+        if let Some(br) = report.backup_root {
+            backup_roots.push(br);
+        }
+    }
+
+    println!(
+        "Migration: {total_rewritten} rewritten, {total_unchanged} unchanged, {total_skipped} skipped."
+    );
+    for line in &lines {
+        println!("{line}");
+    }
+    for br in &backup_roots {
+        println!("Backup written to {}", br.display());
+    }
+
+    Ok(if total_skipped > 0 { 1 } else { 0 })
+}
+
+/// Print the rendered TIERED prompt catalog plus its line and byte counts
+/// (read-only evidence surface for D-05/D-11 audit claims 2 and 6).
+///
+/// Builds the registry with [`ironhermes_core::SkillRegistry::load_with_config`]
+/// over the current cwd — so the `--profile` pivot already applied by
+/// `resolve_and_set_profile` is honored, exactly as `cmd_reset`'s doc comment
+/// describes — and calls `filtered_catalog_text` with empty toolset, tool,
+/// and MCP-server sets (the render an unconfigured prompt builder would
+/// send). Writes and mutates nothing.
+///
+/// The registry load is scoped under a no-op `tracing` subscriber
+/// ([`tracing::subscriber::with_default`] +
+/// [`tracing::subscriber::NoSubscriber`]): `load_with_config` can emit
+/// `WARN-BUT-LOAD` scan-hit lines for any installed skill the context
+/// scanner flags (a normal, non-fatal path — this project's process-wide
+/// subscriber, installed once in `main.rs`, defaults to stdout outside the
+/// `acp` command). Those lines would otherwise interleave with this
+/// command's own stdout, corrupting `--format json`'s machine-readable
+/// output — exactly the hazard `main.rs`'s own "stdout is protocol-only"
+/// rationale names for the `acp` surface. Scoping the suppression to this
+/// one call, rather than touching the global subscriber in `main.rs`, keeps
+/// the fix inside this plan's declared file set and leaves every other
+/// command's logging behavior unchanged.
+pub fn cmd_catalog(cfg: &Config, format: Format) -> anyhow::Result<i32> {
+    let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cannot resolve cwd: {e}"))?;
+    let registry = tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        ironhermes_core::SkillRegistry::load_with_config(&cwd, &cfg.skills)
+    });
+    let text = registry.filtered_catalog_text(
+        &std::collections::HashSet::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashSet::new(),
+    );
+    let line_count = text.lines().count();
+    let byte_count = text.len();
+    let total_loaded = registry.list().len();
+
+    match format {
+        Format::Text => {
+            println!("{text}");
+            println!("---");
+            println!("line_count={line_count} byte_count={byte_count} total_loaded={total_loaded}");
+        }
+        Format::Json => {
+            let out = serde_json::json!({
+                "text": text,
+                "line_count": line_count,
+                "byte_count": byte_count,
+                "total_loaded": total_loaded,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+    }
+    Ok(0)
+}
+
+/// Phase 54.1 Plan 05 Task 3 (Rule 2 deviation): print the `skills` agent
+/// tool's own `list` action output verbatim — see [`SkillsAction::ToolList`]
+/// for why this surface, rather than `cmd_list`, is the one D-05/D-11 claim
+/// 4's live-trust-tier evidence needs. Mirrors `cmd_catalog`'s registry-load
+/// shape exactly (same `NoSubscriber` scope around the disk scan, same
+/// pivoted `cwd`/`cfg.skills`), then builds the identical `SkillsTool` the
+/// agent runtime registers in `AgentRuntime::reload_skill_registry` and
+/// `app_runtime_factory.rs` (empty `active_skills`, `default_credential_dir`,
+/// empty per-skill config map) and calls its `list` action exactly as the
+/// agent would.
+pub async fn cmd_tool_list(cfg: &Config) -> anyhow::Result<i32> {
+    let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cannot resolve cwd: {e}"))?;
+    let registry = tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        ironhermes_core::SkillRegistry::load_with_config(&cwd, &cfg.skills)
+    });
+    let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&cfg.skills);
+    let tool = ironhermes_tools::skills_tool::SkillsTool::new(
+        Arc::new(registry),
+        active_skills,
+        credential_dir,
+        std::collections::HashMap::new(),
+    );
+    let result = tool
+        .execute(serde_json::json!({"action": "list"}))
+        .await
+        .map_err(|e| anyhow::anyhow!("skills tool list action failed: {e}"))?;
+    println!("{result}");
+    Ok(0)
+}
+
+/// Phase 54.1 Plan 05 Task 3 (Rule 2 deviation): see [`SkillsAction::ToolActivate`].
+/// Same registry/tool construction as [`cmd_tool_list`]; calls `activate`
+/// instead of `list`. `active_skills` starts empty and is dropped with the
+/// process on return — no on-disk state changes.
+pub async fn cmd_tool_activate(cfg: &Config, name: &str) -> anyhow::Result<i32> {
+    let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cannot resolve cwd: {e}"))?;
+    let registry = tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        ironhermes_core::SkillRegistry::load_with_config(&cwd, &cfg.skills)
+    });
+    let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&cfg.skills);
+    let tool = ironhermes_tools::skills_tool::SkillsTool::new(
+        Arc::new(registry),
+        active_skills,
+        credential_dir,
+        std::collections::HashMap::new(),
+    );
+    let result = tool
+        .execute(serde_json::json!({"action": "activate", "name": name}))
+        .await
+        .map_err(|e| anyhow::anyhow!("skills tool activate action failed: {e}"))?;
+    println!("{result}");
+    Ok(0)
+}
+
 pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> anyhow::Result<i32> {
     let mut cfg = load_config(config_path)?;
     match action {
@@ -983,6 +1285,10 @@ pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> an
         SkillsAction::List { format } => cmd_list(&cfg, format),
         SkillsAction::Reload => cmd_reload(&cfg),
         SkillsAction::Reset { name, restore } => cmd_reset(&cfg, &name, restore).await,
+        SkillsAction::MigratePaths { dry_run, no_backup } => cmd_migrate_paths(dry_run, no_backup),
+        SkillsAction::Catalog { format } => cmd_catalog(&cfg, format),
+        SkillsAction::ToolList => cmd_tool_list(&cfg).await,
+        SkillsAction::ToolActivate { name } => cmd_tool_activate(&cfg, &name).await,
         SkillsAction::Trust { action } => match action {
             TrustAction::Add { repo } => {
                 cmd_trust_add_impl(&mut cfg, config_path, &repo)?;

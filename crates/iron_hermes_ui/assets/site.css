@@ -101,6 +101,9 @@ a { color: inherit; text-decoration: none; }
 /* GAP-26.2.1-06: lift BL/BR corners above .app-footer (z-index 50) so both
    the footer pills and the corner brackets are simultaneously visible. */
 .corner.bl, .corner.br { z-index: 60; }
+/* Phase 54.4 Plan 01: the top brackets would draw through the persistent
+   header, so they are hidden; the bottom pair stays. */
+.corner.tl, .corner.tr { display: none; }
 .corner::after {
   content: '';
   position: absolute;
@@ -121,7 +124,7 @@ a { color: inherit; text-decoration: none; }
   top: 18px; left: 50%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 20px;
   padding: 7px 18px;
-  background: rgba(13, 17, 23, 0.65);
+  background: color-mix(in srgb, var(--bg) 65%, transparent);
   backdrop-filter: blur(8px);
   border: 1px solid var(--border-faint);
   font-size: 9.5px;
@@ -198,48 +201,30 @@ a { color: inherit; text-decoration: none; }
 
 /* ─── Chrome positioning + body-class toggles (ported from app.html lines 42-112, 315-316, 320) ─── */
 
-/* Phase 49.4 Plan 03 (D-22): shared flex row wrapping the breadcrumb and the
-   system-meta readout so they are structurally incapable of overlapping —
-   flex layout enforces no-overlap by construction rather than tuning
-   specific string lengths. Replaces the two independently-`position: fixed`
-   elements that previously shared no container. */
-.topbar-row {
-  position: fixed;
-  top: 22px;
-  left: 360px;
-  right: 28px;
-  z-index: 70;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  pointer-events: none;
+/* Phase 54.4 Plan 01 (D-04/D-05/D-26): global layout variables shared by the
+   persistent header (assets/dashboard.css), the `.screen` frame
+   (assets/screens.css) and the docked wheel (assets/wheel.css). Only the
+   primaries are re-declared per breakpoint; every derived value is a calc()
+   so it follows. */
+:root {
+  --ih-header-h: 112px;                                              /* banner height = .screen top inset */
+  --ih-wheel-size: 224px;
+  --ih-overhang-h: calc(var(--ih-wheel-size) - var(--ih-header-h));  /* 112px at >=900px (wheel - header): how far the wheel hangs below the banner */
+  --ih-row-inset: calc(var(--ih-wheel-size) + 16px);                 /* 240px at >=900px: content that sits right of the wheel */
+  --ih-tabstrip-h: 48px;
+  --ih-widget-col-w: 240px;
+  --ih-slideover-w: 480px;
+}
+@media (max-width: 1099px) {
+  :root { --ih-widget-col-w: 200px; }
+}
+@media (max-width: 899px) {
+  :root { --ih-header-h: 96px; --ih-wheel-size: 192px; }
 }
 
-/* Screen-label chip in the top bar — now a normal flex child of
-   .topbar-row; it is the element that gives way (ellipsizes) under width
-   pressure so the operationally-important .sys-meta readout never has to. */
-.breadcrumb {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  font-size: 10px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--gray);
-  pointer-events: none;
-  min-width: 0;
-  flex-shrink: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.breadcrumb .dot { width: 5px; height: 5px; background: var(--teal); box-shadow: 0 0 6px var(--teal); animation: blink 2.2s ease-in-out infinite; }
-.breadcrumb .v { color: var(--teal); font-weight: 700; }
-.breadcrumb .sep { color: var(--border); }
-
-/* Top-right system meta — now a normal flex child of .topbar-row;
-   flex-shrink: 0 so the build/uptime/token readout (the more operationally
-   important of the two) never truncates. */
+/* System meta — Phase 54.4 Plan 01: the six-segment status strip inside the
+   persistent header (row 1). Base rules below; the header-scoped overrides
+   (label/value colours, segment collapse) follow the .tok-marker rule. */
 .sys-meta {
   display: flex;
   align-items: center;
@@ -265,10 +250,8 @@ a { color: inherit; text-decoration: none; }
   vertical-align: bottom;
 }
 
-/* Phase 50.5 (D-12/D-13): the topbar provenance marker — the SECOND
-   `pointer-events: auto` exception inside this otherwise-inert row (the
-   first is `.topbar-profile` below, a SIBLING of `.sys-meta`, not a
-   descendant; this is the first descendant exception). Reset to plain
+/* Phase 50.5 (D-12/D-13): the topbar provenance marker — a
+   `pointer-events: auto` exception inside the status readout. Reset to plain
    inline-flex text so the `~` glyph and the (unaffected, still-teal via
    `.sys-meta .v`) `{limit}` span sit on one line with a 4px gap, matching
    `.section-label::before`'s dot spacing. No width, no flex-shrink, and no
@@ -288,122 +271,41 @@ a { color: inherit; text-decoration: none; }
   color: var(--amber);
 }
 
-/* Phase 49.4 Plan 11 (D-19): topbar active-profile indicator + chat-scope
-   quick switch. A flex child of .topbar-row, mounted between .breadcrumb
-   and .sys-meta — it gives way before .sys-meta's build/uptime readout
-   ever does (D-22 preserved), matching .breadcrumb's own precedent.
-   .topbar-row sets pointer-events: none for its decorative children; this
-   control needs real clicks, so pointer-events is set back to auto here
-   explicitly rather than removed from the row.
-   Note: text-overflow only takes visual effect together with
-   `overflow: hidden` + `white-space: nowrap` on the SAME element. Those two
-   are deliberately placed on `.topbar-profile-name` (the actual text run)
-   rather than here, because `.topbar-profile-menu` below is a CHILD of
-   this element — `overflow: hidden` here would clip the absolutely
-   positioned dropdown to this element's (small, text-sized) box. */
-.topbar-profile {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* Phase 54.4 Plan 01 (D-07): header-scoped status-strip typography. Scoped to
+   .ih-status-strip so nothing leaks. Labels use --text-dim (NOT --gray:
+   #6e7681 on #161b22 is ~3.8:1, under the 4.5:1 AA bar at 10px); values use
+   --text 700; the MODULE value is the current-location marker (--teal).
+   10px / 700 / 0.18em normalizes the old 9.5px readout. */
+.ih-status-strip .sys-meta {
+  flex: 1 1 auto;
   min-width: 0;
-  flex-shrink: 1;
-  text-overflow: ellipsis;
-  pointer-events: auto;
+  gap: 16px;
   font-size: 10px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--gray);
-}
-.topbar-profile-trigger {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  max-width: 220px;
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  font: inherit;
-  letter-spacing: inherit;
-  text-transform: inherit;
-  color: inherit;
-}
-.topbar-profile-name {
-  color: var(--teal);
   font-weight: 700;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  pointer-events: auto;
 }
-.topbar-profile-caret {
-  color: var(--gray);
+.ih-status-strip .ih-seg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   flex-shrink: 0;
-}
-.topbar-profile-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 8px;
-  min-width: 220px;
-  max-width: 300px;
-  max-height: 320px;
-  overflow-y: auto;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  z-index: 80;
-  padding: 4px 0;
-  text-transform: none;
-  letter-spacing: normal;
-}
-.topbar-profile-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-.topbar-profile-menu-item:hover,
-.topbar-profile-menu-item:focus {
-  background: var(--bg-card-hover);
-}
-.topbar-profile-menu-item-body { min-width: 0; flex: 1 1 auto; }
-/* long-text (must_haves.truths, D-19): the CLOSED state ellipsizes
-   (.topbar-profile-name above); the OPEN dropdown row shows the full
-   name, so it wraps rather than truncates — never both truncated. */
-.topbar-profile-menu-item-name {
-  font-size: 12px;
-  color: var(--text);
-  white-space: normal;
-  overflow-wrap: break-word;
-  word-break: break-word;
-}
-.topbar-profile-menu-item-meta {
-  font-size: 10px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.topbar-profile-health-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.topbar-profile-health-dot--ok { background: var(--green); }
-.topbar-profile-health-dot--gap { background: var(--amber); }
-/* Ad-hoc fix (2026-09): the pinned "default" row (root home / no
-   activation record) and the active-row indicator it uses when no
-   activation record is persisted. box-shadow rather than a real border so
-   the row's padding/width never shifts between active and inactive. */
-.topbar-profile-menu-item--active {
-  box-shadow: inset 2px 0 0 var(--teal);
-  background: var(--bg-card-hover);
+.ih-status-strip .ih-seg-label { color: var(--text-dim); }
+.ih-status-strip .sys-meta .v { color: var(--text); font-weight: 700; }
+.ih-status-strip .ih-seg-module .v { color: var(--teal); }
+.ih-status-strip .sep {
+  flex-shrink: 0;
+  width: 1px;
+  height: 12px;
+  background: var(--border);
 }
-.topbar-profile-menu-loading,
-.topbar-profile-menu-error {
-  padding: 8px 12px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
+/* The model segment is the one that gives way (ellipsis) under width
+   pressure so TOK is never pushed out of view. */
+.ih-status-strip .ih-seg-model { flex-shrink: 1; min-width: 0; }
+.ih-status-strip .ih-seg-tok { margin-left: auto; }
 
 /* Footer status (lighter than index.html ticker) */
 .app-footer {
@@ -411,7 +313,7 @@ a { color: inherit; text-decoration: none; }
   left: 0; right: 0; bottom: 0;
   height: 30px;
   border-top: 1px solid var(--border-faint);
-  background: rgba(13, 17, 23, 0.85);
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
   backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
@@ -428,25 +330,11 @@ a { color: inherit; text-decoration: none; }
 .app-footer-right { margin-left: auto; display: flex; gap: 22px; align-items: center; }
 
 .hud-grid { opacity: 0.35; }
-body.no-breadcrumb .breadcrumb,
-body.no-breadcrumb .sys-meta { display: none; }
 body.no-footer .app-footer { display: none; }
-body.has-rail   #wheel-rail { display: flex !important; }
-body:not(.has-rail) #wheel-rail,
-body:not(.on-chat)  #wheel-rail { display: none !important; }
-body.density-dense .screen { padding-top: 70px; gap: 16px; }
+body.density-dense .screen { padding-top: calc(var(--ih-overhang-h) + 16px); gap: 16px; }
 body.density-dense .screen-title { font-size: 28px; }
 body.density-dense .card { padding: 12px 14px; }
 body.density-dense .panel { padding: 14px 16px; }
-
-/* When rail toggled ON, push chat right to clear it */
-body.has-rail.on-chat #screen-chat { padding-left: 360px; }
-body.has-rail.on-chat #screen-chat .screen-header { padding-left: 0; }
-
-@media (max-width: 1100px) {
-  #screen-chat { padding-left: 36px; padding-right: 20px; }
-  body.has-rail.on-chat #screen-chat { padding-left: 300px; }
-}
 
 /* ─── Per-theme legacy-var overrides (aligns site.css legacy vars with tokens.css [data-theme] palettes) ─── */
 
@@ -563,4 +451,58 @@ body.has-rail.on-chat #screen-chat .screen-header { padding-left: 0; }
   --green:         #3a8a3a;
   --red:           #c43a35;
   --amber:         #a67c2c;
+}
+
+/* ─── Light-theme override of the third token family (G-54.4-4, D-02) ───────
+   design-tokens.css and warp-ih.css declare --w-bg-*, --w-border*, --fg*,
+   --bg-elevated, --border-subtle, the status colours and --accent-primary on
+   :root with dark terminal values only. design-tokens.css is linked after
+   tokens.css at equal specificity, so it also overrides tokens.css's light
+   values for the shared names. This block, in a sheet linked after both, maps
+   those names onto this file's themed tokens for the light themes only. Dark
+   themes are untouched: no dark-theme selector gains a declaration here.
+
+   Reordering the links or wrapping design-tokens.css in :where(:root) was
+   rejected because it would hand slate-dark tokens.css's values for the
+   shared names, a visible dark-theme change.
+
+   The accent ink derives from --teal because theme_effects rewrites only
+   --teal / --teal-bright (inline on <html>) when the accent changes.
+
+   The status inks keep each hue at 65% over the theme text and reach 4.5:1
+   or better on every light surface; the accent inks keep 35% of the accent.
+   The raw palette names and --brand are mapped only because kanban.css and
+   bots.css paint chip text with them directly. On dark themes --warn IS
+   --ansi-yellow and --accent-primary-hi IS --ansi-bright-cyan, and this
+   block keeps those equalities. --w-shadow-block needs no entry, because its
+   only colour is var(--w-border-hi), which resolves on <html> after this
+   block applies. --w-border-focus follows --accent-primary.
+
+   A new light theme must be added to this selector list;
+   family3_light_block_matches_light_themes enforces it. The block must never
+   declare a legacy name of this file (--bg, --bg-card, --text, ...). */
+[data-theme="slate-light"],
+[data-theme="parchment-light"] {
+  --w-bg-0: var(--bg-deep);
+  --w-bg-1: var(--bg-input);
+  --w-bg-2: var(--bg-card);
+  --w-bg-3: var(--bg-card-hover);
+  --w-bg-4: var(--border-faint);
+  --w-border: var(--border-faint);
+  --w-border-hi: var(--border);
+  --w-shadow-float: var(--shadow-2);
+  --bg-elevated: var(--bg-card);
+  --border-subtle: var(--border-faint);
+  --fg: var(--text);
+  --fg-dim: var(--text-dim);
+  --fg-strong: var(--text);
+  --fg-disabled: var(--gray);
+  --accent-primary: color-mix(in srgb, var(--teal) 35%, var(--text));
+  --accent-primary-hi: color-mix(in srgb, var(--teal-bright) 35%, var(--text));
+  --ansi-bright-cyan: color-mix(in srgb, var(--teal-bright) 35%, var(--text));
+  --success: color-mix(in srgb, var(--green) 65%, var(--text));
+  --warn: color-mix(in srgb, var(--amber) 65%, var(--text));
+  --ansi-yellow: color-mix(in srgb, var(--amber) 65%, var(--text));
+  --danger: color-mix(in srgb, var(--red) 65%, var(--text));
+  --brand: color-mix(in srgb, color-mix(in srgb, var(--red) 50%, var(--amber)) 65%, var(--text));
 }

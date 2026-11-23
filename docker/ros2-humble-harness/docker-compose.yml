@@ -1,0 +1,7 @@
+# Phase 49.8 D-17 (local layer): opt-in real-rosbridge harness. Never part
+# of the CI gate. Loopback-only host exposure — T-49.8-24 mitigation.
+services:
+  ros2-humble-harness:
+    build: .
+    ports:
+      - "127.0.0.1:9090:9090"

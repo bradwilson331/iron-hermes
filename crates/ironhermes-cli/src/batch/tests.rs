@@ -545,3 +545,71 @@ fn test_filter_no_reasoning_rejects_short_text_no_tools() {
         "short text-only response without tool calls should be rejected"
     );
 }
+
+// ── Phase 57 Plan 17 (SC-1 / D-04 / D-15): the batch registry carries the security screen ──
+
+/// A batch run builds one registry per prompt. It must hold every default tool and carry
+/// the security screen, so the AgentLoop that runs on it never calls a tool unscreened.
+#[test]
+fn batch_registry_is_screened() {
+    use super::runner::build_batch_registry;
+    let registry = build_batch_registry(&ironhermes_core::AuditConfig::default());
+    assert!(
+        registry.tool_screen().is_some(),
+        "a batch-run registry must carry the security screen"
+    );
+
+    let names = |r: &ironhermes_tools::ToolRegistry| {
+        let mut v: Vec<String> = r
+            .get_definitions(None)
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        v.sort();
+        v
+    };
+    let mut defaults = ironhermes_tools::ToolRegistry::new();
+    defaults.register_defaults();
+    assert_eq!(
+        names(&registry),
+        names(&defaults),
+        "the batch registry keeps every default tool"
+    );
+}
+
+/// With the sidecar blocking a canary, a batch registry refuses a `write_file` carrying it
+/// and the file is never created: the screen is real on the registry the batch loop runs.
+#[tokio::test]
+async fn batch_registry_screen_blocks_canary() {
+    use super::runner::build_batch_registry;
+    use ironhermes_security::policy::Severity;
+    use ironhermes_security::testing::{
+        FakeBackend, clear_installed_for_tests, install_fake_for_tests,
+    };
+
+    install_fake_for_tests(
+        FakeBackend::new().block_if_contains("CANARY-BLOCK", Severity::Critical),
+    );
+    let registry = build_batch_registry(&ironhermes_core::AuditConfig::default());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("batch-out.txt");
+
+    let result = registry
+        .dispatch_with_hook(
+            "write_file",
+            serde_json::json!({ "path": target, "content": "CANARY-BLOCK" }),
+            None::<fn(&str, &str)>,
+        )
+        .await;
+    clear_installed_for_tests();
+
+    let err = result.expect_err("a canary write must be refused by the screen");
+    assert!(
+        err.to_string().contains("security-screen"),
+        "the refusal must come from the security screen, got: {err}"
+    );
+    assert!(
+        !target.exists(),
+        "the blocked write must not have created the file"
+    );
+}

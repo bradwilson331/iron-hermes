@@ -186,11 +186,16 @@ pub fn cap_notice(shown: usize, total: usize) -> Option<String> {
 /// `cfg_attr(not(wasm), allow(dead_code))`: same rationale as `cap_notice`
 /// above.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub fn no_match_hint(displayed: &[String], typed: &str, effective_dirty: bool) -> Option<String> {
+pub fn no_match_hint(
+    displayed: &[String],
+    typed: &str,
+    effective_dirty: bool,
+    noun: &str,
+) -> Option<String> {
     let typed = typed.trim();
     if effective_dirty && displayed.is_empty() && !typed.is_empty() {
         Some(format!(
-            "No matches — press Enter to use \"{typed}\" as a new model id."
+            "No matches — press Enter to use \"{typed}\" as a new {noun}."
         ))
     } else {
         None
@@ -258,16 +263,29 @@ pub fn ModelPickerField(
     // optional so `edit_dialog.rs`'s call site (no per-model sibling state
     // to reset) does not need to pass a no-op closure.
     #[props(default)] on_change: Option<EventHandler<String>>,
+    // Phase 54.7 Plan 02 (UI-SPEC): the noun in the no-match hint ("model id"
+    // by default; voice fields pass "voice"). Defaulted so the existing
+    // models.rs / providers.rs / edit_dialog.rs call sites are unchanged.
+    #[props(default = "model id".to_string())] noun: String,
 ) -> Element {
     let mut open = use_signal(|| false);
     let mut dirty = use_signal(|| false);
+    // One stable listbox id per picker instance so the input's
+    // `aria-controls` can point at it (two pickers never share an id).
+    let listbox_id = use_hook(|| format!("model-popup-{}", uuid::Uuid::new_v4().simple()));
 
     // Read the controlled value into an owned local before `rsx!` — no
     // `GenerationalRef` may be held across the macro (clippy.toml).
     let current = value.read().clone();
     let eff_dirty = effective_dirty(*dirty.read(), &current, &seeded);
-    let (displayed, total) = filter_options(&all_options, &current, &seeded, *dirty.read(), MODEL_PICKER_CAP);
-    let hint = no_match_hint(&displayed, &current, eff_dirty);
+    let (displayed, total) = filter_options(
+        &all_options,
+        &current,
+        &seeded,
+        *dirty.read(),
+        MODEL_PICKER_CAP,
+    );
+    let hint = no_match_hint(&displayed, &current, eff_dirty, &noun);
     let notice = cap_notice(displayed.len(), total);
     let empty_note = empty_catalog_note(&all_options, eff_dirty);
     let affordance = search_affordance(displayed.len(), total, &current, eff_dirty);
@@ -283,6 +301,7 @@ pub fn ModelPickerField(
                 placeholder: "{placeholder}",
                 role: "combobox",
                 aria_expanded: "{is_open}",
+                "aria-controls": "{listbox_id}",
                 oninput: move |evt| {
                     value.set(evt.value());
                     dirty.set(true);
@@ -307,7 +326,7 @@ pub fn ModelPickerField(
                 },
             }
             if is_open {
-                div { class: "model-popup", role: "listbox",
+                div { class: "model-popup", id: "{listbox_id}", role: "listbox",
                     div { class: "model-popup-note", "{affordance}" }
                     if let Some(empty_text) = empty_note {
                         div { class: "model-popup-note", "{empty_text}" }
@@ -371,11 +390,14 @@ mod tests {
 
     #[test]
     fn test_no_match_hint_requires_nonempty_typed_text() {
-        let hint = no_match_hint(&[], "gpt-6-turbo", true);
+        let hint = no_match_hint(&[], "gpt-6-turbo", true, "model id");
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("gpt-6-turbo"));
-        assert_eq!(no_match_hint(&[], "", true), None);
-        assert_eq!(no_match_hint(&["a".to_string()], "a", true), None);
+        assert_eq!(no_match_hint(&[], "", true, "model id"), None);
+        assert_eq!(
+            no_match_hint(&["a".to_string()], "a", true, "model id"),
+            None
+        );
     }
 
     #[test]
@@ -386,9 +408,118 @@ mod tests {
     #[test]
     fn test_no_match_hint_string_matches_the_ui_spec_format() {
         assert_eq!(
-            no_match_hint(&[], "gpt-6-turbo", true).unwrap(),
+            no_match_hint(&[], "gpt-6-turbo", true, "model id").unwrap(),
             "No matches — press Enter to use \"gpt-6-turbo\" as a new model id."
         );
+    }
+
+    /// Phase 54.7 Plan 02 (UI-SPEC): voice fields say "voice", not "model id".
+    #[test]
+    fn no_match_hint_uses_the_noun() {
+        assert_eq!(
+            no_match_hint(&[], "af_x", true, "voice").unwrap(),
+            "No matches — press Enter to use \"af_x\" as a new voice."
+        );
+        assert_eq!(
+            no_match_hint(&[], "af_x", true, "model id").unwrap(),
+            "No matches — press Enter to use \"af_x\" as a new model id."
+        );
+    }
+
+    /// Renders a `ModelPickerField` and opens its popup with a click on the
+    /// input (ElementId(2), the same pin the on_change test documents), then
+    /// returns the SSR html.
+    fn open_picker_html(options: &[&str]) -> String {
+        use dioxus::dioxus_core::ElementId;
+        use dioxus::prelude::*;
+        use std::any::Any;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        thread_local! {
+            static OPTIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+        OPTIONS.with(|o| *o.borrow_mut() = options.iter().map(|s| s.to_string()).collect());
+
+        fn test_app() -> Element {
+            let value = use_signal(String::new);
+            rsx! {
+                super::ModelPickerField {
+                    value,
+                    all_options: OPTIONS.with(|o| o.borrow().clone()),
+                    seeded: String::new(),
+                    disabled: false,
+                    placeholder: "".to_string(),
+                    title: "".to_string(),
+                    noun: "voice".to_string(),
+                }
+            }
+        }
+
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let mut dom = VirtualDom::new(test_app);
+        dom.rebuild_to_vec();
+        let click = Event::new(
+            Rc::new(dioxus::html::PlatformEventData::new(Box::<
+                dioxus::html::SerializedMouseData,
+            >::default(
+            ))) as Rc<dyn Any>,
+            true,
+        );
+        dom.runtime().handle_event("click", click, ElementId(2));
+        dom.render_immediate_to_vec();
+        dioxus::ssr::render(&dom)
+    }
+
+    fn attr_value(html: &str, attr: &str) -> Option<String> {
+        let marker = format!("{attr}=\"");
+        let start = html.find(&marker)? + marker.len();
+        let len = html[start..].find('"')?;
+        Some(html[start..start + len].to_string())
+    }
+
+    #[test]
+    fn picker_input_has_aria_controls_matching_listbox_id() {
+        let html = open_picker_html(&["alloy", "marin"]);
+        let controls = attr_value(&html, "aria-controls")
+            .unwrap_or_else(|| panic!("input must carry aria-controls: {html}"));
+        assert!(!controls.is_empty());
+        let listbox_at = html
+            .find("role=\"listbox\"")
+            .unwrap_or_else(|| panic!("opened popup must render a listbox: {html}"));
+        // The listbox element's own opening tag carries the id.
+        let tag_start = html[..listbox_at].rfind('<').unwrap();
+        let tag_end = listbox_at + html[listbox_at..].find('>').unwrap();
+        let listbox_tag = &html[tag_start..tag_end];
+        assert_eq!(
+            attr_value(listbox_tag, "id").as_deref(),
+            Some(controls.as_str()),
+            "aria-controls must equal the listbox id: {html}"
+        );
+        // Two pickers must never share an id (one per instance).
+        let other = open_picker_html(&["alloy", "marin"]);
+        assert_ne!(
+            attr_value(&other, "aria-controls").as_deref(),
+            Some(controls.as_str()),
+            "each picker instance needs its own listbox id"
+        );
+    }
+
+    #[test]
+    fn picker_rows_carry_full_text_title() {
+        let ids = ["alloy", "mlx-community/Kokoro-82M-bf16"];
+        let html = open_picker_html(&ids);
+        assert_eq!(
+            html.matches("role=\"option\"").count(),
+            ids.len(),
+            "one row per option: {html}"
+        );
+        for id in ids {
+            assert!(
+                html.contains(&format!("title=\"{id}\"")),
+                "row for {id} must carry its full text as title: {html}"
+            );
+        }
     }
 
     fn fixture() -> Vec<String> {
@@ -426,8 +557,8 @@ mod tests {
 
     #[test]
     fn no_match_hint_is_reachable_once_typed() {
-        assert!(no_match_hint(&[], "zzz", true).is_some());
-        assert_eq!(no_match_hint(&[], "", false), None);
+        assert!(no_match_hint(&[], "zzz", true, "model id").is_some());
+        assert_eq!(no_match_hint(&[], "", false, "model id"), None);
     }
 
     #[test]
@@ -593,7 +724,13 @@ mod tests {
         // Open the popup: a click on the input (ElementId(2)).
         dom.runtime().handle_event("click", mouse_click(), ElementId(2));
         dom.render_immediate_to_vec();
-        LAST_CHANGE.with(|c| assert_eq!(*c.borrow(), None, "opening the popup must not fire on_change"));
+        LAST_CHANGE.with(|c| {
+            assert_eq!(
+                *c.borrow(),
+                None,
+                "opening the popup must not fire on_change"
+            )
+        });
 
         // Confirmed pick: click the "model-a" row (ElementId(6) — the
         // first popup row's own template root, per the fixed render

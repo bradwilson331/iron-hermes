@@ -23,7 +23,7 @@
 //! `Intl.DateTimeFormat` are browser-only. Server / unit-test builds compile
 //! cleanly without introducing chrono as a new dependency.
 
-use crate::server::display_tz_api::{get_display_timezones, DisplayTimezones};
+use crate::server::display_tz_api::{get_display_timezones, get_node_hostname, DisplayTimezones};
 use crate::state::Screen;
 use dioxus::prelude::*;
 
@@ -49,6 +49,9 @@ pub fn AppFooter() -> Element {
             tz_loaded.set(true);
         }
     }
+
+    // Hostname never changes for an open tab; one fetch, "…" until it lands.
+    let node_resource = use_resource(move || async move { get_node_hostname().await });
 
     let mut clock = use_signal(|| format_clock(None, false));
     let mut extra_clocks = use_signal(Vec::<(String, String)>::new);
@@ -90,10 +93,15 @@ pub fn AppFooter() -> Element {
     let extra_clocks_snapshot = extra_clocks.read().clone();
     // Phase 36.17.4: read into Copy locals before RSX (clippy.toml: signal borrow must not span RSX).
     let (queue_depth, queue_paused) = *queue_state.read();
+    let node_name = match node_resource.read().as_ref() {
+        Some(Ok(h)) => h.clone(),
+        Some(Err(_)) => "unknown".to_string(),
+        None => "…".to_string(),
+    };
 
     rsx! {
         div { class: "app-footer",
-            span { "NODE " span { class: "v", "HERMES-7" } }
+            span { "NODE: " span { class: "v", "{node_name}" } }
             span { class: "sep" }
             span { "SCREEN " span { id: "ft-screen", class: "v", "{label}" } }
             span { class: "sep" }
@@ -159,6 +167,12 @@ fn screen_label(s: Screen) -> &'static str {
         // Phase 46.6 Plan 05 (D-07): Artifacts gallery + sandboxed viewer.
         Screen::Artifacts => "ARTIFACTS",
         Screen::ArtifactViewer => "ARTIFACT",
+        // Phase 54.4 Plan 07 (D-08): server / audit / agent-activity logs.
+        Screen::Logs => "LOGS",
+        // Phase 54.9 Plan 09 (D-13): generated views.
+        Screen::OpenUi => "OPENUI",
+        // Phase 54.10 Plan 01 (D-01): live boards.
+        Screen::Dashboard => "DASHBOARD",
     }
 }
 

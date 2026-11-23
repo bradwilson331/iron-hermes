@@ -17,6 +17,21 @@ use super::filters;
 use super::sharegpt::messages_to_sharegpt;
 use super::types::{BatchEntry, BatchRunRecord, CheckpointEntry, TrajectoryLine, UsageInfo};
 
+/// The registry one batch prompt runs against: every default tool, plus (SC-1 / D-04 /
+/// D-15) the security screen, so no tool call a batch agent makes is unscreened.
+///
+/// A batch run has no approval gate, so a screen Warn fails closed at DEFCON 1-3 and is an
+/// audited bypass at 4-5 (the plan 09 design); a Block never runs at any level. The
+/// sidecar comes from `main`'s boot (`command_hosts_agent` includes `batch`).
+pub fn build_batch_registry(audit: &ironhermes_core::AuditConfig) -> ToolRegistry {
+    let mut r = ToolRegistry::new();
+    r.register_defaults();
+    r.set_tool_screen(Arc::new(
+        ironhermes_hooks::SecurityToolScreen::from_installed(audit.clone()),
+    ));
+    r
+}
+
 /// Run batch prompt execution from JSONL input (D-01).
 pub async fn cmd_run(
     input: PathBuf,
@@ -247,11 +262,7 @@ pub async fn cmd_run(
         };
         let tx = tx.clone();
         let client = build_main_client(&resolver)?;
-        let registry = Arc::new(RwLock::new({
-            let mut r = ToolRegistry::new();
-            r.register_defaults();
-            r
-        }));
+        let registry = Arc::new(RwLock::new(build_batch_registry(&config.audit)));
         let hash_clone = hash.clone();
         let model_for_traj = model_name.clone();
         let resolver_clone = resolver.clone();
@@ -265,7 +276,9 @@ pub async fn cmd_run(
             }
             messages.push(ChatMessage::user(&entry.prompt));
 
-            let mut agent = AgentLoop::new(client, registry.clone(), max_turns);
+            // Phase 58.3.1 D-09: size requests against the main endpoint's window.
+            let mut agent = AgentLoop::new(client, registry.clone(), max_turns)
+                .with_window_endpoint(resolver_clone.resolve_for_main().clone());
             agent = wire_fallback_if_configured(agent, &resolver_clone); // chains .with_fallback() via the shared helper — PROV-07
             match agent.run(messages).await {
                 Ok(result) => {

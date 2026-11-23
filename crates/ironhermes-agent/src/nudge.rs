@@ -59,6 +59,32 @@ pub const MEMORY_REVIEW_PROMPT: &str = "Review the conversation above and consid
      Be selective — only persist what genuinely improves every future conversation.\n\n\
      If nothing is worth saving, just say 'Nothing to save.' and stop.";
 
+/// Build the narrow registry the nudge review agent runs against: the memory tool only.
+///
+/// Split out of [`spawn_nudge_review`] so the registry's composition (and, since Phase 57
+/// plan 09, its security screen) can be asserted without driving an LLM.
+pub fn build_nudge_registry(memory_manager: Arc<Mutex<MemoryManager>>) -> ToolRegistry {
+    // SECURITY (T-32-01): no `session_search`, `web_read`, `execute_code`,
+    // browser_*, or skill tools may be registered here. The single
+    // registration call below is the only one in this module — the strict
+    // acceptance grep counts the open-paren form, so comments deliberately
+    // avoid that form to keep the count at exactly 1.
+    let mut nudge_registry = ToolRegistry::new();
+    let shared: ironhermes_tools::memory_tool::SharedMemoryManager = memory_manager;
+    nudge_registry.register(Box::new(ironhermes_tools::memory_tool::MemoryTool::new(
+        shared,
+    )));
+    // Phase 57 Plan 09 (SC-1): no production registry stays unscreened. The memory tool's
+    // arguments are free text the model chose, so they go through the same screen as every
+    // other tool call (the memory file itself is also screened at load, plan 08).
+    nudge_registry.set_tool_screen(Arc::new(
+        ironhermes_hooks::SecurityToolScreen::from_installed(
+            ironhermes_core::AuditConfig::default(),
+        ),
+    ));
+    nudge_registry
+}
+
 /// Run the periodic memory-review nudge.
 ///
 /// The caller is responsible for `tokio::spawn`-ing this future so the REPL /
@@ -88,19 +114,7 @@ pub async fn spawn_nudge_review(
     client: AnyClient,
     _config: &Config,
 ) {
-    // Build a narrow registry: MemoryTool only.
-    //
-    // SECURITY (T-32-01): no `session_search`, `web_read`, `execute_code`,
-    // browser_*, or skill tools may be registered here. The single
-    // registration call below is the only one in this module — the strict
-    // acceptance grep counts the open-paren form, so comments deliberately
-    // avoid that form to keep the count at exactly 1.
-    let mut nudge_registry = ToolRegistry::new();
-    let shared: ironhermes_tools::memory_tool::SharedMemoryManager = memory_manager.clone();
-    nudge_registry.register(Box::new(ironhermes_tools::memory_tool::MemoryTool::new(
-        shared,
-    )));
-    let nudge_registry = Arc::new(RwLock::new(nudge_registry));
+    let nudge_registry = Arc::new(RwLock::new(build_nudge_registry(memory_manager.clone())));
 
     // Build the internal AgentLoop. max_iterations=8 mirrors the Python
     // `_spawn_background_review` cap — convergence is typically 1-3 turns.

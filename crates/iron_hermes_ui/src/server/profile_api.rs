@@ -72,7 +72,7 @@ use crate::protocol::{ProfileGap, ProfileHealth};
 use crate::protocol::{
     CreateProfileRequest, DuplicateProfileRequest, KeyMode, KeyRow, KeyStatus,
     ProfileConfigWritePayload, ProfileDetail, ProfilePersona, ProfileRow, ProfileSkillRow,
-    SecretSource, SecretsSourceAvailability, SyncProfileSecretsRequest, SyncProfileSecretsResponse,
+    RootAgentDefaults, SecretSource, SecretsSourceAvailability, SyncProfileSecretsRequest, SyncProfileSecretsResponse,
 };
 
 // Phase 49.4.1: `root_provider_connection_fields` builds a
@@ -980,6 +980,11 @@ pub(crate) async fn create_profile_impl(
     Ok(rows)
 }
 
+/// The fixed error text of the write gate (`security.web_config_write_enabled`
+/// off). Portable (not `server`-gated) so the client can recognise a closed
+/// gate by this text instead of retrying and toasting on every focus (WR-03).
+pub const CONFIG_WRITES_DISABLED: &str = "Config writes are disabled";
+
 /// Phase 47.4 Plan 03: fail-closed write gate — same flag and error string
 /// `update_provider_config`/`write_provider_secret` already enforce for
 /// this codebase's other two browser-reachable credential/config write
@@ -991,7 +996,7 @@ pub(crate) fn check_profile_write_gate(
     config: &ironhermes_core::config::Config,
 ) -> Result<(), String> {
     if !config.security.web_config_write_enabled {
-        return Err("Config writes are disabled".to_string());
+        return Err(CONFIG_WRITES_DISABLED.to_string());
     }
     Ok(())
 }
@@ -2379,6 +2384,81 @@ pub async fn fetch_profile_detail(name: String) -> Result<ProfileDetail, ServerF
     }
 }
 
+/// Phase 54.4 Plan 05 (D-07, D-01): the three values the persistent header
+/// shows for a FOCUSED agent — its provider, its default model and its
+/// terminal backend. Portable DTO (compiled on wasm so the `#[server]` client
+/// stub has the type) living beside its server fn. Deliberately nothing else:
+/// no key, no `.env` content, no path (cross-profile exposure, T-54.4-16).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct AgentHeaderState {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub terminal_backend: Option<String>,
+}
+
+/// Project a loaded [`Config`](ironhermes_core::config::Config) onto
+/// [`AgentHeaderState`]: `model.provider`, `model.default`, `terminal.backend`
+/// — empty strings become `None`, nothing else is read.
+#[cfg(feature = "server")]
+pub(crate) fn agent_header_state_from_config(
+    cfg: &ironhermes_core::config::Config,
+) -> AgentHeaderState {
+    fn non_empty(s: &str) -> Option<String> {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    }
+    AgentHeaderState {
+        provider: non_empty(&cfg.model.provider),
+        model: non_empty(&cfg.model.default),
+        terminal_backend: non_empty(&cfg.terminal.backend),
+    }
+}
+
+/// Phase 54.4 Plan 05: the disk-only core of [`fetch_agent_header_state`],
+/// separated so it is testable without a server runtime. `"default"` is the
+/// root agent and reads `$IRONHERMES_HOME/config.yaml`; any other name is
+/// validated by the server's own profile-name rule BEFORE a path is built and
+/// reads `profiles/<name>/config.yaml`. Reads that one file only — never
+/// `.env`, `state.db` or any sibling. Errors carry no filesystem path.
+#[cfg(feature = "server")]
+pub(crate) fn agent_header_state_impl(name: &str) -> Result<AgentHeaderState, String> {
+    let config_path = if name == "default" {
+        ironhermes_core::get_hermes_home().join("config.yaml")
+    } else {
+        ironhermes_core::profile::validate_profile_name(name)
+            .map_err(|e| format!("invalid profile name: {e}"))?;
+        profile_dir_for(name).join("config.yaml")
+    };
+    if !config_path.is_file() {
+        return Err(format!("agent '{name}' has no config.yaml"));
+    }
+    let cfg = ironhermes_core::config::Config::load_from(&config_path)
+        .map_err(|_| format!("agent '{name}' config.yaml could not be read"))?;
+    Ok(agent_header_state_from_config(&cfg))
+}
+
+/// Phase 54.4 Plan 05 (D-07, D-01): the header's per-agent read — PROVIDER,
+/// MODEL and the ENV chip follow the focused agent. Ungated read (it reports,
+/// it does not write). The name arrives from the browser, so
+/// [`agent_header_state_impl`] validates it before any path exists.
+#[server]
+pub async fn fetch_agent_header_state(name: String) -> Result<AgentHeaderState, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        tokio::task::spawn_blocking(move || agent_header_state_impl(&name))
+            .await
+            .map_err(|_| ServerFnError::new("agent header state task failed"))?
+            .map_err(ServerFnError::new)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = name;
+        Err(ServerFnError::new(
+            "fetch_agent_header_state unavailable without `server` feature",
+        ))
+    }
+}
+
 /// Phase 47.4 Plan 05 (D-04): payload validation for `update_profile_config`
 /// — reuses `validate_profile_name` (defense-in-depth, matching
 /// `create_profile`) and rejects an explicitly-empty `Some("")` provider or
@@ -2420,8 +2500,66 @@ pub(crate) fn validate_profile_config_payload(
             );
         }
     }
+    // Phase 54.4 Plan 03 (T-54.4-05, D-16/D-17/D-18): the same pre-I/O
+    // discipline for the staged tools fields. Caps bound the payload (a cheap
+    // DoS vector against the profile config file); duplicate and blank names
+    // would otherwise land as ambiguous or inert keys. Catalog membership
+    // (unknown / `mcp__` names) is checked in `apply_tools_selection`, the
+    // only place that knows the live catalog.
+    if let Some(ref tools_toolsets) = payload.tools_toolsets {
+        if tools_toolsets.len() > MAX_TOOLSET_ENTRIES {
+            return Err(format!(
+                "tools_toolsets must not exceed {MAX_TOOLSET_ENTRIES} entries"
+            ));
+        }
+        let mut seen: HashSet<&str> = HashSet::with_capacity(tools_toolsets.len());
+        for (name, _enabled) in tools_toolsets {
+            if name.trim().is_empty() {
+                return Err(
+                    "tools_toolsets names must not be empty or whitespace-only".to_string()
+                );
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(format!("tools_toolsets contains a duplicate name: {name}"));
+            }
+        }
+    }
+    for (field, list) in [
+        ("tools_disable", &payload.tools_disable),
+        ("tools_enable", &payload.tools_enable),
+    ] {
+        if let Some(list) = list {
+            if list.len() > MAX_TOOLS_DISABLED_ENTRIES {
+                return Err(format!(
+                    "{field} must not exceed {MAX_TOOLS_DISABLED_ENTRIES} entries"
+                ));
+            }
+            if list.iter().any(|name| name.trim().is_empty()) {
+                return Err(format!(
+                    "{field} entries must not be empty or whitespace-only"
+                ));
+            }
+        }
+    }
+    if let (Some(disable), Some(enable)) = (&payload.tools_disable, &payload.tools_enable) {
+        if let Some(both) = disable.iter().find(|n| enable.contains(n)) {
+            return Err(format!(
+                "tool {both} cannot be both disabled and enabled in one save"
+            ));
+        }
+    }
     Ok(())
 }
+
+/// Phase 54.4 Plan 03 (T-54.4-05): upper bound on `tools_toolsets` entries —
+/// comfortably above the built-in taxonomy (`ALL_TOOLSETS`, ~11 groups).
+#[cfg(feature = "server")]
+const MAX_TOOLSET_ENTRIES: usize = 64;
+/// Phase 54.4 Plan 03 (T-54.4-05): upper bound on `tools_disable` /
+/// `tools_enable` entries —
+/// matches the 512-entry `skills_disabled` precedent.
+#[cfg(feature = "server")]
+const MAX_TOOLS_DISABLED_ENTRIES: usize = 512;
 
 /// Phase 50.1 Plan 05 (D-15, T-50.1-05-01/T-50.1-05-03): merge a validated
 /// opt-out list onto a profile's `skills.disabled`, rejecting any name not
@@ -2468,6 +2606,75 @@ pub(crate) fn merge_profile_config_payload(
     }
 }
 
+/// Phase 54.4 Plan 03 (D-16/D-17/D-18, T-54.4-05/06/10): validate-then-apply
+/// for a staged built-in tools selection. Step 1 validates EVERY name —
+/// toolsets through `validate_toolset_target` (rejects `mcp__*` and unknown
+/// groups), tools through `validate_known_tool` — and returns the first
+/// `Err` without touching `cfg`; step 2 applies. Because the caller's
+/// `cfg.save_to` never runs on `Err`, a rejected selection leaves the
+/// profile's `config.yaml` byte-identical.
+///
+/// `toolsets` writes `tools.toolsets.<name>.enabled`. `disable` / `enable` are
+/// the operator's DELTA (WR-06) applied to the `tools.disabled` that `cfg`
+/// holds NOW (the caller re-reads it from disk at save time): `enable` names
+/// are removed, `disable` names are added, and every other entry — including
+/// tools disabled elsewhere since the panel opened, MCP tool names and names
+/// the running registry does not know — is preserved verbatim, so a Save from
+/// the slide-over cannot silently re-enable something it never touched. The
+/// result is sorted + de-duplicated to match `apply_tool_disabled_toggle`'s
+/// stable-file rule. No allow-list semantics (D-17): resolution is
+/// untouched, this only edits the opt-out data.
+#[cfg(feature = "server")]
+pub(crate) fn apply_tools_selection(
+    cfg: &mut ironhermes_core::config::Config,
+    toolsets: Option<&[(String, bool)]>,
+    disable: Option<&[String]>,
+    enable: Option<&[String]>,
+    catalog: &crate::server::tools_config_api::ToolNameCatalog,
+) -> Result<(), String> {
+    // Step 1 — validate everything before mutating anything.
+    if let Some(toolsets) = toolsets {
+        for (name, _enabled) in toolsets {
+            crate::server::tools_config_api::validate_toolset_target(name, &catalog.toolsets)?;
+        }
+    }
+    for name in disable.into_iter().chain(enable).flatten() {
+        crate::server::tools_config_api::validate_known_tool(name, &catalog.tools)?;
+    }
+    if let (Some(disable), Some(enable)) = (disable, enable) {
+        if let Some(both) = disable.iter().find(|n| enable.contains(n)) {
+            return Err(format!(
+                "tool {both} cannot be both disabled and enabled in one save"
+            ));
+        }
+    }
+
+    // Step 2 — apply.
+    if let Some(toolsets) = toolsets {
+        for (name, enabled) in toolsets {
+            cfg.tools.toolsets.insert(
+                name.clone(),
+                ironhermes_core::config::ToolsetEntry { enabled: *enabled },
+            );
+        }
+    }
+    if disable.is_some() || enable.is_some() {
+        let enable = enable.unwrap_or(&[]);
+        let mut next: Vec<String> = cfg
+            .tools
+            .disabled
+            .iter()
+            .filter(|existing| !enable.contains(existing))
+            .cloned()
+            .collect();
+        next.extend(disable.unwrap_or(&[]).iter().cloned());
+        next.sort();
+        next.dedup();
+        cfg.tools.disabled = next;
+    }
+    Ok(())
+}
+
 /// Phase 47.4 Plan 05 (D-04): the full write — load THAT profile's own
 /// `config.yaml` (never the root), merge, atomic save. `config.yaml` is
 /// non-secret, so `Config::save_to`'s temp+rename (`config.rs:3568-3577`)
@@ -2475,12 +2682,48 @@ pub(crate) fn merge_profile_config_payload(
 /// material (see `write_env_atomic_0600` for that path). Extracted as a
 /// pure/synchronous/disk-only fn so it is directly testable, mirroring
 /// `create_profile_impl`.
+///
+/// Phase 54.4 Plan 03: kept as a one-line delegate with an EMPTY tool
+/// catalog so every pre-existing caller and test is untouched — an empty
+/// catalog makes any `tools_*` field fail closed.
 #[cfg(feature = "server")]
 pub(crate) fn update_profile_config_impl(
     payload: &ProfileConfigWritePayload,
 ) -> Result<(), String> {
+    update_profile_config_impl_with(
+        payload,
+        &crate::server::tools_config_api::ToolNameCatalog::default(),
+    )
+}
+
+/// Serialises read-modify-write of a profile `config.yaml`: shared by
+/// [`update_profile_config_impl_with`] and the 54.13 raw editor's save. Held
+/// only across blocking work, never across an await; not re-entrant (a caller
+/// already holding it must not take it again); a poisoned lock is recovered
+/// because the guarded data is `()`. Profile writers elsewhere take no lock.
+#[cfg(feature = "server")]
+pub(crate) fn lock_profile_config_write() -> std::sync::MutexGuard<'static, ()> {
+    static PROFILE_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    PROFILE_CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Phase 54.4 Plan 03: [`update_profile_config_impl`] with the writable
+/// built-in tool catalog injected (D-16/D-17/D-18). The `#[server]` fn
+/// computes the catalog from the live registry before `spawn_blocking`;
+/// tests pass a hand-built one.
+#[cfg(feature = "server")]
+pub(crate) fn update_profile_config_impl_with(
+    payload: &ProfileConfigWritePayload,
+    catalog: &crate::server::tools_config_api::ToolNameCatalog,
+) -> Result<(), String> {
     let profile_dir = profile_dir_for(&payload.name);
     let config_path = profile_dir.join("config.yaml");
+    // WR-06: serialise the read-modify-write so two overlapping saves cannot
+    // interleave their load and save and drop each other's tool delta. The
+    // delta is applied to the config re-read HERE, not to a panel snapshot.
+    let _write_guard = lock_profile_config_write();
     let mut cfg = ironhermes_core::config::Config::load_from(&config_path)
         .map_err(|e| format!("load profile config.yaml: {e}"))?;
     merge_profile_config_payload(&mut cfg, payload);
@@ -2498,6 +2741,20 @@ pub(crate) fn update_profile_config_impl(
             .map(|r| r.name.clone())
             .collect();
         apply_skills_disabled(&mut cfg, skills_disabled, &catalog_names)?;
+    }
+    // Phase 54.4 Plan 03 (D-16/D-17/D-18): staged built-in tools selection.
+    // Validated in full before any mutation; an Err returns before save_to.
+    if payload.tools_toolsets.is_some()
+        || payload.tools_disable.is_some()
+        || payload.tools_enable.is_some()
+    {
+        apply_tools_selection(
+            &mut cfg,
+            payload.tools_toolsets.as_deref(),
+            payload.tools_disable.as_deref(),
+            payload.tools_enable.as_deref(),
+            catalog,
+        )?;
     }
     cfg.save_to(&config_path)
         .map_err(|e| format!("save profile config.yaml: {e}"))?;
@@ -2523,7 +2780,20 @@ pub async fn update_profile_config(
             .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
         check_profile_write_gate(&config).map_err(ServerFnError::new)?;
 
-        tokio::task::spawn_blocking(move || update_profile_config_impl(&payload))
+        // Phase 54.4 Plan 03: the writable built-in catalog is only needed
+        // (and only read from the live registry) when the payload carries a
+        // tools field; otherwise an empty catalog keeps provider/model- and
+        // skills-only saves exactly as before.
+        let catalog = if payload.tools_toolsets.is_some()
+            || payload.tools_disable.is_some()
+            || payload.tools_enable.is_some()
+        {
+            crate::server::tools_config_api::writable_tool_catalog().await
+        } else {
+            crate::server::tools_config_api::ToolNameCatalog::default()
+        };
+
+        tokio::task::spawn_blocking(move || update_profile_config_impl_with(&payload, &catalog))
             .await
             .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
             .map_err(ServerFnError::new)?;
@@ -2535,6 +2805,62 @@ pub async fn update_profile_config(
         let _ = payload;
         Err(ServerFnError::new(
             "update_profile_config unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 54.4 Plan 03 (D-19): project the ROOT config onto the credential-
+/// free [`RootAgentDefaults`] DTO. Copies `model.provider`, `model.default`,
+/// `skills.disabled` and `tools.disabled` — and nothing from
+/// `tools.credentials`, a provider key or any `.env` value. The disabled
+/// built-in toolsets are passed in because they are the page state's
+/// EFFECTIVE view (computed over the live catalog), not a raw config field.
+/// Pure and disk-I/O-free.
+#[cfg(feature = "server")]
+pub(crate) fn root_agent_defaults_from_parts(
+    cfg: &ironhermes_core::config::Config,
+    disabled_toolsets: Vec<String>,
+) -> RootAgentDefaults {
+    RootAgentDefaults {
+        provider: cfg.model.provider.clone(),
+        model: cfg.model.default.clone(),
+        skills_disabled: cfg.skills.disabled.clone(),
+        disabled_toolsets,
+        tools_disabled: cfg.tools.disabled.clone(),
+    }
+}
+
+/// Phase 54.4 Plan 03 (D-19): the root profile's provider, model, disabled
+/// skills, disabled built-in toolsets and disabled tools — the data behind
+/// the settings slide-over's UNSTAGED "Load default" action. Ungated: a read,
+/// like `list_profiles` and `fetch_profile_detail`.
+///
+/// Reads a FRESH `Config::load()` (the UI server's home IS the root; profiles
+/// live under it, see `profile_dir_for`), never `list_skills()` — whose
+/// `enabled` flags resolve from the activated profile, not the root.
+/// Returns no credential: `RootAgentDefaults` has no field that could carry
+/// one (T-54.4-09).
+#[server]
+pub async fn fetch_root_agent_defaults() -> Result<RootAgentDefaults, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let cfg = tokio::task::spawn_blocking(ironhermes_core::config::Config::load)
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(|e| {
+                // The underlying error can embed the config file path — log
+                // it server-side, return an operator-readable message only.
+                tracing::warn!(error = %e, "fetch_root_agent_defaults: root Config::load failed");
+                ServerFnError::new("Could not load the default configuration")
+            })?;
+        let disabled_toolsets =
+            crate::server::tools_config_api::root_disabled_builtin_toolsets(&cfg).await;
+        Ok(root_agent_defaults_from_parts(&cfg, disabled_toolsets))
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        Err(ServerFnError::new(
+            "fetch_root_agent_defaults unavailable without `server` feature",
         ))
     }
 }
@@ -5692,6 +6018,9 @@ mod profile_key_masking_tests {
             provider: provider.map(|s| s.to_string()),
             model_default: model_default.map(|s| s.to_string()),
             skills_disabled: None,
+            tools_toolsets: None,
+            tools_disable: None,
+            tools_enable: None,
         }
     }
 
@@ -6365,10 +6694,412 @@ mod profile_key_masking_tests {
             provider: None,
             model_default: None,
             skills_disabled: Some(vec!["   ".to_string()]),
+            tools_toolsets: None,
+            tools_disable: None,
+            tools_enable: None,
         };
         let err = validate_profile_config_payload(&payload)
             .expect_err("a whitespace-only entry must be rejected");
         assert!(err.contains("skills_disabled"));
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 54.4 Plan 03 (D-16/D-17/D-18): apply_tools_selection /
+    // update_profile_config_impl_with — Task 1 <behavior>.
+    // -------------------------------------------------------------------
+
+    fn tools_test_catalog() -> crate::server::tools_config_api::ToolNameCatalog {
+        crate::server::tools_config_api::ToolNameCatalog {
+            toolsets: ["web", "memory"].iter().map(|s| s.to_string()).collect(),
+            tools: ["web_search", "web_extract", "memory_read"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+
+    fn tools_payload(
+        name: &str,
+        toolsets: Option<Vec<(&str, bool)>>,
+        disabled: Option<Vec<&str>>,
+    ) -> ProfileConfigWritePayload {
+        let mut payload = write_payload(name, None, None);
+        payload.tools_toolsets =
+            toolsets.map(|v| v.into_iter().map(|(n, e)| (n.to_string(), e)).collect());
+        payload.tools_disable = disabled.map(|v| v.into_iter().map(String::from).collect());
+        payload
+    }
+
+    /// Scaffold `<home>/profiles/<name>/config.yaml` from `cfg`; returns the
+    /// config path.
+    fn scaffold_profile_config(name: &str, cfg: &Config) -> PathBuf {
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let path = profile_dir.join("config.yaml");
+        cfg.save_to(&path).expect("save_to profile config.yaml");
+        path
+    }
+
+    #[test]
+    fn apply_tools_selection_round_trips_through_update_profile_config_impl_with() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let path = scaffold_profile_config("tracer-tools", &Config::default());
+
+        let payload = tools_payload(
+            "tracer-tools",
+            Some(vec![("web", true), ("memory", false)]),
+            Some(vec!["web_extract"]),
+        );
+        update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect("a catalog-valid tools selection must persist");
+
+        let reloaded = Config::load_from(&path).expect("reload profile config.yaml");
+        assert_eq!(
+            reloaded.tools.toolsets.get("web").map(|e| e.enabled),
+            Some(true),
+            "web must be written enabled"
+        );
+        assert_eq!(
+            reloaded.tools.toolsets.get("memory").map(|e| e.enabled),
+            Some(false),
+            "memory must be written disabled"
+        );
+        assert!(
+            reloaded.tools.disabled.iter().any(|d| d == "web_extract"),
+            "web_extract must land in tools.disabled, got {:?}",
+            reloaded.tools.disabled
+        );
+    }
+
+    #[test]
+    fn apply_tools_selection_rejects_unknown_toolset_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let path = scaffold_profile_config("tools-unknown-set", &Config::default());
+        let before = fs::read(&path).expect("read before");
+
+        let payload = tools_payload(
+            "tools-unknown-set",
+            Some(vec![("web", true), ("nope", true)]),
+            None,
+        );
+        let err = update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect_err("an unknown toolset must be rejected");
+        assert!(err.contains("unknown toolset"), "got: {err}");
+        assert_eq!(
+            before,
+            fs::read(&path).expect("read after"),
+            "a rejected selection must leave config.yaml byte-identical — even for the valid `web` entry that preceded the bad one"
+        );
+    }
+
+    #[test]
+    fn apply_tools_selection_rejects_mcp_prefixed_toolset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let path = scaffold_profile_config("tools-mcp-set", &Config::default());
+        let before = fs::read(&path).expect("read before");
+
+        // Even a catalog that (wrongly) listed the MCP group must not let it
+        // through: validate_toolset_target rejects the prefix first.
+        let mut catalog = tools_test_catalog();
+        catalog.toolsets.insert("mcp__github".to_string());
+        let payload = tools_payload("tools-mcp-set", Some(vec![("mcp__github", false)]), None);
+        let err = update_profile_config_impl_with(&payload, &catalog)
+            .expect_err("an mcp__-prefixed toolset must be rejected");
+        assert!(err.contains("MCP"), "got: {err}");
+        assert_eq!(before, fs::read(&path).expect("read after"));
+    }
+
+    #[test]
+    fn apply_tools_selection_rejects_unknown_tool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let path = scaffold_profile_config("tools-unknown-tool", &Config::default());
+        let before = fs::read(&path).expect("read before");
+
+        let payload = tools_payload("tools-unknown-tool", None, Some(vec!["not_a_tool"]));
+        let err = update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect_err("an unknown tool must be rejected");
+        assert!(err.contains("unknown tool"), "got: {err}");
+        assert_eq!(before, fs::read(&path).expect("read after"));
+    }
+
+    #[test]
+    fn apply_tools_selection_preserves_non_catalog_disabled_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let mut initial = Config::default();
+        initial.tools.disabled = vec![
+            "mcp__github__create_issue".to_string(),
+            "web_search".to_string(),
+        ];
+        let path = scaffold_profile_config("tools-preserve", &initial);
+
+        let payload = tools_payload("tools-preserve", None, Some(vec!["web_extract"]));
+        update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect("selection must persist");
+
+        let reloaded = Config::load_from(&path).expect("reload");
+        assert!(
+            reloaded
+                .tools
+                .disabled
+                .iter()
+                .any(|d| d == "mcp__github__create_issue"),
+            "a non-catalog (MCP) disabled entry must survive verbatim, got {:?}",
+            reloaded.tools.disabled
+        );
+        assert!(reloaded.tools.disabled.iter().any(|d| d == "web_extract"));
+    }
+
+    /// WR-06: the save applies the operator's DELTA to the `tools.disabled`
+    /// on disk NOW. A tool disabled elsewhere after the panel opened
+    /// (`web_search` here, absent from the panel's snapshot) is not
+    /// re-enabled, an enable removes only the named tool, and a disable adds
+    /// only the named tool.
+    #[test]
+    fn apply_tools_selection_merges_delta_against_current_on_disk_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let mut initial = Config::default();
+        initial.tools.disabled = vec![
+            "mcp__github__create_issue".to_string(),
+            "memory_read".to_string(),
+            "web_search".to_string(),
+        ];
+        let path = scaffold_profile_config("tools-delta", &initial);
+
+        let mut payload = tools_payload("tools-delta", None, Some(vec!["web_extract"]));
+        payload.tools_enable = Some(vec!["memory_read".to_string()]);
+        update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect("delta must persist");
+
+        let reloaded = Config::load_from(&path).expect("reload");
+        assert_eq!(
+            reloaded.tools.disabled,
+            vec![
+                "mcp__github__create_issue".to_string(),
+                "web_extract".to_string(),
+                "web_search".to_string(),
+            ],
+            "web_search (disabled elsewhere) must survive; memory_read re-enabled; web_extract added"
+        );
+    }
+
+    #[test]
+    fn apply_tools_selection_rejects_a_tool_in_both_lists_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let path = scaffold_profile_config("tools-both", &Config::default());
+        let before = fs::read(&path).expect("read before");
+
+        let mut payload = tools_payload("tools-both", None, Some(vec!["web_extract"]));
+        payload.tools_enable = Some(vec!["web_extract".to_string()]);
+        let err = validate_profile_config_payload(&payload)
+            .expect_err("a tool in both lists must be rejected");
+        assert!(err.contains("web_extract"), "got: {err}");
+        let err = update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect_err("the apply step rejects it too");
+        assert!(err.contains("web_extract"), "got: {err}");
+        assert_eq!(before, fs::read(&path).expect("read after"));
+    }
+
+    /// CR-01 (server side): a profile whose config.yaml stores no provider and
+    /// no model must be able to save a tools-only edit — the payload carries
+    /// `None` for both, so nothing is rejected and model.* stays blank.
+    #[test]
+    fn tools_only_save_succeeds_for_a_profile_with_no_provider_or_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let path = scaffold_profile_config("tools-inherit", &Config::default());
+
+        let payload = tools_payload("tools-inherit", None, Some(vec!["web_extract"]));
+        assert_eq!((&payload.provider, &payload.model_default), (&None, &None));
+        validate_profile_config_payload(&payload).expect("a None provider/model is valid");
+        update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect("a tools-only save must persist");
+
+        let reloaded = Config::load_from(&path).expect("reload");
+        assert!(reloaded.tools.disabled.iter().any(|d| d == "web_extract"));
+        assert_eq!(reloaded.model.provider, Config::default().model.provider);
+        assert_eq!(reloaded.model.default, Config::default().model.default);
+        // The server still refuses an explicit empty string.
+        let blank = write_payload("tools-inherit", Some(""), None);
+        assert!(validate_profile_config_payload(&blank).is_err());
+    }
+
+    #[test]
+    fn apply_tools_selection_none_fields_leave_tools_untouched() {
+        let mut cfg = Config::default();
+        cfg.tools.disabled = vec!["web_search".to_string()];
+        let before = serde_json::to_value(&cfg.tools).expect("serialize tools");
+
+        apply_tools_selection(&mut cfg, None, None, None, &tools_test_catalog())
+            .expect("both-None must be Ok");
+        assert_eq!(
+            before,
+            serde_json::to_value(&cfg.tools).expect("serialize tools"),
+            "both tools fields None must leave tools.* untouched"
+        );
+    }
+
+    #[test]
+    fn apply_tools_selection_preserves_unrelated_config_sections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let mut initial = Config::default();
+        initial.model.provider = "acme-provider".to_string();
+        initial.model.default = "acme-model".to_string();
+        initial.skills.disabled = vec!["alpha".to_string()];
+        initial.terminal.backend = "docker".to_string();
+        let path = scaffold_profile_config("tools-unrelated", &initial);
+
+        let payload = tools_payload(
+            "tools-unrelated",
+            Some(vec![("web", true)]),
+            Some(vec!["web_extract"]),
+        );
+        update_profile_config_impl_with(&payload, &tools_test_catalog())
+            .expect("selection must persist");
+
+        let reloaded = Config::load_from(&path).expect("reload");
+        assert_eq!(reloaded.model.provider, "acme-provider");
+        assert_eq!(reloaded.model.default, "acme-model");
+        assert_eq!(reloaded.skills.disabled, vec!["alpha".to_string()]);
+        assert_eq!(reloaded.terminal.backend, "docker");
+        assert_eq!(
+            reloaded.tools.toolsets.get("web").map(|e| e.enabled),
+            Some(true),
+            "the tools write itself must have landed"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 54.4 Plan 03 (T-54.4-05, D-19): payload caps + root defaults —
+    // Task 2 <behavior>.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn validate_profile_config_payload_rejects_oversized_tools_toolsets() {
+        let toolsets: Vec<(String, bool)> =
+            (0..65).map(|i| (format!("toolset-{i}"), true)).collect();
+        let mut payload = write_payload("my-bot", None, None);
+        payload.tools_toolsets = Some(toolsets);
+        let err = validate_profile_config_payload(&payload)
+            .expect_err("65 toolset entries must be rejected");
+        assert!(err.contains("64"), "got: {err}");
+
+        // The boundary itself is still legal.
+        payload.tools_toolsets = Some((0..64).map(|i| (format!("toolset-{i}"), true)).collect());
+        assert!(validate_profile_config_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn validate_profile_config_payload_rejects_duplicate_toolset_names() {
+        let mut payload = write_payload("my-bot", None, None);
+        payload.tools_toolsets = Some(vec![("web".to_string(), true), ("web".to_string(), false)]);
+        let err = validate_profile_config_payload(&payload)
+            .expect_err("a duplicate toolset name must be rejected");
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_profile_config_payload_rejects_oversized_tools_disabled() {
+        let mut payload = write_payload("my-bot", None, None);
+        payload.tools_disable = Some((0..513).map(|i| format!("tool-{i}")).collect());
+        let err = validate_profile_config_payload(&payload)
+            .expect_err("513 disabled tools must be rejected");
+        assert!(err.contains("512"), "got: {err}");
+
+        payload.tools_disable = Some((0..512).map(|i| format!("tool-{i}")).collect());
+        assert!(validate_profile_config_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn validate_profile_config_payload_rejects_blank_tool_names() {
+        let mut payload = write_payload("my-bot", None, None);
+        payload.tools_disable = Some(vec![" ".to_string()]);
+        assert!(
+            validate_profile_config_payload(&payload).is_err(),
+            "a whitespace-only tools_disable entry must be rejected"
+        );
+
+        let mut payload = write_payload("my-bot", None, None);
+        payload.tools_toolsets = Some(vec![(String::new(), true)]);
+        assert!(
+            validate_profile_config_payload(&payload).is_err(),
+            "an empty toolset name must be rejected"
+        );
+    }
+
+    /// Hand-built root config + page state shared by the two
+    /// `root_agent_defaults_*` tests.
+    fn root_defaults_fixture() -> RootAgentDefaults {
+        use crate::server::tools_config_api::{
+            ConfigScope, ToolsPageState, ToolsetGroup, ToolsetKind, bulk_targets,
+            disabled_builtin_groups,
+        };
+        let mut cfg = Config::default();
+        cfg.model.provider = "anthropic".to_string();
+        cfg.model.default = "claude-x".to_string();
+        cfg.skills.disabled = vec!["a".to_string()];
+        cfg.tools.disabled = vec!["web_extract".to_string()];
+        cfg.tools
+            .credentials
+            .insert("EXA_API_KEY".to_string(), "secret".to_string());
+
+        let group = |name: &str, kind: ToolsetKind, enabled: bool| ToolsetGroup {
+            name: name.to_string(),
+            kind,
+            enabled,
+            tools: vec![],
+        };
+        let toolsets = vec![
+            group("web", ToolsetKind::BuiltIn, false),
+            group("memory", ToolsetKind::BuiltIn, true),
+            group(
+                "mcp__github",
+                ToolsetKind::Mcp {
+                    server: "github".to_string(),
+                },
+                false,
+            ),
+        ];
+        let state = ToolsPageState {
+            gate_open: false,
+            scope: ConfigScope::Root,
+            scope_label: "ROOT".to_string(),
+            bulk_targets: bulk_targets(&toolsets),
+            toolsets,
+        };
+        root_agent_defaults_from_parts(&cfg, disabled_builtin_groups(&state))
+    }
+
+    #[test]
+    fn root_agent_defaults_from_parts_projects_root_config() {
+        assert_eq!(
+            root_defaults_fixture(),
+            RootAgentDefaults {
+                provider: "anthropic".to_string(),
+                model: "claude-x".to_string(),
+                skills_disabled: vec!["a".to_string()],
+                disabled_toolsets: vec!["web".to_string()],
+                tools_disabled: vec!["web_extract".to_string()],
+            },
+            "only the disabled BUILT-IN group (web) may appear — memory is enabled and mcp__github is an MCP group"
+        );
+    }
+
+    #[test]
+    fn root_agent_defaults_never_serializes_a_credential() {
+        let json = serde_json::to_string(&root_defaults_fixture()).expect("serialize");
+        assert!(!json.contains("secret"), "credential value leaked: {json}");
+        assert!(
+            !json.contains("EXA_API_KEY"),
+            "credential key name leaked: {json}"
+        );
     }
 
     #[test]
@@ -8257,5 +8988,119 @@ mod profile_secrets_source_tests {
             variant_index(&ProfileGap::NoKeyForProvider("x".to_string())),
             3
         );
+    }
+}
+
+/// Phase 54.4 Plan 05 (D-07, T-54.4-16): `fetch_agent_header_state` reads
+/// only `model.provider`, `model.default` and `terminal.backend` from one
+/// agent's `config.yaml`. Mutates the process-global `IRONHERMES_HOME`, so
+/// `--test-threads=1` is required (same constraint as the modules above).
+#[cfg(all(test, feature = "server"))]
+mod agent_header_state_tests {
+    use super::*;
+    use std::fs;
+
+    struct ScopedEnv {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: single-threaded test context; no concurrent env access.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: single-threaded test context; no concurrent env access.
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    const SENTINEL_SECRET: &str = "sk-sentinel-never-crosses-the-wire-123";
+
+    #[test]
+    fn header_state_impl_reads_only_model_and_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+        let prof = dir.path().join("profiles").join("dev");
+        fs::create_dir_all(&prof).expect("mkdir");
+        fs::write(
+            prof.join("config.yaml"),
+            "model:\n  provider: anthropic\n  default: claude-x\nterminal:\n  backend: docker\n",
+        )
+        .expect("write config");
+        fs::write(
+            prof.join(".env"),
+            format!("OPENROUTER_API_KEY={SENTINEL_SECRET}\n"),
+        )
+        .expect("write env");
+
+        let state = agent_header_state_impl("dev").expect("dev header state");
+        assert_eq!(
+            state,
+            AgentHeaderState {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-x".to_string()),
+                terminal_backend: Some("docker".to_string()),
+            }
+        );
+        let json = serde_json::to_string(&state).expect("serialize");
+        assert!(
+            !json.contains(SENTINEL_SECRET) && !json.contains("OPENROUTER"),
+            "no .env content may cross the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn header_state_impl_rejects_invalid_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+        fs::write(
+            dir.path().join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: root-model\n",
+        )
+        .expect("write root config");
+
+        assert!(agent_header_state_impl("../etc").is_err());
+        assert!(agent_header_state_impl("Has Caps").is_err());
+        assert!(agent_header_state_impl("").is_err());
+        // "default" is the root agent: it reads the ROOT config.yaml.
+        let root = agent_header_state_impl("default").expect("root header state");
+        assert_eq!(root.provider.as_deref(), Some("openrouter"));
+        assert_eq!(root.model.as_deref(), Some("root-model"));
+    }
+
+    #[test]
+    fn header_state_impl_missing_config_is_err() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+        fs::create_dir_all(dir.path().join("profiles").join("dev")).expect("mkdir");
+        assert!(agent_header_state_impl("dev").is_err());
+        // An absent profile dir is also an error, and creates nothing.
+        assert!(agent_header_state_impl("ghost").is_err());
+        assert!(!dir.path().join("profiles").join("ghost").exists());
+    }
+
+    #[test]
+    fn header_state_from_config_maps_empty_strings_to_none() {
+        let mut cfg = ironhermes_core::config::Config::default();
+        cfg.model.provider = String::new();
+        cfg.model.default = "m".to_string();
+        cfg.terminal.backend = String::new();
+        let state = agent_header_state_from_config(&cfg);
+        assert_eq!(state.provider, None);
+        assert_eq!(state.model.as_deref(), Some("m"));
+        assert_eq!(state.terminal_backend, None);
     }
 }

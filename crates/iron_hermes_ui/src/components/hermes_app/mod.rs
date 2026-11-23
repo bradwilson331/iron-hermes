@@ -17,11 +17,35 @@
 //! provided via context so ScreenChat (and any future screen that wants
 //! to peek at chat state) consumes them by lookup.
 
-use crate::components::hermes_app::screens::chat::{ChatBubble, ChatSendHandler, ToolRow};
+use crate::components::hermes_app::screens::chat::approval_card::{
+    apply_approval_event, apply_disconnect, ApprovalCards, ApprovalCardsCtx,
+};
+use crate::components::hermes_app::screens::chat::defcon_chip::{
+    apply_defcon_event, clear_defcon_pushes, DefconChipCtx, DefconPush,
+};
+use crate::components::hermes_app::screens::chat::turn_status_dot::{TurnDots, TurnDotsCtx};
+use crate::components::hermes_app::screens::chat::{
+    apply_transcript_event, ChatBubble, ChatSendHandler,
+};
 use crate::state::ThemeContext;
 use crate::state::{Screen, SessionIdContext, WheelState};
 use crate::ui_prefs::{self, UiPrefs};
 use dioxus::prelude::*;
+
+/// Phase 54.9 (D-06): the ONE root handle for the live menu layout. Edits write
+/// `layout` first and persist second, so the header and the wheel follow a
+/// change immediately. Providing it anywhere but `HermesApp`'s body compiles
+/// and then panics every consumer outside the provider's subtree.
+// `notice` and `write_enabled` are consumed by the Settings Menu tab (later plans).
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub struct MenuCtx {
+    pub layout: Signal<crate::menu_layout::MenuLayout>,
+    pub notice: Signal<Option<String>>,
+    pub write_enabled: Signal<bool>,
+    /// RR-01: ONE save queue per app, so a Menu-tab remount cannot start a second save loop.
+    pub save: screens::settings_menu::SaveQueue,
+}
 
 /// Phase 36.17.9 (D-14): client-side mirror of the server's VoiceStatus snapshot.
 ///
@@ -77,20 +101,27 @@ pub struct VoiceStatusState {
 #[derive(Clone, Copy)]
 pub struct AuthedContext(pub Signal<bool>);
 
+// Phase 54.4 Plan 05 (D-10, D-12, D-22, D-23): the root-level agent tab
+// model + the contexts the header dropdown, tab strip and slide-over share.
+pub mod agent_tabs;
 pub mod app_footer;
 pub mod avatar_logic;
 pub mod breadcrumb;
 // Phase 41.1 Plan 06 (D-05): Web `/` command palette, ported into hermes_app
 // (adapted from the feature-gated shell_legacy::CommandPalette).
 pub mod command_palette;
+pub mod dashboard_runtime;
+// Phase 54.4 Plan 01 (D-04): the persistent banner header (status strip,
+// shortcuts, docked wheel). Declares no context provider.
+pub mod header;
 pub mod hud_chrome;
 // Phase 46.9 Plan 05 (D-02): brand-new Kanban config embedded panel.
 pub mod kanban_config;
 pub mod mic_button;
 pub mod orb_canvas;
 // Phase 49.4 Plan 11 (D-19): topbar active-profile indicator + chat-scope
-// quick switch, mounted as a flex child of `.topbar-row` between
-// `Breadcrumb` and `SysMeta`.
+// quick switch, now mounted in row 2 of the persistent header
+// (Phase 54.4 Plan 01); plan 05 replaces it with the Agent dropdown.
 pub mod profile_topbar;
 pub mod realtime_session;
 pub mod screen_router;
@@ -98,14 +129,43 @@ pub mod screens;
 pub mod sys_meta;
 pub mod theme_effects;
 pub mod tweaks_panel;
+pub mod voice_fields;
 pub mod voice_loop;
+pub mod voice_realtime;
 pub mod voice_settings;
+pub mod voice_test_controls;
+pub mod voice_turn_based;
 pub mod wheel;
-pub mod wheel_rail;
 // Phase 50.1 Plan 04 (D-12): shared presentational widgets — BotFace, the
 // deterministic geometric avatar renderer. Declares no context provider
 // (see widgets.rs's own module doc).
 pub mod widgets;
+
+/// Phase 54.7 Plan 08 (D-15): what the root seeds `VoiceServiceCtx` and
+/// `VoiceServiceLoadedCtx` with once the `get_voice_config` resource settles.
+///
+/// `Some((service, true))` on `Ok` (the saved service, clamped to a value the
+/// entry gate understands) and on `Err` (the default `turn_based`, with Loaded
+/// STILL true so a failed fetch never strands voice-mode entry); `None` while
+/// the resource is still pending.
+fn seed_voice_service(
+    resource: &Option<
+        Result<crate::server::api::VoiceConfigSnapshot, dioxus::prelude::ServerFnError>,
+    >,
+) -> Option<(String, bool)> {
+    match resource {
+        Some(Ok(snapshot)) => {
+            let service = if snapshot.voice_service == "realtime" {
+                "realtime"
+            } else {
+                "turn_based"
+            };
+            Some((service.to_string(), true))
+        }
+        Some(Err(_)) => Some(("turn_based".to_string(), true)),
+        None => None,
+    }
+}
 
 /// Root component of the Phase 26.2.1 wheel-driven shell.
 ///
@@ -139,6 +199,12 @@ pub fn HermesApp() -> Element {
     // this to true; `ApplyConfigBanner` (mounted on both screens) reads it
     // and flips it back to false on a successful apply.
     let apply_config_pending: Signal<bool> = use_signal(|| false);
+    // Phase 54.4 Plan 05 (D-10, D-22): the agent tab model — open tabs plus the
+    // focused one. SEPARATE from the chat singletons below (no bubbles, session
+    // id or WebSocket in it); `mut` because the reconcile effect and the
+    // hydration effect `.set()` it.
+    let mut agent_tabs =
+        use_signal(crate::components::hermes_app::agent_tabs::AgentTabsState::default_layout);
     let mut hydrated = use_signal(|| false);
     // Phase 47.3 Plan 06 (D-17): starts authenticated — see AuthedContext's
     // doc comment above for why. Only the D-17 expiry redirect and /logout
@@ -167,6 +233,11 @@ pub fn HermesApp() -> Element {
     let identity_tts_provider: Signal<Option<String>> = use_signal(|| None);
     let identity_tts_voice: Signal<Option<String>> = use_signal(|| None);
     let identity_realtime_voice: Signal<Option<String>> = use_signal(|| None);
+    // Phase 54.7 Plan 15 (D-16): the identity's model / format overrides. Same
+    // `None` = inherit contract as the three above; provided below at the root.
+    let identity_tts_model: Signal<Option<String>> = use_signal(|| None);
+    let identity_tts_format: Signal<Option<String>> = use_signal(|| None);
+    let identity_realtime_model: Signal<Option<String>> = use_signal(|| None);
     // Orb appearance — seeded from ORB_PRESET_REGISTRY["orb_classic"] defaults.
     // `mut` needed: hydration effect overwrites these from the stored active_identity.
     let mut orb_style = use_signal(|| "classic".to_string());
@@ -196,8 +267,9 @@ pub fn HermesApp() -> Element {
     // applies the active identity's saved `IdentityOverride.appearance` on top when
     // present. Applied exactly once (via `orb_appearance_hydrated`); `.peek()` on
     // `avatar_prefs` avoids re-running on later active-identity changes (D-12: those
-    // take effect next conversation, not mid-session) and never fights the Settings
-    // panel's own edit-target rehydrate (it writes the same shared orb signals).
+    // take effect next conversation, not mid-session). The voice-mode overlay's Voice
+    // form and the System > Orb tab write the same shared orb signals; the System >
+    // General Voice panel no longer touches them (G-54.4-34).
     let mut orb_appearance_hydrated = use_signal(|| false);
     let orb_config_resource =
         use_resource(move || async move { crate::server::api::get_voice_config().await });
@@ -225,6 +297,42 @@ pub fn HermesApp() -> Element {
         }
     });
 
+    // Phase 54.9 (D-06/D-07/D-08): the live menu layout. First paint is the shipped
+    // default (no flash); the saved layout is hydrated exactly once. A transport
+    // failure keeps the default and carries the D-08 notice.
+    let mut menu_layout = use_signal(crate::menu_layout::default_layout);
+    let mut menu_notice = use_signal(|| None::<String>);
+    let mut menu_write_enabled = use_signal(|| false);
+    let menu_ctx = MenuCtx {
+        layout: menu_layout,
+        notice: menu_notice,
+        write_enabled: menu_write_enabled,
+        save: screens::settings_menu::use_save_queue(),
+    };
+    let mut menu_hydrated = use_signal(|| false);
+    let menu_resource =
+        use_resource(move || async move { crate::server::menu_api::get_menu_layout().await });
+    use_effect(move || {
+        if *menu_hydrated.peek() {
+            return;
+        }
+        match menu_resource.read().as_ref() {
+            Some(Ok(snapshot)) => {
+                menu_layout.set(snapshot.layout.clone());
+                menu_notice.set(snapshot.notice.clone());
+                menu_write_enabled.set(snapshot.web_config_write_enabled);
+                menu_hydrated.set(true);
+            }
+            Some(Err(_)) => {
+                menu_notice.set(Some(crate::menu_layout::invalid_notice(
+                    &crate::menu_layout::MenuLayoutError::Unreadable,
+                )));
+                menu_hydrated.set(true);
+            }
+            None => {}
+        }
+    });
+
     // Context providers — four root signals exposed to descendants.
     //
     // The theme signal is wrapped in `ThemeContext(theme)` (B-03 newtype,
@@ -248,6 +356,11 @@ pub fn HermesApp() -> Element {
     // see ApplyConfigPendingCtx's doc comment (state.rs) and the
     // ScheduleNamePrefillCtx comment just above for why root-only.
     use_context_provider(|| crate::state::ApplyConfigPendingCtx(apply_config_pending));
+    // Phase 54.4 Plan 05 (D-10): the ONE legal home for the tab-model provider —
+    // same root-only rule as the providers above.
+    use_context_provider(|| crate::components::hermes_app::agent_tabs::AgentTabsCtx(agent_tabs));
+    // Phase 54.9 (D-06): the ONE legal home for the menu layout handle.
+    use_context_provider(|| menu_ctx);
 
     // Suppress unused-variable warnings on the wrapper read path — the
     // ThemeContext newtype constructor uses the `theme` signal by move,
@@ -269,6 +382,13 @@ pub fn HermesApp() -> Element {
         }
         if let Some(ws) = ui_prefs::read_json::<WheelState>(ui_prefs::KEY_WHEEL) {
             wheel_state.set(ws);
+        }
+        // Phase 54.4 Plan 05 (D-15, T-54.4-15): hydrate the open agent tabs
+        // synchronously, in this one-shot effect. `sanitized()` drops invalid
+        // slugs and duplicates and caps the list; a missing or unparsable blob
+        // yields `None`, so the default layout stays.
+        if let Some(t) = ui_prefs::read_json::<crate::components::hermes_app::agent_tabs::AgentTabsState>(ui_prefs::KEY_DASHBOARD) {
+            agent_tabs.set(t.sanitized());
         }
         // Phase 40.2 Plan 04 (FE-01, D-03, T-40.2-04-01): hydrate avatar prefs.
         // Phase 40.5 Plan 01 (D-17): also seed orb appearance from ORB_PRESET_REGISTRY
@@ -341,6 +461,16 @@ pub fn HermesApp() -> Element {
         let ws = wheel_state.read().clone();
         ui_prefs::write_json(ui_prefs::KEY_WHEEL, &ws);
     });
+    // Phase 54.4 Plan 05 (D-15): persist the agent-tab layout (slugs only).
+    // Gated on `hydrated` so the default layout never overwrites a stored
+    // blob; it only writes localStorage, never a signal.
+    use_effect(move || {
+        if !*hydrated.read() {
+            return;
+        }
+        let t = agent_tabs.read().clone();
+        ui_prefs::write_json(ui_prefs::KEY_DASHBOARD, &t);
+    });
 
     // Phase 40.2 Plan 04 (FE-01, D-03): persist avatar prefs on change.
     // Mirrors the wheel_state persist-on-change pattern above (Analog C).
@@ -381,6 +511,51 @@ pub fn HermesApp() -> Element {
             async move { crate::server::profile_api::list_profiles().await }
         });
     use_context_provider(|| profile_topbar::SharedProfilesCtx(shared_profiles));
+    // Phase 54.4 Plan 05 (D-07, D-22): the live agent's name (a profile slug, or
+    // "default" for the root home) — read once, process-wide.
+    let live_agent = use_resource(|| async move {
+        crate::server::bot_meta_api::live_profile_name().await
+    });
+    use_context_provider(|| crate::components::hermes_app::agent_tabs::LiveAgentCtx(live_agent));
+    // Phase 54.4 Plan 07 (D-08/D-25): the client-side agent-activity ring the
+    // receive loop below feeds and the Logs screen reads. Created AND provided
+    // here at the root — a child-mounted provider compiles and then panics
+    // consumers outside its subtree at runtime.
+    let mut activity_log = use_signal(Vec::<crate::activity_log::ActivityRow>::new);
+    let mut activity_seq = use_signal(|| 0u64);
+    use_context_provider(|| crate::activity_log::ActivityLogCtx(activity_log));
+    // Phase 54.4 Plan 05 (D-23): the non-blocking "couldn't record the switch"
+    // notice slot, rendered by the header.
+    let agent_notice = use_signal(|| None::<String>);
+    use_context_provider(|| crate::components::hermes_app::agent_tabs::AgentNoticeCtx(agent_notice));
+    // Phase 54.4 Plan 05 (UIC E6): drop a stored tab whose profile no longer
+    // exists, but ONLY after the profile list resolved Ok (never on loading or
+    // error — Pitfall 12). `shared_profiles()` is read with call syntax so the
+    // effect subscribes; `agent_tabs` is only PEEKED and `.set()` runs only when
+    // `reconcile` reports a change, so the effect cannot retrigger itself
+    // (Agents-freeze 2aae98af1 class). Gated on `hydrated` too, so a stored
+    // layout is reconciled AFTER it has been hydrated; the effect subscribes to
+    // `hydrated` and `shared_profiles`, never to `agent_tabs`.
+    use_effect(move || {
+        if !*hydrated.read() {
+            return;
+        }
+        let Some(Ok(rows)) = shared_profiles() else {
+            return;
+        };
+        let names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
+        let mut next = agent_tabs.peek().clone();
+        if next.reconcile(&names) {
+            // A reconcile that drops the focused tab moves focus: record it
+            // (WR-02) like every other focus change.
+            crate::components::hermes_app::agent_tabs::set_tabs_recording_focus(
+                agent_tabs,
+                agent_notice,
+                active_profile_refresh,
+                next,
+            );
+        }
+    });
     let roster_names_resource = shared_profiles;
     let mut next_id = use_signal(|| 1u64);
     let mut session_id = use_signal(|| "pending".to_string());
@@ -435,6 +610,22 @@ pub fn HermesApp() -> Element {
     // AppFooter via use_context.
     let mut queue_state = use_signal(|| (0u32, false));
 
+    // Phase 57 D-17: per-turn status-dot severity map, written by the receive loop through
+    // `apply_transcript_event` and read by each assistant bubble. Created AND provided here
+    // at the root (see `TurnDotsCtx` below) — a child-mounted provider panics at runtime.
+    let mut turn_dots = use_signal(TurnDots::default);
+
+    // Phase 57 D-14 / UI-SPEC C3: the approval-card map (one model per `approval_id`), written
+    // by the receive loop through `apply_approval_event` and by each card's own buttons.
+    // Created AND provided here at the root (see `ApprovalCardsCtx` below).
+    let mut approval_cards = use_signal(ApprovalCards::default);
+
+    // Phase 57 UI-SPEC R9c: the latest `DefconLevel` push from the socket, layered over the
+    // level ScreenChat fetches with `session_defcon_level`. Created AND provided here at the
+    // root (see `DefconChipCtx` below); cleared on every reconnect so the re-fetched server
+    // value wins after a server restart.
+    let mut defcon_push = use_signal(|| None::<DefconPush>);
+
     // Phase 36.17.9 (D-14): voice availability from server VoiceStatus snapshot.
     // Defaults to all-false so pre-connect renders show mic as unavailable.
     let mut voice_status = use_signal(VoiceStatusState::default);
@@ -477,6 +668,16 @@ pub fn HermesApp() -> Element {
         });
     });
 
+    // Phase 54.9 CR-01: the OpenUI screen's own socket + receive loop, owned by the root so
+    // navigating to Chat to answer an approval does not close it (the server cancels a turn
+    // whose socket closes). Provides `OpenUiCtx`.
+    screens::openui::use_openui_runtime(approval_cards, bubbles, next_id);
+
+    // Phase 54.10 Plan 09: the Dashboard's own generation runtime (queue, socket, session),
+    // added alongside the OpenUI one. Unconditional: a conditional call would change the hook
+    // order when the active screen changes.
+    dashboard_runtime::use_dashboard_runtime(approval_cards, bubbles, next_id);
+
     // Open the WebSocket with automatic reconnect — preserves the
     // Phase 26.1 keepalive + close-frame contract byte-for-byte (D-02 /
     // D-18). `ws_chat` itself is unchanged.
@@ -496,10 +697,29 @@ pub fn HermesApp() -> Element {
                 streaming_id.set(None);
                 // Phase 26.7.1 Plan 02 D-08: ws unavailable — poll cadence stays at 1500 ms baseline.
                 is_ws_connected.set(false);
+                // Phase 57 UI-SPEC Interaction: the socket is down, so the server state of every
+                // open approval card is unknown — each returns to Pending with the error line
+                // and its buttons enabled, and the Chat nav badge clears. A reply still in
+                // flight, or a new click, resolves it.
+                {
+                    let mut local_cards = approval_cards.read().clone();
+                    if apply_disconnect(&mut local_cards) {
+                        approval_cards.set(local_cards);
+                    }
+                }
                 continue;
             }
             // Phase 26.7.1 Plan 02 D-08: ws is up — poll cadence widens to 5000 ms.
             is_ws_connected.set(true);
+            // Phase 57 R9c: a server restart resets every session's level, so a push held from
+            // before the reconnect may be stale; drop it and let the re-fetch (which re-runs
+            // on this connect) supply the live value.
+            {
+                let mut local_push = defcon_push.read().clone();
+                if clear_defcon_pushes(&mut local_push) {
+                    defcon_push.set(local_push);
+                }
+            }
 
             loop {
                 match ws.recv_raw().await {
@@ -509,57 +729,129 @@ pub fn HermesApp() -> Element {
                             Ok(e) => e,
                             Err(_) => continue, // Skip malformed frames silently.
                         };
+                        // Phase 54.4 Plan 07 (D-08/D-25): record the event in the
+                        // activity ring BEFORE the match below consumes it. Every
+                        // row is attributed to the live agent (single embedded
+                        // runtime); tool args / yolo reasons are never read by
+                        // `activity_row_for`. Non-subscribing reads, no `.await`
+                        // between these reads and writes.
+                        {
+                            let agent = match &*live_agent.peek() {
+                                Some(Ok(name)) if !name.is_empty() => name.clone(),
+                                _ => crate::components::hermes_app::agent_tabs::DEFAULT_AGENT
+                                    .to_string(),
+                            };
+                            let seq = *activity_seq.peek();
+                            if let Some(row) = crate::activity_log::activity_row_for(
+                                &event,
+                                &agent,
+                                crate::activity_log::now_hms(),
+                                seq,
+                            ) {
+                                activity_log.with_mut(|r| {
+                                    crate::activity_log::push_capped(
+                                        r,
+                                        row,
+                                        crate::activity_log::ACTIVITY_RING_CAP,
+                                    )
+                                });
+                                activity_seq.set(seq + 1);
+                            }
+                        }
+                        // Phase 57 D-16/D-17: the transcript side of the stream — assistant
+                        // text, the Error bubble, critical rows, `streaming_id` and the
+                        // per-turn status dots — is one pure reducer shared with the tests.
+                        // Signals are read into owned locals, the reducer runs with no
+                        // `.await` in between, and a signal is written back only when its
+                        // value changed. `bubbles` is locked only for the events that can
+                        // change it, so a routine tool event never re-renders the transcript.
+                        {
+                            let on_screen = session_id.read().clone();
+                            let mut local_next = *next_id.read();
+                            let mut local_streaming = *streaming_id.read();
+                            let mut local_dots = turn_dots.read().clone();
+                            let touches_bubbles = matches!(
+                                event,
+                                crate::protocol::ChatStreamEvent::Delta { .. }
+                                    | crate::protocol::ChatStreamEvent::ToolCallStart { .. }
+                                    | crate::protocol::ChatStreamEvent::Error { .. }
+                                    | crate::protocol::ChatStreamEvent::CriticalEvent { .. }
+                            );
+                            if touches_bubbles {
+                                apply_transcript_event(
+                                    &mut bubbles.write(),
+                                    &mut local_next,
+                                    &mut local_streaming,
+                                    &mut local_dots,
+                                    &on_screen,
+                                    &event,
+                                );
+                            } else {
+                                apply_transcript_event(
+                                    &mut Vec::new(),
+                                    &mut local_next,
+                                    &mut local_streaming,
+                                    &mut local_dots,
+                                    &on_screen,
+                                    &event,
+                                );
+                            }
+                            if local_next != *next_id.read() {
+                                next_id.set(local_next);
+                            }
+                            if local_streaming != *streaming_id.read() {
+                                streaming_id.set(local_streaming);
+                            }
+                            if local_dots != *turn_dots.read() {
+                                turn_dots.set(local_dots);
+                            }
+                        }
+                        // Phase 57 D-14 / UI-SPEC C3, R4: an approval request becomes exactly one
+                        // card in the transcript, and its resolution updates that card. The
+                        // reducer is pure and shared with the tests; the card map and the
+                        // transcript are written back only when they changed, with no `.await`
+                        // between the reads and the writes. `bubbles` is locked only for a
+                        // request (the one event that adds a bubble).
+                        if matches!(
+                            event,
+                            crate::protocol::ChatStreamEvent::ApprovalRequested { .. }
+                                | crate::protocol::ChatStreamEvent::ApprovalResolved { .. }
+                        ) {
+                            let mut local_cards = approval_cards.read().clone();
+                            let mut local_next = *next_id.read();
+                            let changed = if matches!(
+                                event,
+                                crate::protocol::ChatStreamEvent::ApprovalRequested { .. }
+                            ) {
+                                apply_approval_event(
+                                    &mut bubbles.write(),
+                                    &mut local_next,
+                                    &mut local_cards,
+                                    &event,
+                                )
+                            } else {
+                                apply_approval_event(
+                                    &mut Vec::new(),
+                                    &mut local_next,
+                                    &mut local_cards,
+                                    &event,
+                                )
+                            };
+                            if local_next != *next_id.read() {
+                                next_id.set(local_next);
+                            }
+                            if changed {
+                                approval_cards.set(local_cards);
+                            }
+                        }
                         match event {
-                            crate::protocol::ChatStreamEvent::Delta { text, .. } => {
-                                let sid = *streaming_id.read();
-                                if let Some(id) = sid {
-                                    let mut bs = bubbles.write();
-                                    if let Some(b) = bs.iter_mut().find(|b| b.id == id) {
-                                        b.text.push_str(&text);
-                                    }
-                                } else {
-                                    let id = {
-                                        let n = *next_id.read();
-                                        next_id.set(n + 1);
-                                        n
-                                    };
-                                    streaming_id.set(Some(id));
-                                    bubbles.write().push(ChatBubble::assistant(id, text));
-                                }
-                            }
-                            crate::protocol::ChatStreamEvent::ToolCallStart {
-                                name, args, ..
-                            } => {
-                                let sid = *streaming_id.read();
-                                if let Some(id) = sid {
-                                    let mut bs = bubbles.write();
-                                    if let Some(b) = bs.iter_mut().find(|b| b.id == id) {
-                                        b.tool_rows.push(ToolRow {
-                                            name,
-                                            args,
-                                            done: false,
-                                            success: false,
-                                        });
-                                    }
-                                }
-                            }
-                            crate::protocol::ChatStreamEvent::ToolCallEnd {
-                                name, success, ..
-                            } => {
-                                let sid = *streaming_id.read();
-                                if let Some(id) = sid {
-                                    let mut bs = bubbles.write();
-                                    if let Some(b) = bs.iter_mut().find(|b| b.id == id) {
-                                        for row in b.tool_rows.iter_mut().rev() {
-                                            if row.name == name && !row.done {
-                                                row.done = true;
-                                                row.success = success;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            // Handled by `apply_transcript_event` above. Routine tool calls
+                            // add nothing to the transcript (D-17); the activity-ring push
+                            // above keeps them on the Logs screen.
+                            crate::protocol::ChatStreamEvent::Delta { .. } => {}
+                            crate::protocol::ChatStreamEvent::ToolCallStart { .. } => {}
+                            crate::protocol::ChatStreamEvent::ToolCallEnd { .. } => {}
+                            crate::protocol::ChatStreamEvent::Error { .. } => {}
                             crate::protocol::ChatStreamEvent::Finished { total_tokens, .. } => {
                                 // T-46.9-09: clamp the numerator into [0, denominator] so a
                                 // compression race (this Finished frame racing the next
@@ -567,16 +859,6 @@ pub fn HermesApp() -> Element {
                                 // real context window. u32 cannot go negative; the risk is
                                 // an over-denominator value, not NaN.
                                 tokens.with_mut(|t| t.0 = total_tokens.min(t.1));
-                                streaming_id.set(None);
-                            }
-                            crate::protocol::ChatStreamEvent::Error { message, .. } => {
-                                let id = {
-                                    let n = *next_id.read();
-                                    next_id.set(n + 1);
-                                    n
-                                };
-                                bubbles.write().push(ChatBubble::error(id, message));
-                                streaming_id.set(None);
                             }
                             crate::protocol::ChatStreamEvent::SubagentEvent {} => {
                                 // Phase 26.7.1 Plan 02 D-07: counter-only — read into Copy u64 before set,
@@ -588,6 +870,13 @@ pub fn HermesApp() -> Element {
                             crate::protocol::ChatStreamEvent::QueueUpdated { depth, paused } => {
                                 queue_state.set((depth, paused));
                             }
+                            // Phase 54.3 (D-06/D-07), Phase 57 D-19: one aggregated yolo-bypass
+                            // summary per bypassing turn. The per-turn chip is gone; the
+                            // notice turns that turn's status dot amber through
+                            // `apply_transcript_event` above. The in-memory dot is lost on
+                            // page refresh; the end-of-turn `yolo_bypass_rollup` audit row
+                            // in logs/audit.jsonl is the durable record.
+                            crate::protocol::ChatStreamEvent::YoloBypassNotice { .. } => {}
                             // Phase 36.17.9 (D-14): VoiceStatus snapshot pushed by the server
                             // on connect. All five fields are Copy/Clone — destructured into locals
                             // so no borrow is held across any .await (Pattern B / clippy.toml rule).
@@ -670,12 +959,30 @@ pub fn HermesApp() -> Element {
                                 bubbles.write().push(ChatBubble::meta(id, text));
                             }
                             // Phase 39.1 Plan 02 (R39.1-08): concurrent turn lifecycle events.
-                            // HermesApp does not yet render per-turn concurrency indicators
-                            // in the chat surface — future plan will wire these to UI state.
-                            // Silent no-ops for exhaustive-match compliance.
+                            // Phase 57 D-17: folded into the per-turn status dot by
+                            // `apply_transcript_event` above; nothing more to do here.
                             crate::protocol::ChatStreamEvent::TurnStarted { .. } => {}
                             crate::protocol::ChatStreamEvent::TurnEnded { .. } => {}
                             crate::protocol::ChatStreamEvent::TurnCancelled { .. } => {}
+                            // Phase 57 D-14 / UI-SPEC C3, C4: both approval events are applied to
+                            // the card by `apply_approval_event` above (an approved resolution
+                            // also turns the turn's dot amber through `apply_transcript_event`);
+                            // the activity-ring push already records them for the rail.
+                            crate::protocol::ChatStreamEvent::ApprovalRequested { .. } => {}
+                            crate::protocol::ChatStreamEvent::ApprovalResolved { .. } => {}
+                            // Phase 57 UI-SPEC R9c: the DEFCON chip follows every level push; it
+                            // also reads `session_defcon_level` at mount, on every session
+                            // switch and after every reconnect. Written back only on a change.
+                            crate::protocol::ChatStreamEvent::DefconLevel { .. } => {
+                                let mut local_push = defcon_push.read().clone();
+                                if apply_defcon_event(&mut local_push, &event) {
+                                    defcon_push.set(local_push);
+                                }
+                            }
+                            // Phase 57 D-16/D-17: the dot severity and the critical transcript
+                            // row are applied by `apply_transcript_event` above.
+                            crate::protocol::ChatStreamEvent::TurnSeverity { .. } => {}
+                            crate::protocol::ChatStreamEvent::CriticalEvent { .. } => {}
                         }
                     }
                     // Phase 36.17.7 D-02-a/b HIGH 4 + HIGH 7 fix:
@@ -858,10 +1165,24 @@ pub fn HermesApp() -> Element {
                     Ok(dioxus_fullstack::Message::Close { .. }) => {
                         streaming_id.set(None);
                         is_ws_connected.set(false);
+                        // Phase 57: a dropped socket returns every open approval card to Pending.
+                        {
+                            let mut local_cards = approval_cards.read().clone();
+                            if apply_disconnect(&mut local_cards) {
+                                approval_cards.set(local_cards);
+                            }
+                        }
                         break; // Outer loop will reconnect via with_automatic_reconnect.
                     }
                     Err(_) => {
                         is_ws_connected.set(false);
+                        // Phase 57: a dropped socket returns every open approval card to Pending.
+                        {
+                            let mut local_cards = approval_cards.read().clone();
+                            if apply_disconnect(&mut local_cards) {
+                                approval_cards.set(local_cards);
+                            }
+                        }
                         break;
                     }
                     _ => continue, // Skip ping/pong.
@@ -995,6 +1316,10 @@ pub fn HermesApp() -> Element {
                 // Phase 46.7 Plan 05 (D-05/D-06/D-07): the composer's settled,
                 // queued-to-send attachment ids — wired end-to-end.
                 attachment_ids: attachments.iter().map(|a| a.id.clone()).collect(),
+                // Phase 54.9 Plan 09: only the OpenUI screen asks for the overlay.
+                openui: false,
+                openui_gateway: false,
+                openui_prompt: false,
             };
             // Let-else early-return on serialization failure — no silent
             // unwrap_or_default(); surface the failure as an error bubble.
@@ -1052,6 +1377,14 @@ pub fn HermesApp() -> Element {
     use_context_provider(|| crate::state::WsConnectedContext(is_ws_connected));
     // Phase 36.17.4 (D-03a): expose queue_state to AppFooter via context.
     use_context_provider(|| queue_state);
+    // Phase 57 D-17: per-turn status-dot map, consumed by ScreenChat's assistant bubbles.
+    use_context_provider(|| TurnDotsCtx(turn_dots));
+    // Phase 57 D-14: approval-card map, consumed by ScreenChat's cards and the wheel's Chat
+    // badge. Provided here at the root — a provider in a child panics its consumers.
+    use_context_provider(|| ApprovalCardsCtx(approval_cards));
+    // Phase 57 R9c: the latest DEFCON push, consumed by ScreenChat's header chip. Provided
+    // here at the root — a provider in a child panics its consumers.
+    use_context_provider(|| DefconChipCtx(defcon_push));
 
     // Phase 36.17.9 (D-14): expose voice availability + mode flag to all descendants.
     // VoiceStatusState is consumed by: ScreenChat (stt_available → MicButton),
@@ -1077,54 +1410,45 @@ pub fn HermesApp() -> Element {
     use_context_provider(|| voice_settings::AvatarModeCtx(avatar_prefs));
     use_context_provider(|| voice_settings::AvatarErrorNoticeCtx(avatar_error_notice));
 
-    // Phase 36.17.12 Plan 04 (CR-01 gap closure): provide barge-in mode + realtime-
-    // degraded flag at the root so the VoiceModeScreen overlay and the VoiceSettings
-    // panel share one source of truth. VoiceSettings consumes these via use_context.
-    // Previously they were only provided inside VoiceSettings (a child of
-    // VoiceModeScreen), which caused a Dioxus "Could not find context BargeInModeCtx"
-    // panic on every voice-mode entry — identical to the prior WakeWordPhraseCtx panic
-    // fixed above. Initialized to the same defaults VoiceSettings used previously.
-    let mut barge_in_mode = use_signal(|| "push_to_interrupt".to_string());
+    // Phase 54.7 Plan 08 (D-14/D-15): provide the staged voice service + its Loaded
+    // flag + the realtime-degraded flag at the root so the VoiceModeScreen overlay
+    // (the entry gate) and the VoiceSettings panel share one source of truth.
+    // VoiceSettings is conditionally mounted inside the overlay, so anything the
+    // entry gate reads must not originate there: a child provider would panic the
+    // ancestor/sibling consumers at runtime (identical to the earlier
+    // WakeWordPhraseCtx and BargeInModeCtx panics). VoiceServiceCtx replaces
+    // BargeInModeCtx: the family choice is no longer derived from barge_in_mode.
+    let mut voice_service = use_signal(|| "turn_based".to_string());
     let realtime_degraded = use_signal(|| false);
-    use_context_provider(|| voice_settings::BargeInModeCtx(barge_in_mode));
+    use_context_provider(|| voice_settings::VoiceServiceCtx(voice_service));
     use_context_provider(|| voice_settings::RealtimeDegradedCtx(realtime_degraded));
 
-    // Debug session `avatar-not-hearing-voice`: seed BargeInModeCtx from
-    // config.voice.barge_in_mode at the root instead of leaving it stuck on the
-    // hardcoded literal above until the conditionally-mounted VoiceSettings panel
-    // (voice_settings.rs:500, gated behind settings_open — never true on a cold
-    // load) happens to seed it. Reuses `orb_config_resource` (already fetching
-    // `get_voice_config` for orb-appearance hydration above) — no extra request.
-    // VoiceSettings' own seed at voice_settings.rs:500 still runs when the panel
-    // mounts; it writes the same underlying context signal, so it is a harmless,
-    // idempotent re-set, not a second source of truth.
+    // Debug session `avatar-not-hearing-voice` (carried over): seed the service
+    // from `get_voice_config.voice_service` at the root instead of leaving it on
+    // the literal above until the conditionally-mounted panel happens to seed it.
+    // Reuses `orb_config_resource` (already fetching `get_voice_config` for
+    // orb-appearance hydration above) — no extra request. The panel's own seed
+    // writes the same underlying signal, an idempotent re-set, not a second source.
     //
-    // barge_in_mode_loaded flips true exactly once this resource settles (Ok OR
-    // Err — a fetch failure must not block voice-mode entry forever, it just
-    // means the hardcoded default above stands). voice_mode.rs's mode-gate effect
-    // reads this REACTIVELY so it defers its one-time branch decision until the
-    // real value is in, rather than deciding on the still-default literal at
-    // first mount (see ROOT CAUSE section of the debug file for why that decision
-    // is otherwise permanent for the mount).
-    let mut barge_in_mode_loaded = use_signal(|| false);
+    // voice_service_loaded flips true exactly once this resource settles (Ok OR
+    // Err — a fetch failure must not block voice-mode entry forever; it just
+    // means the default above stands). voice_mode.rs's entry effect reads this
+    // REACTIVELY so it defers its one-time branch decision until the real value
+    // is in, rather than deciding on the still-default literal at first mount.
+    let mut voice_service_loaded = use_signal(|| false);
     use_effect(move || {
-        if *barge_in_mode_loaded.peek() {
+        if *voice_service_loaded.peek() {
             return;
         }
-        match orb_config_resource.read().as_ref() {
-            Some(Ok(snapshot)) => {
-                barge_in_mode.set(snapshot.barge_in_mode.clone());
-                barge_in_mode_loaded.set(true);
-            }
-            Some(Err(_)) => {
-                // Fetch failed — unblock the gate anyway so it isn't stuck
-                // deferring forever; it will use the hardcoded default.
-                barge_in_mode_loaded.set(true);
-            }
-            None => {} // still pending — try again on the next resolve.
+        // The Ref temp drops at this `;` — no resource borrow is held across the sets.
+        let seed = seed_voice_service(&orb_config_resource.read());
+        if let Some((service, loaded)) = seed {
+            voice_service.set(service);
+            voice_service_loaded.set(loaded);
         }
+        // None: still pending — the reactive read above re-runs this on resolve.
     });
-    use_context_provider(|| voice_settings::BargeInModeLoadedCtx(barge_in_mode_loaded));
+    use_context_provider(|| voice_settings::VoiceServiceLoadedCtx(voice_service_loaded));
 
     // Phase 39.3 Plan 05 (D-03/D-05a): approval-pending + in-flight contexts for the
     // realtime voice card (Plan 05). Hoisted to HermesApp root — MUST live here so
@@ -1178,6 +1502,10 @@ pub fn HermesApp() -> Element {
     use_context_provider(|| voice_settings::IdentityTtsProviderCtx(identity_tts_provider));
     use_context_provider(|| voice_settings::IdentityTtsVoiceCtx(identity_tts_voice));
     use_context_provider(|| voice_settings::IdentityRealtimeVoiceCtx(identity_realtime_voice));
+    // Phase 54.7 Plan 15 (D-16): root-only, like every identity context.
+    use_context_provider(|| voice_settings::IdentityTtsModelCtx(identity_tts_model));
+    use_context_provider(|| voice_settings::IdentityTtsFormatCtx(identity_tts_format));
+    use_context_provider(|| voice_settings::IdentityRealtimeModelCtx(identity_realtime_model));
     use_context_provider(|| voice_settings::OrbStyleCtx(orb_style));
     use_context_provider(|| voice_settings::OrbBaseHueCtx(orb_base_hue));
     use_context_provider(|| voice_settings::OrbSizeCtx(orb_size));
@@ -1240,47 +1568,39 @@ pub fn HermesApp() -> Element {
         }
     });
     let ticking_uptime_secs = *uptime_ticker.read();
+    // Phase 54.4 Plan 01 (UI-SPEC E1-loading): UPTIME renders `--:--:--` and
+    // PROVIDER / MODEL / TOK render an em-dash until the FIRST
+    // `get_config_summary` resolves. `Some` exactly when it has.
+    let summary_resolved = matches!(config_summary(), Some(Ok(_)));
 
     rsx! {
         hud_chrome::HudChrome {}
         div { class: "app", id: "app",
-            // GAP-11 (47.4-16 Task 3): SysMeta lives inside `div.app` rather
-            // than as its sibling. `.app` (screens.css) is `position:
-            // relative` with a non-`auto` z-index, which makes it a
-            // stacking context — a sibling readout can never be layered
+            // GAP-11 (47.4-16 Task 3): the status readout lives inside
+            // `div.app` rather than as its sibling. `.app` (screens.css) is
+            // `position: relative` with a non-`auto` z-index, which makes it
+            // a stacking context — a sibling readout can never be layered
             // against anything inside that context no matter what z-index
             // it carries. That's why a `position: fixed` drawer (z-index:
-            // 200, inside `.app`) was painting UNDER `.sys-meta` (z-index:
-            // 70, a root sibling) despite the numbers saying otherwise.
+            // 200, inside `.app`) painted UNDER the readout (z-index: 70, a
+            // root sibling) despite the numbers saying otherwise.
             // Reparenting puts both in one stacking context so the
             // authored layer values finally resolve as intended.
             //
-            // Phase 49.4 Plan 03 (D-22): Breadcrumb moves in here too,
-            // wrapped together with SysMeta in `.topbar-row` so they become
-            // flex siblings in one bounded row — the wrapper is placed
-            // inside `div.app` (rather than pulling SysMeta back out to be
-            // Breadcrumb's sibling at the root) to preserve the GAP-11
-            // stacking-context fix above.
-            //
-            // Phase 49.4 Plan 11 (D-19): TopbarProfileSwitch mounts between
-            // Breadcrumb and SysMeta — a third flex child of the SAME row,
-            // never a fixed-position element of its own, so Breadcrumb
-            // still shrinks first and SysMeta still never truncates.
-            div { class: "topbar-row",
-                breadcrumb::Breadcrumb {}
-                profile_topbar::TopbarProfileSwitch {}
-                sys_meta::SysMeta {
-                    model: active_model,
-                    provider: active_provider,
-                    uptime_secs: ticking_uptime_secs,
-                    context_source: active_context_source,
-                }
+            // Phase 54.4 Plan 01 (D-04): the persistent header (status strip,
+            // shortcuts, docked wheel) takes the place of the old top bar row
+            // and the root-level floating wheel. It stays inside `div.app`
+            // (GAP-11 rationale above) and OUTSIDE the screen router, so the
+            // same banner is present on every one of the 16 screens.
+            header::Header {
+                model: active_model,
+                provider: active_provider,
+                uptime_secs: if summary_resolved { Some(ticking_uptime_secs) } else { None },
+                context_source: active_context_source,
             }
             screen_router::ScreenRouter {}
         }
         app_footer::AppFooter {}
-        wheel_rail::WheelRail {}
-        wheel::Wheel {}
         theme_effects::ThemeEffects {}
         tweaks_panel::TweaksPanel {}
 
@@ -1562,6 +1882,109 @@ mod tests {
         );
     }
 
+    /// `mod.rs` source before its test module, so the needle strings inside
+    /// the provider tests below can never satisfy their own assertions.
+    fn mod_code() -> &'static str {
+        &MOD_RS[..MOD_RS.find("mod tests {").unwrap_or(MOD_RS.len())]
+    }
+
+    #[test]
+    fn agent_tabs_ctx_is_provided_at_the_hermes_app_root() {
+        // Phase 54.4 Plan 05 (D-10): the tab model's ONE legal home — a child
+        // provider compiles clean and panics every consumer outside its subtree.
+        assert!(
+            mod_code().contains(
+                "use_context_provider(|| crate::components::hermes_app::agent_tabs::AgentTabsCtx(agent_tabs))"
+            ),
+            "AgentTabsCtx must be provided via use_context_provider in HermesApp's own body",
+        );
+    }
+
+    #[test]
+    fn live_agent_ctx_is_provided_at_the_hermes_app_root() {
+        assert!(
+            mod_code().contains(
+                "use_context_provider(|| crate::components::hermes_app::agent_tabs::LiveAgentCtx(live_agent))"
+            ),
+            "LiveAgentCtx must be provided via use_context_provider in HermesApp's own body",
+        );
+    }
+
+    #[test]
+    fn menu_ctx_is_provided_at_the_hermes_app_root() {
+        // Phase 54.9 (D-06): the live menu layout's ONE legal home.
+        assert!(
+            mod_code().contains("use_context_provider(|| menu_ctx)"),
+            "MenuCtx must be provided via use_context_provider in HermesApp's own body",
+        );
+        assert!(
+            mod_code().contains("get_menu_layout"),
+            "MenuCtx must be hydrated from get_menu_layout",
+        );
+    }
+
+    #[test]
+    fn activity_log_ctx_is_provided_at_the_hermes_app_root() {
+        // Phase 54.4 Plan 07 (D-08/D-25): the activity ring's ONE legal home.
+        assert!(
+            mod_code().contains(
+                "use_context_provider(|| crate::activity_log::ActivityLogCtx(activity_log))"
+            ),
+            "ActivityLogCtx must be provided via use_context_provider in HermesApp's own body",
+        );
+        assert!(
+            mod_code().contains("activity_row_for("),
+            "the receive loop must feed the ring through activity_row_for",
+        );
+    }
+
+    #[test]
+    fn agent_notice_ctx_is_provided_at_the_hermes_app_root() {
+        assert!(
+            mod_code().contains(
+                "use_context_provider(|| crate::components::hermes_app::agent_tabs::AgentNoticeCtx(agent_notice))"
+            ),
+            "AgentNoticeCtx must be provided via use_context_provider in HermesApp's own body",
+        );
+    }
+
+    #[test]
+    fn dashboard_layout_hydrate_and_persist_are_wired() {
+        // Phase 54.4 Plan 05 (D-15): hydrated ONCE inside the existing one-shot
+        // hydration effect, persisted by an effect that first checks `hydrated`.
+        let code = mod_code();
+        let read = code
+            .find("read_json::<crate::components::hermes_app::agent_tabs::AgentTabsState>(ui_prefs::KEY_DASHBOARD)")
+            .expect("the layout must be read with read_json::<AgentTabsState>(KEY_DASHBOARD)");
+        let tweaks = code
+            .find("read_json::<UiPrefs>(ui_prefs::KEY_TWEAKS)")
+            .expect("the existing hydration effect must still read the tweaks blob");
+        // Leading space: `orb_appearance_hydrated.set(true);` also ends in
+        // `hydrated.set(true);` and sits earlier in the file.
+        let done = code
+            .find(" hydrated.set(true);")
+            .expect("the hydration effect must flip `hydrated`");
+        assert!(
+            tweaks < read && read < done,
+            "the layout read must sit inside the one-shot hydration effect"
+        );
+
+        let write = code
+            .find("write_json(ui_prefs::KEY_DASHBOARD")
+            .expect("the layout must be persisted with write_json(ui_prefs::KEY_DASHBOARD");
+        let effect_start = code[..write]
+            .rfind("use_effect(move || {")
+            .expect("the write must live in a use_effect");
+        assert!(
+            code[effect_start..write].contains("*hydrated.read()"),
+            "the persist effect must check `hydrated` before writing (defaults never clobber a stored blob)"
+        );
+        assert!(
+            code[effect_start..write].contains("agent_tabs.read()"),
+            "the persist effect must read the tab signal with .read() so it subscribes"
+        );
+    }
+
     #[test]
     fn providers_and_models_consume_the_shared_context_not_a_local_signal() {
         // The regression this closes: a screen-LOCAL `use_signal` for banner
@@ -1744,4 +2167,43 @@ mod tests {
              pattern this task exists to avoid (see the project memory on the resource-restart trap)",
         );
     }
+
+    // Phase 54.7 Plan 08 (D-15): the root seed that voice-mode entry obeys.
+    fn snapshot_with_service(service: &str) -> crate::server::api::VoiceConfigSnapshot {
+        crate::server::api::VoiceConfigSnapshot {
+            voice_service: service.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn seed_voice_service_on_ok_and_err() {
+        use super::seed_voice_service;
+        use dioxus::prelude::ServerFnError;
+        // Ok: the saved service, and Loaded flips true.
+        let ok: Option<Result<_, ServerFnError>> = Some(Ok(snapshot_with_service("realtime")));
+        assert_eq!(seed_voice_service(&ok), Some(("realtime".to_string(), true)));
+        let ok_tb: Option<Result<_, ServerFnError>> =
+            Some(Ok(snapshot_with_service("turn_based")));
+        assert_eq!(
+            seed_voice_service(&ok_tb),
+            Some(("turn_based".to_string(), true))
+        );
+        // Err: the default service, and Loaded STILL flips true so a fetch
+        // failure never strands voice-mode entry.
+        let err: Option<Result<crate::server::api::VoiceConfigSnapshot, ServerFnError>> =
+            Some(Err(ServerFnError::new("boom")));
+        assert_eq!(seed_voice_service(&err), Some(("turn_based".to_string(), true)));
+        // Still pending: nothing to seed yet.
+        let pending: Option<Result<crate::server::api::VoiceConfigSnapshot, ServerFnError>> = None;
+        assert_eq!(seed_voice_service(&pending), None);
+    }
 }
+
+// Phase 54.4 Plan 12 (G-54.4-3, G-54.4-3b, D-02): test-only contrast gate over
+// the shipped theme tokens, wheel rules and card surfaces. Declared AFTER the
+// existing test module on purpose: sibling source-text tests (agent_tabs) cut
+// this file at its first test-only attribute, so an earlier one would hide the
+// component code from them.
+#[cfg(test)]
+mod theme_contrast;

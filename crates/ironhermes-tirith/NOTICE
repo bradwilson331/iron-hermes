@@ -1,0 +1,42 @@
+ironhermes-tirith
+=================
+
+This binary links tirith-core 0.4.2, which is licensed under the GNU Affero
+General Public License, version 3 only (AGPL-3.0-only).
+
+  tirith-core 0.4.2
+    project:      https://github.com/sheeki03/tirith  (https://tirith.sh)
+    crate:        https://crates.io/crates/tirith-core/0.4.2
+    crate source: https://crates.io/api/v1/crates/tirith-core/0.4.2/download
+    licence:      AGPL-3.0-only
+
+The full licence text is in the LICENSE file next to this NOTICE.
+
+What this program is
+--------------------
+
+  * `ironhermes-tirith` is a separate program from the MIT-licensed IronHermes
+    binaries (`ironhermes`, `iron_hermes_ui`, ...). It is its own process.
+  * It talks to the MIT binaries only through newline-delimited JSON over
+    stdio: a request carries a subject string and a kind, a response carries a
+    list of {rule, severity, title} findings. The wire types live in the MIT
+    crate `ironhermes-security-proto`; no tirith-core type crosses that
+    boundary, and no MIT crate depends on this crate or on tirith-core.
+  * The source of this program is this crate directory
+    (crates/ironhermes-tirith).
+
+Corresponding source for any distributed copy
+---------------------------------------------
+
+For every container image or release tarball that includes the
+`ironhermes-tirith` binary, the corresponding source is:
+
+  1. this crate directory, at the release tag matching the distributed
+     binary's version (`ironhermes-tirith --version`), and
+  2. the tirith-core 0.4.2 source linked above (the crate source URL is stable
+     and the version is pinned exactly in Cargo.toml as `=0.4.2`).
+
+The image or tarball must also carry this NOTICE and the LICENSE file.
+
+This note is an engineering summary of how the program is packaged, not legal
+advice.

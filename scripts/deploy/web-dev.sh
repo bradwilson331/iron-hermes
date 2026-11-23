@@ -43,7 +43,10 @@ log()  { printf '[web-dev] %s\n' "$*"; }
 die()  { printf '[web-dev] ERROR: %s\n' "$*" >&2; exit 1; }
 warn() { printf '[web-dev] WARN: %s\n' "$*" >&2; }
 
-command -v dx >/dev/null 2>&1 || die "dx not found on PATH (install with: cargo install dioxus-cli)"
+# shellcheck source=../lib/dioxus-dx.sh
+. "$REPO_ROOT/scripts/lib/dioxus-dx.sh"
+resolve_dioxus_dx || die "Dioxus CLI (dx) not found: no dx on PATH or in ~/.cargo/bin reports 'dioxus' (Deno also installs a dx). Install with: cargo install dioxus-cli, or set IRONHERMES_DX=/path/to/dx"
+log "dioxus cli: $DX ($("$DX" --version 2>/dev/null))"
 
 log "this is the LOCAL/STAGING dev server, not the production path"
 log "production: scripts/deploy/web-build.sh + scripts/deploy/web-run.sh"
@@ -72,5 +75,20 @@ esac
 # in Dioxus's find_main_package. Always run from the workspace root.
 cd "$REPO_ROOT"
 
+# ---------- security sidecar ----------
+# dx serve owns and rebuilds target/dx/.../web/, so a sidecar copied there is not
+# guaranteed to survive. Build it into target/debug and point the server at it via
+# IRONHERMES_TIRITH_BIN (inherited by the server dx spawns), unless the operator
+# already set one. Without it, Warn-class tools and MCP configs are Blocked at
+# DEFCON 1-3 and the web approval card never appears.
+if [ -z "${IRONHERMES_TIRITH_BIN:-}" ]; then
+    log "building security sidecar: cargo build -p ironhermes-tirith"
+    cargo build -p ironhermes-tirith --bin ironhermes-tirith
+    IRONHERMES_TIRITH_BIN="$REPO_ROOT/target/debug/ironhermes-tirith"
+    [ -x "$IRONHERMES_TIRITH_BIN" ] || die "security sidecar missing after build: $IRONHERMES_TIRITH_BIN"
+    export IRONHERMES_TIRITH_BIN
+fi
+log "security sidecar: $IRONHERMES_TIRITH_BIN"
+
 log "running: dx serve --package iron_hermes_ui --addr $BIND --port $PORT $*"
-exec dx serve --package iron_hermes_ui --addr "$BIND" --port "$PORT" "$@"
+exec "$DX" serve --package iron_hermes_ui --addr "$BIND" --port "$PORT" "$@"

@@ -400,10 +400,13 @@ impl AcpSessionManager {
     /// GAP-6 `run_single` pattern), and ends the `StateStore` row. Returns `false` for
     /// an unknown id rather than panicking.
     pub async fn close(&mut self, session_id: &str) -> bool {
-        let memory_manager = match self.sessions.get_mut(session_id) {
+        let (memory_manager, tool_registry) = match self.sessions.get_mut(session_id) {
             Some(session) => {
                 session.closed = true;
-                session.memory_manager.clone()
+                (
+                    session.memory_manager.clone(),
+                    session.runtime.registry().clone(),
+                )
             }
             None => return false,
         };
@@ -418,6 +421,20 @@ impl AcpSessionManager {
                     "ACP session close: on_session_end failed (best-effort)"
                 );
             }
+        }
+
+        // 49.8-08 (D-10/D-16): ACP session close is a real session boundary —
+        // stop the robot and cancel any goals. Awaited, and bounded by
+        // end_session_stop's own session-end timeout (see
+        // ironhermes_tools::ros2::session), so an unreachable bridge can
+        // never wedge session close.
+        let ros2_report = ironhermes_tools::ros2::end_session_stop(&tool_registry).await;
+        if ros2_report != "nothing to stop" {
+            tracing::info!(
+                report = %ros2_report,
+                session_id = %session_id,
+                "ACP session close: ros2 session-end stop"
+            );
         }
 
         match self.state.lock() {

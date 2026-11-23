@@ -12,15 +12,12 @@
 //!
 //! # Component skeleton (Task 1)
 //!
-//! `mod.rs` owns the screen shell (header, D-07 scope selector, `.grid.wide`,
-//! RESTART ALL, + ADD PLATFORM) and calls one child per grid section:
-//! [`chat_platform_cards::ChatPlatformCards`],
-//! [`webhook_route_cards::WebhookRouteCards`],
-//! [`api_server_card::ApiServerCard`], [`teaser_cards::TeaserCards`], plus
-//! [`webhook_wizard::AddRouteWizard`] as an always-mounted modal bound to a
-//! `wizard_open: Signal<bool>`. Every child's prop SIGNATURE established
-//! here is the CONTRACT expansion plans 03/04/05/06 fill the BODY of
-//! without changing — see each child module's own doc comment.
+//! `mod.rs` owns the screen shell (header, D-07 scope selector, RESTART ALL
+//! and ADD PLATFORM buttons) and renders the cards through one
+//! [`card_list::GatewayCardList`] (Phase 54.10 D-18: a flat, reorderable,
+//! keyed list in the saved order), plus [`webhook_wizard::AddRouteWizard`] as
+//! an always-mounted modal bound to a `wizard_open: Signal<bool>`. Each card
+//! module keeps its own prop SIGNATURE — see its own doc comment.
 //! `chat_config_form.rs`/`whitelist_editor.rs` are nested children of
 //! `chat_platform_cards.rs` (not called from this file); they exist as
 //! compiling empty stubs starting Plan 01, wired starting Plan 03.
@@ -45,6 +42,7 @@
 //! gateway liveness.
 
 mod api_server_card;
+mod card_list;
 mod chat_config_form;
 mod chat_platform_cards;
 mod schedules_card;
@@ -57,11 +55,7 @@ mod webhook_route_cards;
 pub(crate) mod webhook_wizard;
 mod whitelist_editor;
 
-use api_server_card::ApiServerCard;
-use chat_platform_cards::ChatPlatformCards;
-use schedules_card::GatewaySchedulesCard;
-use teaser_cards::TeaserCards;
-use webhook_route_cards::WebhookRouteCards;
+use card_list::{GatewayCardList, ResetOrderButton};
 use webhook_wizard::AddRouteWizard;
 
 use crate::server::gateway_control_api::{restart_gateway, GatewayLifecycleOutcome};
@@ -121,6 +115,11 @@ pub fn ScreenGateway(is_active: bool) -> Element {
         Some(Ok(s)) => Some(s),
         _ => None,
     };
+
+    // D-18: `GatewayCardList` owns the order; the header's `Reset card order` button reads
+    // whether it differs from the default and asks the list to reset.
+    let order_customized: Signal<bool> = use_signal(|| false);
+    let mut reset_req: Signal<u32> = use_signal(|| 0);
 
     // Explicit `Signal` -> `ReadSignal` conversions as named bindings —
     // calling `.into()` inline inside the rsx! prop position is ambiguous
@@ -185,6 +184,13 @@ pub fn ScreenGateway(is_active: bool) -> Element {
                     GatewayScopeSelector { scope }
                 }
                 div { class: "screen-actions",
+                    ResetOrderButton {
+                        visible: *order_customized.read(),
+                        on_reset: move |_| {
+                            let n = *reset_req.peek();
+                            reset_req.set(n + 1);
+                        },
+                    }
                     button {
                         class: "btn btn--ghost btn--sm",
                         disabled: restart_disabled,
@@ -252,21 +258,14 @@ pub fn ScreenGateway(is_active: bool) -> Element {
                 }
             }
 
-            div { class: "grid wide",
-                // Schedules leads the grid as a full-width banner
-                // (`.plat-card--full`) — operator request, 2026-09-01. It
-                // stays INSIDE `.grid.wide` rather than being hoisted above
-                // it so it scrolls with the other cards rather than pinning
-                // to the screen.
-                GatewaySchedulesCard { scope: scope_ro, refresh_tick }
-                ChatPlatformCards {
-                    scope: scope_ro,
-                    refresh_tick,
-                    platform_status: platform_status.clone(),
-                }
-                WebhookRouteCards { scope: scope_ro, refresh_tick }
-                ApiServerCard { scope: scope_ro, refresh_tick }
-                TeaserCards { scope: scope_ro }
+            // One flat keyed list of every card in the saved order (D-18): DOM and
+            // Tab order equal visual order. Position 1 is the full-width banner.
+            GatewayCardList {
+                scope: scope_ro,
+                refresh_tick,
+                platform_status: platform_status.clone(),
+                order_customized,
+                reset_req,
             }
 
             AddRouteWizard {

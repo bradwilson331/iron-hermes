@@ -30,7 +30,7 @@ use ironhermes_core::{Config, MessageEvent, MessageResponse, Platform, ProviderR
 use ironhermes_gateway::adapter::PlatformAdapter;
 use ironhermes_gateway::session::{SessionKey, SessionStore};
 use ironhermes_gateway::session_queue::{MAX_QUEUE_DEPTH, SessionQueue};
-use ironhermes_gateway::{GatewayMessageHandler, GatewayRunner};
+use ironhermes_gateway::{GatewayMessageHandler, GatewayRunner, UserQueueManager};
 use ironhermes_tools::ToolRegistry;
 
 // --------------------------------------------------------------------------
@@ -300,37 +300,23 @@ fn make_event(chat_id: &str, content: &str) -> MessageEvent {
 /// the busy-branch enqueue path.
 #[tokio::test]
 async fn test_busy_agent_enqueues_event() {
-    use ironhermes_gateway::adapter::MessageHandler;
-
-    let store = build_test_session_store();
     let queue = Arc::new(SessionQueue::new());
-    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
     let adapter = RecordingPlatformAdapter::new();
+    let uqm = UserQueueManager::new(adapter.clone(), queue.clone());
 
-    // Set agent_running = true for the target session.
     let key = test_session_key("chat-busy");
-    {
-        let mut s = store.write().await;
-        s.get_or_create(key.clone(), "model", "test");
-    }
-    {
-        let s = store.read().await;
-        s.get(&key)
-            .expect("session was just created")
-            .running
-            .store(true, Ordering::SeqCst);
-    }
 
     // Pre-condition: queue is empty for this session.
     assert_eq!(queue.len(&key), 0, "queue must start empty");
 
-    // Dispatch a free-text message — goes through handle_with_multimodal's
-    // non-slash busy branch.
+    // Phase 39.1 (1b1e069fa / a479fdb3b): the handler no longer gates on a
+    // per-session running flag; free-text enqueue is owned by
+    // UserQueueManager::dispatch (the transport entry point every adapter
+    // calls before the per-chat worker runs the turn).
     let event = make_event("chat-busy", "hello while busy");
-    handler
-        .handle(&event, adapter.clone(), CancellationToken::new())
+    uqm.dispatch(event, None, None, None)
         .await
-        .expect("handle returns Ok on enqueue path");
+        .expect("dispatch returns Ok on enqueue path");
 
     // Post-condition: depth == 1; no reject message sent.
     assert_eq!(
@@ -354,25 +340,11 @@ async fn test_busy_agent_enqueues_event() {
 ///   - queue depth stays at 128 (T-36.17.1-01: cap held).
 #[tokio::test]
 async fn test_cap_hit_emits_reaction() {
-    use ironhermes_gateway::adapter::MessageHandler;
-
-    let store = build_test_session_store();
     let queue = Arc::new(SessionQueue::new());
-    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
     let adapter = RecordingPlatformAdapter::new();
+    let uqm = UserQueueManager::new(adapter.clone(), queue.clone());
 
     let key = test_session_key("chat-cap");
-    {
-        let mut s = store.write().await;
-        s.get_or_create(key.clone(), "model", "test");
-    }
-    {
-        let s = store.read().await;
-        s.get(&key)
-            .expect("session")
-            .running
-            .store(true, Ordering::SeqCst);
-    }
 
     // Pre-fill the queue to MAX_QUEUE_DEPTH (128).
     for i in 0..MAX_QUEUE_DEPTH {
@@ -385,10 +357,11 @@ async fn test_cap_hit_emits_reaction() {
 
     // 129th event — must trigger cap-hit branch.
     let event_129 = make_event("chat-cap", "the-129th");
-    handler
-        .handle(&event_129, adapter.clone(), CancellationToken::new())
-        .await
-        .expect("handle returns Ok on cap-hit (UX sent, return Ok)");
+    let res = uqm.dispatch(event_129, None, None, None).await;
+    assert!(
+        res.is_err(),
+        "dispatch must report CapacityReached on the 129th event (UX already sent)"
+    );
 
     // Assert: queue depth still 128 (cap held — T-36.17.1-01).
     assert_eq!(
@@ -853,32 +826,18 @@ async fn test_new_clears_queue_before_session_remove() {
 /// 👁 reaction is a separate layer not exercised in handler-level tests).
 #[tokio::test]
 async fn test_telegram_busy_path_enqueues() {
-    use ironhermes_gateway::adapter::MessageHandler;
-
     // Pitfall 6: Telegram getUpdates offset advance happens at
     // runner.rs:723-736 BEFORE dispatch. Handler-level test cannot verify
     // offset advance — see session_queue_telegram_uat.md for the live
     // verification step.
 
-    let store = build_test_session_store();
     let queue = Arc::new(SessionQueue::new());
-    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
     let adapter = RecordingPlatformAdapter::new();
+    let uqm = UserQueueManager::new(adapter.clone(), queue.clone());
 
     // Build the canonical Telegram SessionKey (Platform::Telegram + chat_id
     // "test_chat" + sender_id "test_user") matching the planner's spec.
     let key = SessionKey::new(Platform::Telegram, "test_chat").with_user("test_user");
-    {
-        let mut s = store.write().await;
-        s.get_or_create(key.clone(), "model", "test");
-    }
-    {
-        let s = store.read().await;
-        s.get(&key)
-            .expect("session was just created")
-            .running
-            .store(true, Ordering::SeqCst);
-    }
 
     assert_eq!(queue.len(&key), 0, "queue must start empty");
 
@@ -898,10 +857,9 @@ async fn test_telegram_busy_path_enqueues() {
         replied_to_id: None,
     };
 
-    handler
-        .handle(&event, adapter.clone(), CancellationToken::new())
+    uqm.dispatch(event, None, None, None)
         .await
-        .expect("handle returns Ok on Telegram enqueue path");
+        .expect("dispatch returns Ok on Telegram enqueue path");
 
     // Depth 1 — busy-branch must enqueue, not reject.
     assert_eq!(
@@ -943,30 +901,16 @@ async fn test_telegram_busy_path_enqueues() {
 /// verification step.
 #[tokio::test]
 async fn test_telegram_cap_hit_full_ux() {
-    use ironhermes_gateway::adapter::MessageHandler;
-
     // Pitfall 6: Telegram getUpdates offset advance happens at
     // runner.rs:723-736 BEFORE dispatch. Handler-level test cannot verify
     // offset advance — see session_queue_telegram_uat.md for the live
     // verification step.
 
-    let store = build_test_session_store();
     let queue = Arc::new(SessionQueue::new());
-    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
     let adapter = RecordingPlatformAdapter::new();
+    let uqm = UserQueueManager::new(adapter.clone(), queue.clone());
 
     let key = SessionKey::new(Platform::Telegram, "test_chat").with_user("test_user");
-    {
-        let mut s = store.write().await;
-        s.get_or_create(key.clone(), "model", "test");
-    }
-    {
-        let s = store.read().await;
-        s.get(&key)
-            .expect("session")
-            .running
-            .store(true, Ordering::SeqCst);
-    }
 
     // Pre-fill the queue to MAX_QUEUE_DEPTH with distinct content
     // "msg_001"..="msg_128". The numbering deviates from the integer-typed
@@ -1009,10 +953,11 @@ async fn test_telegram_cap_hit_full_ux() {
         sender_name: None,
         replied_to_id: None,
     };
-    handler
-        .handle(&event_129, adapter.clone(), CancellationToken::new())
-        .await
-        .expect("handle returns Ok on cap-hit (UX sent, return Ok)");
+    let res = uqm.dispatch(event_129, None, None, None).await;
+    assert!(
+        res.is_err(),
+        "dispatch must report CapacityReached on the 129th event (UX already sent)"
+    );
 
     // T-36.17.1-01: cap holds at 128 — the 129th push was dropped.
     assert_eq!(

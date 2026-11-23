@@ -47,9 +47,12 @@ async fn fetch_with_firecrawl(url: &str) -> anyhow::Result<String> {
 
     debug!("Fetching {} via Firecrawl", url);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()?;
+    // D-14 anti-drift: routed through the shared SSRF-safe builder for
+    // consistency even though this call's target is Firecrawl's own fixed API
+    // endpoint (the agent-supplied `url` travels only in the JSON body here,
+    // never as this client's connection target).
+    let client =
+        crate::web_client::build_ssrf_safe_client(None, Duration::from_secs(timeout_secs))?;
 
     let response = client
         .post("https://api.firecrawl.dev/v1/scrape")
@@ -122,11 +125,15 @@ async fn fetch_local(
 ) -> anyhow::Result<String> {
     debug!("Fetching {} via local fallback", url);
 
-    let client = reqwest::Client::builder()
-        .user_agent(&config.user_agent)
-        .timeout(Duration::from_secs(config.timeout_secs))
-        // Default redirect policy follows redirects (D-03).
-        .build()?;
+    // D-13: redirects stay ON (not `Policy::none()`) because every hop —
+    // including a redirect's new host — is resolved through
+    // `crate::web_client`'s SSRF-safe resolver BEFORE the connection to it is
+    // made. See `crate::web_client`'s module doc for the full contrast with
+    // `restgw/webhook/deliver.rs`'s `Policy::none()` posture.
+    let client = crate::web_client::build_ssrf_safe_client(
+        Some(&config.user_agent),
+        Duration::from_secs(config.timeout_secs),
+    )?;
 
     let response = client
         .get(url)
@@ -134,7 +141,13 @@ async fn fetch_local(
         .await
         .map_err(|e| anyhow::anyhow!("HTTP request failed: {}", e))?;
 
-    // Post-redirect SSRF re-validation (D-17): if redirected, validate the final URL.
+    // Post-redirect SSRF re-validation (D-17): SECOND line of defense. The
+    // SSRF-safe resolver installed above is the FIRST line — it blocks
+    // pre-connection, at resolution time, for every hop reqwest follows. This
+    // check only fires if the resolver somehow did not (e.g. a future refactor
+    // accidentally drops the resolver installation); it is retained here as
+    // defense in depth. A later phase may remove it once the resolver has
+    // soaked.
     let final_url = response.url().as_str().to_string();
     if final_url != url {
         validate_url_async(&final_url)

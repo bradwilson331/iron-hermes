@@ -27,6 +27,8 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub mod approval_gate;
+/// Phase 54.8 Plan 04 (D-08): owner-only daily-rolling gateway log file.
+pub mod gateway_log;
 // Phase 49.6 Plan 03: `/blueprint save`'s CLI-only BlueprintSaverImpl.
 // Compiled into BOTH this lib target and the `ironhermes` bin target
 // (`main.rs` declares it too, mirroring `setup.rs`'s dual-declaration
@@ -39,6 +41,9 @@ pub mod memory_cmd;
 pub mod quick_command;
 pub mod setup;
 pub mod skills_cmd;
+/// Phase 54.1 Plan 04 (D-10): on-disk path migration for installed skill
+/// content (`ironhermes skills migrate-paths`).
+pub mod skills_migrate;
 
 // Phase 25 Plan 04: toolset subcommand — exported so integration tests and
 // the lib consumer can call validate_toolset_name / cmd_toolset_enable without
@@ -89,4 +94,7 @@ pub mod profile_audit;
 
 pub use io_gate::{can_prompt, is_terminal_stdin};
 pub use repl_input::{ExternalPrinterHandle, PromptRequest, ReplInputChannel, ReplLine};
-pub use yolo::{maybe_print_yolo_banner, print_yolo_banner_to_stderr, resolve_yolo};
+pub use yolo::{
+    WORKER_LEVEL_ENV, maybe_print_yolo_banner, print_yolo_banner_to_stderr,
+    resolve_session_default,
+};

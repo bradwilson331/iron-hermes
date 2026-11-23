@@ -1,0 +1,8 @@
+# Dockle ignores (Phase 54.11, D-04 #10). One check ID per line; comments and
+# blank lines are skipped by scripts/container-lint.sh. Every ignore carries its
+# justification on the line above it.
+
+# CIS-DI-0001 "Create a user for the container": no USER directive by design
+# (D-05). The entrypoint starts as root only to fix volume ownership, then drops
+# to uid 10000 via setpriv with no_new_privs and an emptied bounding set.
+CIS-DI-0001

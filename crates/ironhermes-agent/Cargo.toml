@@ -11,13 +11,34 @@ memory-sqlite = ["dep:memory-sqlite"]
 memory-duckdb = ["dep:memory-duckdb"]
 memory-grafeo = ["dep:memory-grafeo"]
 test-support = []
+# 58.2 D-05: forwards the built-in fastembed embedder to ironhermes-tier2 (whose own default is
+# deliberately not inherited). Enabled by the `ironhermes` CLI default set, never an agent default.
+builtin-embedder = ["ironhermes-tier2/builtin-embedder"]
 # Phase 46.8 Plan 07 (D-07): threads the RustyVault backend into the vault
 # fallback consulted at resolver-construction sites. Off by default —
 # env-var backend (always-on, no cargo feature required) remains the default.
 rusty-vault = ["ironhermes-vault/rusty-vault"]
 
+# Phase 54.3 Plan 01 (Ruling 4): the yolo per-turn e2e drives a real `run_turn` through
+# `AgentRuntime::for_tests_with_base_url`, which is gated behind `test-support`. Declaring
+# `required-features` makes the target skip (not fail to compile) when the feature is off;
+# CI's `--all-features` is unaffected. Cargo's integration-test autodiscovery stays on.
+[[test]]
+name = "yolo_turn_e2e"
+required-features = ["test-support"]
+
+# Phase 57 Plan 22 (G-1): the denial-text e2e drives a real `run_turn` through
+# `AgentRuntime::for_tests_with_base_url`, gated behind `test-support`, exactly like
+# `yolo_turn_e2e` above. `required-features` skips (not fails to compile) the target when the
+# feature is off; CI's `--all-features` is unaffected.
+[[test]]
+name = "denial_text_e2e"
+required-features = ["test-support"]
+
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+# Phase 57 Plan 05 (D-02): every agent host reaches the tirith sidecar service through this crate.
+ironhermes-security = { path = "../ironhermes-security" }
 # Phase 46.8 Plan 07 (D-07): subagent_runner's resolver-construction site
 # (test-only — production subagents inherit the parent's already-vault-topped-up
 # resolver via clone, per D-13) applies the same guarded vault fallback.
@@ -25,6 +46,10 @@ ironhermes-vault = { path = "../ironhermes-vault" }
 ironhermes-blackbox = { path = "../ironhermes-blackbox" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 ironhermes-state = { path = "../ironhermes-state" }
+# Phase 58.2 Plan 01 (D-10): a Tier2Handle is attached to MemoryManager; the tracer test
+# builds Tier2Service directly. default-features off: plan 02 adds the default
+# `builtin-embedder` feature, which the agent opts into at its own seam.
+ironhermes-tier2 = { path = "../ironhermes-tier2", default-features = false }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-exec = { path = "../ironhermes-exec" }

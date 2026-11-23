@@ -15,11 +15,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::any_client::AnyClient;
-use crate::context_compressor::estimate_messages_tokens;
+use crate::context_compressor::{estimate_messages_tokens, estimate_tokens};
 use crate::context_engine::{
     CompressionMode, CompressionOutcome, ContextEngine, ContextError, ContextStats,
     LocalPruningEngine,
 };
+use crate::fit;
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::tool_pair;
@@ -48,8 +49,6 @@ pub const MEMORY_AUTHORITY_REMINDER: &str = "IMPORTANT: Your persistent memory (
 const HISTORY_SUMMARY_MAX_CHARS: usize = 8_000;
 /// Per-pruned-block character truncation before concatenation into prompt.
 const PRUNED_BLOCK_MAX_CHARS: usize = 4_000;
-/// D-24 runaway loop guard — refuse to compress after this many passes.
-const MAX_COMPRESSION_PASSES: usize = 10;
 
 /// Locate the pinned history segment index if present (D-17).
 pub fn locate_history_segment(messages: &[ChatMessage]) -> Option<usize> {
@@ -90,21 +89,36 @@ pub trait SummarizationClient: Send + Sync + 'static {
 pub struct AnyClientSummarizer {
     client: Arc<AnyClient>,
     model: Option<String>,
+    /// Main model's window; when set, the reply is capped by `fit::summary_budget` (D-17).
+    context_window: Option<usize>,
 }
 
 impl AnyClientSummarizer {
     pub fn new(client: Arc<AnyClient>, model: Option<String>) -> Self {
-        Self { client, model }
+        Self {
+            client,
+            model,
+            context_window: None,
+        }
+    }
+
+    /// Scale the summary's `max_tokens` with the MAIN model's window (D-17).
+    pub fn with_context_window(mut self, window: usize) -> Self {
+        self.context_window = Some(window);
+        self
     }
 }
 
 #[async_trait]
 impl SummarizationClient for AnyClientSummarizer {
     async fn summarize(&self, prompt: String) -> Result<String, ContextError> {
+        let max_tokens = self
+            .context_window
+            .map(|w| fit::summary_budget(estimate_tokens(&prompt), w));
         let msg = ChatMessage::user(prompt);
         let resp = self
             .client
-            .chat_completion(&[msg], None, self.model.as_deref(), None, None, None)
+            .chat_completion_fitting(&[msg], None, self.model.as_deref(), max_tokens, None, None)
             .await
             .map_err(|e| ContextError::SummarizationFailed(e.to_string()))?;
         let body = resp
@@ -247,11 +261,11 @@ impl ContextEngine for SummarizingEngine {
         messages: &mut Vec<ChatMessage>,
         stats: ContextStats,
     ) -> Result<CompressionOutcome, ContextError> {
-        // D-24 runaway loop guard
-        if stats.compression_count >= MAX_COMPRESSION_PASSES {
+        // D-24 runaway loop guard (scaled for small windows, 58.3.1 D-15)
+        if stats.compression_count >= fit::max_compression_passes(self.context_length) {
             tracing::warn!(
                 compression_count = stats.compression_count,
-                "SummarizingEngine refusing further compression (MAX_COMPRESSION_PASSES)"
+                "SummarizingEngine refusing further compression (max_compression_passes)"
             );
             return Ok(CompressionOutcome::default());
         }
@@ -582,8 +596,13 @@ impl ContextEngine for SummarizingEngine {
             )
         };
 
+        let content_tokens = estimate_tokens(&serialized_blocks);
         let new_summary = match self.summarizer.summarize(prompt).await {
-            Ok(s) => s,
+            Ok(s) => truncate_on_char_boundary(
+                &s,
+                fit::summary_char_cap(content_tokens, self.context_length),
+            )
+            .to_string(),
             Err(e) => {
                 tracing::warn!(error = ?e, "SummarizingEngine fell back to LocalPruningEngine");
                 return self.fallback.compress(messages, stats).await;
@@ -2440,5 +2459,91 @@ mod tests {
             MEMORY_AUTHORITY_REMINDER,
             "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note."
         );
+    }
+
+    // ---- Phase 58.3.1 plan 03: window-scaled summary budget and pass cap ----
+
+    #[tokio::test]
+    async fn summarizer_sends_window_scaled_max_tokens() {
+        use crate::client::LlmClient;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r", "object": "chat.completion", "created": 0, "model": "m",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .mount(&server)
+            .await;
+        let client = || {
+            Arc::new(AnyClient::ChatCompletions(LlmClient::new(
+                server.uri(),
+                "k",
+                "m",
+            )))
+        };
+
+        AnyClientSummarizer::new(client(), None)
+            .with_context_window(8_192)
+            .summarize("summarize ".repeat(500))
+            .await
+            .unwrap();
+        AnyClientSummarizer::new(client(), None)
+            .summarize("summarize me".into())
+            .await
+            .unwrap();
+
+        let bodies: Vec<serde_json::Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["max_tokens"], 409);
+        assert!(bodies[1].get("max_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn summary_char_cap_scales_with_window() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("x".repeat(10_000))]);
+        let engine = SummarizingEngine::new(8_192, 0.001, mock).with_protect(3, 100);
+        let mut msgs = build_large(40);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(8_192, 100, before))
+            .await
+            .expect("compress ok");
+        assert!(outcome.compressed);
+        let idx = locate_history_segment(&msgs).expect("history segment");
+        let text = msgs[idx].content_text().unwrap().to_string();
+        let body = text.rsplit('\n').next().unwrap();
+        // 8,192 window: summary_budget is 409 tokens for any content, so 1,636 chars.
+        assert!(
+            !body.is_empty() && body.len() <= 409 * 4,
+            "len {}",
+            body.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn small_window_session_pass_cap_is_40() {
+        let run = |window: usize, count: usize| async move {
+            let (mock, _) = MockSummarizer::new(vec![Ok("summary".into())]);
+            let engine = SummarizingEngine::new(window, 0.001, mock).with_protect(3, 100);
+            let mut msgs = build_large(40);
+            let before = estimate_messages_tokens(&msgs);
+            let mut stats = uat_stats(window, 100, before);
+            stats.compression_count = count;
+            engine.compress(&mut msgs, stats).await.unwrap().compressed
+        };
+        assert!(run(8_192, 10).await);
+        assert!(!run(8_192, 40).await);
+        assert!(!run(128_000, 10).await);
     }
 }

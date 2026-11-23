@@ -1,0 +1,11 @@
+[package]
+name = "ironhermes-security-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Wire types for the IronHermes detection sidecar (newline-delimited JSON over stdio)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

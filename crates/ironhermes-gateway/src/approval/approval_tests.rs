@@ -1007,3 +1007,182 @@ async fn existing_phase_45_invariants_still_hold() {
         "single-coordinator flow must be unaffected by Plan 06's per-platform additions"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 54.11 D-19: the PER-CALL bypass notice sends nothing to chat. The per-turn
+// notice (`notify_yolo_bypass_turn`) is log-only too (operator, 2026-11-01).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn gateway_gate_per_call_bypass_notice_sends_nothing() {
+    use super::GatewayApprovalGate;
+    use ironhermes_core::ApprovalGate;
+
+    let (coord, messages) = make_coordinator(120);
+    let gate = GatewayApprovalGate::new(Arc::new(coord), "chat-yolo".to_string());
+
+    gate.notify_yolo_bypass("sess1", "execute_code", "dangerous pattern matched")
+        .await;
+
+    let sent = messages.lock().await;
+    assert!(
+        sent.is_empty(),
+        "the per-call bypass notice must send no chat message, got {sent:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 54.11 D-19: no DEFCON wording in chat; the audit keeps it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn strip_defcon_clause_removes_level_wording() {
+    use super::strip_defcon_clause;
+
+    assert_eq!(
+        strip_defcon_clause(
+            "security sidecar reports high (rules: r1) \u{2014} approval required at DEFCON 3 (D-06)"
+        ),
+        "security sidecar reports high (rules: r1) \u{2014} approval required (D-06)"
+    );
+    assert_eq!(
+        strip_defcon_clause("a at DEFCON 3 b at DEFCON 12 c"),
+        "a b c"
+    );
+    assert_eq!(strip_defcon_clause("no clause here"), "no clause here");
+    // A bare " at DEFCON " with no digits is not the clause and is left alone.
+    assert_eq!(strip_defcon_clause("x at DEFCON y"), "x at DEFCON y");
+}
+
+#[tokio::test]
+async fn approval_prompt_hides_defcon_but_audit_keeps_it() {
+    let (adapter, messages) = MockAdapter::new();
+    let (audit_log, audit_path) = make_working_audit_log_with_path();
+    let coord = ApprovalCoordinator::new(
+        1,
+        Arc::new(adapter) as Arc<dyn PlatformAdapter>,
+        Arc::new(ApprovalsStore::with_path(PathBuf::from(
+            "/tmp/test-approval-defcon-placeholder.json",
+        ))),
+        audit_log,
+    );
+
+    // Unanswered: the prompt goes out, then the request times out and writes its audit row.
+    coord
+        .request(
+            "sess1",
+            "chat1",
+            "srv__delete",
+            "security sidecar reports high (rules: r1) \u{2014} approval required at DEFCON 3 (D-06)",
+            &serde_json::json!({}),
+        )
+        .await;
+
+    let sent = messages.lock().await;
+    assert!(
+        sent.iter().any(|m| m.contains("Approval required")),
+        "the prompt was sent: {sent:?}"
+    );
+    assert!(
+        sent.iter().all(|m| !m.contains("DEFCON")),
+        "no chat message may carry DEFCON wording: {sent:?}"
+    );
+    let audit = std::fs::read_to_string(&audit_path).expect("read audit log");
+    assert!(
+        audit.contains("at DEFCON 3"),
+        "the audit row keeps the level wording: {audit}"
+    );
+}
+
+/// Phase 54.11 D-19 (operator, 2026-11-01): a bypassing turn sends NOTHING to chat;
+/// the summary goes to the log only.
+#[tokio::test]
+async fn gateway_gate_notify_turn_sends_nothing_to_chat() {
+    use super::GatewayApprovalGate;
+    use ironhermes_core::{ApprovalGate, YoloBypass, YoloBypassSummary};
+
+    let (coord, messages) = make_coordinator(120);
+    let gate = GatewayApprovalGate::new(Arc::new(coord), "chat-yolo".to_string());
+
+    let mut summary = YoloBypassSummary::single(
+        "sess1",
+        "telegram",
+        "chat-yolo",
+        "terminal",
+        "command contains shell metacharacters (D-09)",
+    );
+    summary.items.push(YoloBypass {
+        tool: "execute_code".to_string(),
+        reason: "dangerous pattern matched".to_string(),
+    });
+
+    gate.notify_yolo_bypass_turn(&summary).await;
+
+    let sent = messages.lock().await;
+    assert!(sent.is_empty(), "bypass notices are log-only: {sent:?}");
+}
+
+/// The logged line names every tool, carries the count, and hides DEFCON wording.
+#[test]
+fn yolo_turn_notice_names_tools_and_hides_defcon() {
+    use super::yolo_turn_notice;
+    use ironhermes_core::{YoloBypass, YoloBypassSummary};
+
+    let mut summary = YoloBypassSummary::single(
+        "sess1",
+        "telegram",
+        "chat-yolo",
+        "terminal",
+        "command contains shell metacharacters; ran without approval at DEFCON 4",
+    );
+    summary.items.push(YoloBypass {
+        tool: "execute_code".to_string(),
+        reason: "dangerous pattern matched".to_string(),
+    });
+
+    let line = yolo_turn_notice(&summary);
+    assert!(line.contains('2'), "must carry the count: {line}");
+    assert!(
+        line.contains("terminal"),
+        "must name the first tool: {line}"
+    );
+    assert!(
+        line.contains("execute_code"),
+        "must name the second tool: {line}"
+    );
+    assert!(!line.contains("DEFCON"), "no DEFCON wording: {line}");
+}
+
+/// T-54.3-13 / T-54.3-16: a remote-supplied tool name carrying `\r\n` and a
+/// 400-char reason are each sanitized and capped PER FIELD in the logged line. The
+/// long reason must not truncate the tool list away, and no forged second line may
+/// survive.
+#[test]
+fn yolo_turn_notice_sanitizes_hostile_tool_and_reason() {
+    use super::yolo_turn_notice;
+    use ironhermes_core::{YoloBypassSummary, sanitize_notice_field};
+
+    let cap = sanitize_notice_field(&"Z".repeat(10_000)).chars().count();
+    assert!(cap > 0 && cap < 10_000, "helper must cap, got {cap}");
+
+    let summary = YoloBypassSummary::single(
+        "sess1",
+        "telegram",
+        "chat-yolo",
+        "terminal\r\nFAKE yolo disabled",
+        &"Z".repeat(400),
+    );
+
+    let msg = yolo_turn_notice(&summary);
+    assert!(!msg.contains('\n'), "no embedded newline: {msg:?}");
+    assert!(!msg.contains('\r'), "no embedded carriage return: {msg:?}");
+    assert!(
+        msg.contains("terminal"),
+        "the long reason must not truncate the tool list away: {msg:?}"
+    );
+    assert_eq!(
+        msg.chars().filter(|c| *c == 'Z').count(),
+        cap,
+        "the 400-char reason must be capped to the helper's per-field cap ({cap}): {msg:?}"
+    );
+}

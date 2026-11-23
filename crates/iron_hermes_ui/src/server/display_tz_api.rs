@@ -90,6 +90,27 @@ pub async fn get_display_timezones() -> Result<DisplayTimezones, ServerFnError> 
     Ok(resolve_display_timezones(&config))
 }
 
+/// Footer `NODE:` label — the server machine's hostname (container hostname
+/// on a containerised deploy). `HOSTNAME` is rarely exported on macOS, so
+/// this asks the kernel via `gethostname(2)` instead of the env.
+#[server]
+pub async fn get_node_hostname() -> Result<String, ServerFnError> {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: buf is a valid writable buffer of the length passed.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if rc == 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+            if !name.is_empty() {
+                return Ok(name);
+            }
+        }
+    }
+    Ok("unknown".to_string())
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::{resolve_display_timezones, resolve_display_tz_parts};

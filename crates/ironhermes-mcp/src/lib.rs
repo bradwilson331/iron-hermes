@@ -14,6 +14,8 @@
 pub mod auth_store_adapter;
 pub mod config;
 pub mod manager;
+pub mod oauth_redact;
+pub mod paste_back;
 pub mod sampling;
 pub mod security;
 pub mod server_task;

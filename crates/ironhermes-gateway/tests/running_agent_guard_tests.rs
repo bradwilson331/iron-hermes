@@ -15,7 +15,7 @@
 //! 8. `test_guard_clears_on_error` — flag clears on `run_agent` returning `Err(...)` (D-06)
 //! 9. `test_alias_bypasses_guard` — `/reset` (alias for `new`) bypasses guard (D-01)
 //! 10. `test_freetext_rejected_when_running` — non-slash free-text rejected during active turn (Pitfall 1)
-//! 11. `test_stop_reads_real_flag` — `cmd_stop` reads a non-false `agent_running` on gateway (integration)
+//! 11. `test_stop_reads_real_flag` — `/stop` cancels in-flight turns via the shared TurnRegistry (Phase 39.1 rewrite)
 
 pub mod helpers {
     use std::sync::Arc;
@@ -181,6 +181,7 @@ pub mod helpers {
 // GW-05 sub-behavior tests
 // ---------------------------------------------------------------------------
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 /// GW-05-1: Per-session isolation (Phase 39.1 updated).
@@ -522,35 +523,51 @@ async fn test_freetext_rejected_when_running() {
     );
 }
 
-/// GW-05-11: `cmd_stop` reads a non-false `agent_running` on gateway.
+/// GW-05-11 (rewritten for Phase 39.1): `/stop` cancels the session's in-flight
+/// turns through the shared `TurnRegistry`.
 ///
-/// After Phase 36, `handle_slash_command` populates `CommandContext.agent_running`
-/// with the REAL per-session `Arc<AtomicBool>`, not a hardcoded false one.
-/// `/stop` bypasses the guard and reaches dispatch; `cmd_stop` reads the flag.
-/// When the flag is true, `cmd_stop` returns the "Stopping..." / non-idle message.
-///
-/// This asserts that the response from `/stop` when running is NOT the
-/// "No agent is currently running" message (which cmd_stop emits when flag==false).
+/// Phase 39.1 (1b1e069fa, R39.1-06 / D-06) deleted `CommandContext.agent_running`
+/// and the gateway's per-session gate, so the original "cmd_stop reads the real
+/// flag" contract no longer exists. Replacement contract: the gateway `/stop` arm
+/// calls `turn_registry.cancel_session(ctx_session_id)`, firing the cancellation
+/// token of every registered turn for that session (R39.1-05), and the handler
+/// still replies to the user.
 #[tokio::test]
 async fn test_stop_reads_real_flag() {
+    use ironhermes_core::concurrency::{Surface, TurnEntry, TurnRegistry};
     use ironhermes_gateway::adapter::MessageHandler;
     use tokio_util::sync::CancellationToken;
 
     let store = helpers::build_test_session_store();
     let adapter = helpers::RecordingPlatformAdapter::new();
-    let handler = helpers::build_test_handler(store.clone());
+    let mut handler = helpers::build_test_handler(store.clone());
+    let registry = Arc::new(TurnRegistry::new());
+    handler.set_turn_registry(registry.clone());
 
     let key = helpers::test_session_key("chat-1");
-    {
+    let session_id = {
         let mut s = store.write().await;
         s.get_or_create(key.clone(), "model", "test");
-    }
+        let id = s.get(&key).unwrap().session_id.clone();
+        if id.is_empty() {
+            key.to_string_key()
+        } else {
+            id
+        }
+    };
 
-    // Set running = true so cmd_stop sees a non-false flag.
-    {
-        let s = store.read().await;
-        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
-    }
+    // Register an in-flight turn for this session.
+    let turn_cancel = CancellationToken::new();
+    registry
+        .register(TurnEntry {
+            turn_id: uuid::Uuid::new_v4(),
+            session_id,
+            surface: Surface::Gateway,
+            started_at: std::time::Instant::now(),
+            cancel: turn_cancel.clone(),
+        })
+        .await;
+    assert!(!turn_cancel.is_cancelled(), "precondition: turn is live");
 
     let event = helpers::make_event("chat-1", "/stop");
     handler
@@ -558,24 +575,13 @@ async fn test_stop_reads_real_flag() {
         .await
         .unwrap();
 
+    assert!(
+        turn_cancel.is_cancelled(),
+        "/stop must cancel the session's in-flight turn via TurnRegistry (R39.1-05)"
+    );
     let msgs = adapter.messages().await;
-    // cmd_stop emits "No agent is currently running..." when flag == false (the old shim behavior).
-    // When flag == true it emits the "Stopping agent..." or "Stopped N background process(es)." path.
-    // We assert the idle message is NOT sent (proves the real flag was read).
-    let idle_msg = "No agent is currently running.";
-    let no_agent_msg = "No agent is currently running. Use Ctrl-C to cancel an \
-                        in-flight turn.";
-    for (_, text) in &msgs {
-        assert!(
-            !text.starts_with(idle_msg) && !text.contains(no_agent_msg),
-            "cmd_stop must NOT say 'No agent is currently running' when flag==true. \
-             This would mean CommandContext.agent_running received a false shim. Got: {:?}",
-            text
-        );
-    }
-    // Also confirm at least one message was sent (stop handler replied).
     assert!(
         !msgs.is_empty(),
-        "cmd_stop must send a response when the session is running. Got no messages."
+        "/stop must send a response to the user. Got no messages."
     );
 }

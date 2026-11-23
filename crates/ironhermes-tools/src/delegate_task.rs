@@ -43,6 +43,22 @@ pub type SubagentProgressCallback = Arc<dyn Fn(usize, SubagentProgress) + Send +
 /// Parameters: (tool_name, args_preview)
 pub type ChildToolProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync + 'static>;
 
+/// Extra time the parent gives a batch child past its own deadline before it
+/// cancels the child's token and aborts the task. The grace lets the cooperative
+/// in-task `timeout_at` fire first (it cancels the token and captures
+/// deliverables); the parent arm only fires when the child's task cannot be
+/// polled at all (58.1 RESEARCH Exposure 1).
+const PARENT_DEADLINE_GRACE: Duration = Duration::from_secs(2);
+
+/// `now + secs` that cannot panic. The model's `timeout_seconds` is unclamped
+/// (58.1 D-13), so a huge value must degrade to a ~30-year deadline (tokio's own
+/// `timeout` far-future fallback) instead of overflowing `Instant + Duration`.
+fn deadline_after(secs: u64) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(Duration::from_secs(secs))
+        .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365 * 30))
+}
+
 /// Default tools available to subagents when no explicit allowlist is provided (D-02).
 /// Currently referenced only by the test module; the D-02 production wiring is still
 /// pending, so `#[allow(dead_code)]` keeps the documented default available without
@@ -86,7 +102,8 @@ pub fn resolve_toolset_tools(
         // Phase 46.6 gap-closure (D-01/D-04): the delegate producer surface. Lets
         // a delegated task request the `artifact` publish tool via
         // `toolsets: ["artifacts"]`, paralleling the tool's own `toolset()`.
-        "artifacts" => Ok(vec!["artifact"]),
+        // Phase 54.10 D-09: `report_publish` shares the `artifacts` group.
+        "artifacts" => Ok(vec!["artifact", "report_publish"]),
         // Phase 47 Plan 08 (D-09): fail-closed on the delegate surface toggle.
         "generation" => Ok(if generation_enabled {
             vec![
@@ -446,16 +463,16 @@ pub(crate) fn capture_child_deliverable(
     }
 
     for root in &roots {
-        if let Some(id) =
-            crate::chat_capture::publish_producer_deliverable(crate::chat_capture::ProducerPublish {
+        if let Some(id) = crate::chat_capture::publish_producer_deliverable(
+            crate::chat_capture::ProducerPublish {
                 scan_root: root,
                 since: Some(spawn_start),
                 source_kind: "delegate",
                 source_ref: child_id,
                 title: &title,
                 fallback_body: None,
-            })
-        {
+            },
+        ) {
             return Some(id);
         }
     }
@@ -525,8 +542,14 @@ mod capture_child_deliverable_tests {
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(child_dir.path().join("out.py"), "print('child')").unwrap();
 
-        let id = capture_child_deliverable(child_dir.path(), spawn_start, "child-1", "do the thing", "do the thing")
-            .expect("child dir file must publish");
+        let id = capture_child_deliverable(
+            child_dir.path(),
+            spawn_start,
+            "child-1",
+            "do the thing",
+            "do the thing",
+        )
+        .expect("child dir file must publish");
 
         let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
         let summary = store
@@ -549,8 +572,9 @@ mod capture_child_deliverable_tests {
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(parent.path().join("out.py"), "print('parent')").unwrap();
 
-        let id = capture_child_deliverable(child_dir.path(), spawn_start, "child-2", "task 2", "task 2")
-            .expect("parent working dir file must publish when child dir is empty");
+        let id =
+            capture_child_deliverable(child_dir.path(), spawn_start, "child-2", "task 2", "task 2")
+                .expect("parent working dir file must publish when child dir is empty");
 
         let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
         let summary = store
@@ -574,8 +598,9 @@ mod capture_child_deliverable_tests {
         std::fs::write(parent.path().join("parent.py"), "print('parent')").unwrap();
         std::fs::write(child_dir.path().join("child.py"), "print('child')").unwrap();
 
-        let id = capture_child_deliverable(child_dir.path(), spawn_start, "child-3", "task 3", "task 3")
-            .expect("a candidate must publish");
+        let id =
+            capture_child_deliverable(child_dir.path(), spawn_start, "child-3", "task 3", "task 3")
+                .expect("a candidate must publish");
 
         let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
         let (_, body) = store.load_latest_source(&id).unwrap();
@@ -597,7 +622,8 @@ mod capture_child_deliverable_tests {
         let _guard = CaptureTestGuard::new(Some(parent.path()));
         let child_dir = tempfile::tempdir().unwrap();
 
-        let result = capture_child_deliverable(child_dir.path(), spawn_start, "child-4", "task 4", "task 4");
+        let result =
+            capture_child_deliverable(child_dir.path(), spawn_start, "child-4", "task 4", "task 4");
         assert!(
             result.is_none(),
             "a file predating spawn_start must never publish"
@@ -624,8 +650,12 @@ mod capture_child_deliverable_tests {
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(child_dir.path().join("out.py"), "print('x')").unwrap();
 
-        let result = capture_child_deliverable(child_dir.path(), spawn_start, "child-5", "task 5", "task 5");
-        assert!(result.is_none(), "a store that cannot open must yield None, not a panic");
+        let result =
+            capture_child_deliverable(child_dir.path(), spawn_start, "child-5", "task 5", "task 5");
+        assert!(
+            result.is_none(),
+            "a store that cannot open must yield None, not a panic"
+        );
 
         unsafe {
             std::env::remove_var(ironhermes_artifacts::ARTIFACTS_DB_ENV);
@@ -646,8 +676,14 @@ mod capture_child_deliverable_tests {
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(child_dir.path().join("out.py"), "print('x')").unwrap();
 
-        let id = capture_child_deliverable(child_dir.path(), spawn_start, "unique-child-id-6", "task 6", "task 6")
-            .expect("must publish");
+        let id = capture_child_deliverable(
+            child_dir.path(),
+            spawn_start,
+            "unique-child-id-6",
+            "task 6",
+            "task 6",
+        )
+        .expect("must publish");
 
         let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
         let summary = store
@@ -755,6 +791,10 @@ pub struct DelegateTaskTool {
     /// registration (`ToolRegistry::register_delegate_task_tool`) always
     /// overrides it via `with_credentials(self.credentials())`.
     credentials: Arc<crate::credentials::ToolCredentials>,
+    /// Phase 57 Plan 09 (SC-1 / D-15): the security screen every child registry this tool
+    /// builds carries. `None` means "use the process-installed sidecar service"
+    /// ([`Self::child_tool_screen`]), so a child registry is never built unscreened.
+    tool_screen: Option<Arc<dyn ironhermes_hooks::ToolScreen>>,
 }
 
 impl DelegateTaskTool {
@@ -775,7 +815,32 @@ impl DelegateTaskTool {
             shrike_handles: None,
             gen_wiring: None,
             credentials: Arc::new(crate::credentials::ToolCredentials::env_only()),
+            tool_screen: None,
         }
+    }
+
+    /// Phase 57 Plan 09 (SC-1 / D-15): install the security screen child registries carry.
+    /// `ToolRegistry::register_delegate_task_tool` passes the registering registry's own
+    /// screen, so a child is judged by the same policy as its parent. `None` leaves the
+    /// default in place.
+    #[must_use]
+    pub fn with_tool_screen(
+        mut self,
+        screen: Option<Arc<dyn ironhermes_hooks::ToolScreen>>,
+    ) -> Self {
+        self.tool_screen = screen;
+        self
+    }
+
+    /// The screen a child registry built by this tool gets: the installed one, else a screen
+    /// over the process-installed sidecar service. Never `None`: a delegate child with no
+    /// gating at all was the Phase 54 D-06 gap.
+    fn child_tool_screen(&self) -> Option<Arc<dyn ironhermes_hooks::ToolScreen>> {
+        Some(self.tool_screen.clone().unwrap_or_else(|| {
+            Arc::new(ironhermes_hooks::SecurityToolScreen::from_installed(
+                ironhermes_core::AuditConfig::default(),
+            ))
+        }))
     }
 
     /// Set a progress callback for subagent events (D-19).
@@ -806,10 +871,22 @@ impl DelegateTaskTool {
     /// with the registering registry's own `credentials()` — a production
     /// `DelegateTaskTool` is never left on the `new()` default.
     #[must_use]
-    pub fn with_credentials(mut self, credentials: Arc<crate::credentials::ToolCredentials>) -> Self {
+    pub fn with_credentials(
+        mut self,
+        credentials: Arc<crate::credentials::ToolCredentials>,
+    ) -> Self {
         self.credentials = credentials;
         self
     }
+}
+
+/// One spawned batch child as the collect loop sees it (58.1 D-05).
+struct BatchChild {
+    handle: tokio::task::JoinHandle<anyhow::Result<(usize, String)>>,
+    deadline: tokio::time::Instant,
+    timeout_secs: u64,
+    parent_side_cancel: Option<CancellationToken>,
+    spawned_at: std::time::Instant,
 }
 
 impl DelegateTaskTool {
@@ -838,6 +915,14 @@ impl DelegateTaskTool {
             );
         }
         let tasks: Vec<_> = tasks_array.iter().collect();
+
+        // Phase 57 CR-02 (D-09 / D-15): the delegating chat's session travels as a tokio
+        // task-local, and a task-local does NOT cross `tokio::spawn`. Capture it here, in the
+        // delegating turn's task, and re-scope it inside every spawned child below; otherwise
+        // a batch child would start with no delegating session and be judged at DEFCON 1
+        // instead of at the chat's level. `None` (no delegating session in scope) stays
+        // unscoped on purpose, so the runner's strictest-level fallback applies.
+        let delegating = ironhermes_hooks::screen::delegating_session();
 
         // Spawn tokio tasks for parallel execution
         let mut handles = Vec::new();
@@ -906,6 +991,13 @@ impl DelegateTaskTool {
                 .get("timeout_seconds")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(config.child_timeout_seconds);
+            // 58.1 D-05: `child_deadline` bounds the delegate-slot wait. The run
+            // gets its own full budget once the permit is held (WR-04), so queue
+            // time never eats a queued sibling's run time. The parent-side collect
+            // loop therefore allows wait + run budgets (2x) before it aborts.
+            let child_deadline = deadline_after(per_task_timeout_secs);
+            let parent_deadline = deadline_after(per_task_timeout_secs.saturating_mul(2));
+            let parent_side_cancel = child_cancel_token.clone();
 
             // D-08 Phase 32.2: per-task max_iterations override; falls back to config default.
             // D-03 Phase 35 (Option B — clamp-to-ceiling): a caller/model-supplied value above
@@ -970,8 +1062,11 @@ impl DelegateTaskTool {
             // snapshot, threaded into the spawned child registry so a batch
             // child never silently loses a credential the parent had.
             let credentials_for_spawn = self.credentials.clone();
+            // Phase 57 Plan 09 (SC-1 / D-15): every batch child registry carries the screen.
+            let screen_for_spawn = self.child_tool_screen();
             let batch_task_key = format!("batch_task_{}", index);
             let batch_task_key_for_spawn = batch_task_key.clone();
+            let delegating_for_spawn = delegating.clone();
 
             let handle = tokio::spawn(async move {
                 // Truncated task summary for progress events and, below,
@@ -1009,10 +1104,30 @@ impl DelegateTaskTool {
                 let capture_child_id = uuid::Uuid::new_v4().to_string();
 
                 // Acquire semaphore (shared across all batch tasks + single tasks)
-                let _permit = semaphore
-                    .acquire()
+                // 58.1 D-05: the wait is bounded by the child's timeout.
+                let _permit = match tokio::time::timeout_at(child_deadline, semaphore.acquire())
                     .await
-                    .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
+                {
+                    Ok(permit) => permit.map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?,
+                    Err(_) => {
+                        if let Some(ref cb) = progress_cb {
+                            cb(index, SubagentProgress::Completed);
+                        }
+                        tracing::warn!(
+                            target: "ironhermes_tools::delegate_task",
+                            batch_index = index,
+                            timeout_secs = per_task_timeout_secs,
+                            "delegate slot wait exceeded child deadline"
+                        );
+                        return Ok((
+                            index,
+                            format!(
+                                "Subagent timed out after {}s waiting for a delegate slot",
+                                per_task_timeout_secs
+                            ),
+                        ));
+                    }
+                };
 
                 // Phase 47 Plan 08 (D-08): bind the shared root-guardrail
                 // template to THIS spawn's own child_id so per-child
@@ -1030,6 +1145,7 @@ impl DelegateTaskTool {
                     Some((runner_for_child.clone(), semaphore_for_child.clone())),
                     child_gen_wiring,
                     credentials_for_spawn.clone(),
+                    screen_for_spawn.clone(),
                 )?;
 
                 let mut system_prompt = format!(
@@ -1053,17 +1169,29 @@ impl DelegateTaskTool {
                 // freshness bound would exclude an earlier sibling's file.
                 let spawn_start = std::time::SystemTime::now();
 
-                let result = tokio::time::timeout(
-                    Duration::from_secs(per_task_timeout_secs),
-                    runner.run_child(
-                        Arc::new(RwLock::new(child_registry)),
-                        system_prompt,
-                        per_task_max_iterations,
-                        config.model.as_deref(),
-                        child_cancel_token,
-                        child_tool_progress,
-                        per_task_stale_warn_seconds,
-                    ),
+                let child_run = runner.run_child(
+                    Arc::new(RwLock::new(child_registry)),
+                    system_prompt,
+                    per_task_max_iterations,
+                    config.model.as_deref(),
+                    child_cancel_token,
+                    child_tool_progress,
+                    per_task_stale_warn_seconds,
+                );
+                // Re-scope the delegating session captured before the spawn (see the
+                // comment in `execute_batch` above the loop).
+                let scoped_child_run = async move {
+                    match delegating_for_spawn {
+                        Some(sid) => {
+                            ironhermes_hooks::screen::with_delegating_session(sid, child_run).await
+                        }
+                        None => child_run.await,
+                    }
+                };
+                // WR-04: the run budget starts now that the permit is held.
+                let result = tokio::time::timeout_at(
+                    deadline_after(per_task_timeout_secs),
+                    scoped_child_run,
                 )
                 .await;
 
@@ -1143,19 +1271,72 @@ impl DelegateTaskTool {
             // batch correlation is Plan 04 scope. This preserves Plan 03's
             // core W3 fix (kill semantics via the trait override) without
             // a structural rewrite of execute_batch's result handling.
+            // 58.1 D-05: the collect loop awaits the handle only until the
+            // wait + run budgets + PARENT_DEADLINE_GRACE, then aborts it.
             let _ = batch_task_key; // reserved for Plan 04 wiring
-            handles.push(handle);
+            handles.push(BatchChild {
+                handle,
+                deadline: parent_deadline,
+                timeout_secs: per_task_timeout_secs,
+                parent_side_cancel,
+                spawned_at: std::time::Instant::now(),
+            });
         }
 
         // Collect results and sort by index (D-07)
         let mut results: Vec<(usize, String)> = Vec::new();
-        for (expected_idx, handle) in handles.into_iter().enumerate() {
-            match handle.await {
-                Ok(Ok((idx, response))) => results.push((idx, response)),
-                Ok(Err(e)) => results.push((expected_idx, format!("Error: {}", e))),
-                Err(e) => results.push((expected_idx, format!("Task panicked: {}", e))),
+        let mut per_child_elapsed: Vec<f64> = Vec::new();
+        for (expected_idx, mut child) in handles.into_iter().enumerate() {
+            let hard_deadline = child
+                .deadline
+                .checked_add(PARENT_DEADLINE_GRACE)
+                .unwrap_or(child.deadline);
+            match tokio::time::timeout_at(hard_deadline, &mut child.handle).await {
+                Ok(Ok(Ok((idx, response)))) => results.push((idx, response)),
+                Ok(Ok(Err(e))) => results.push((expected_idx, format!("Error: {}", e))),
+                Ok(Err(e)) => results.push((expected_idx, format!("Task panicked: {}", e))),
+                Err(_) => {
+                    // The child's task could not be polled (blocked synchronously), so its
+                    // own timeout never fired. Cancel its token first so detached sub-tasks
+                    // stop, then abort the task (T-58.1-09).
+                    if let Some(tok) = child.parent_side_cancel.as_ref() {
+                        tok.cancel();
+                    }
+                    child.handle.abort();
+                    // The abort dropped the in-task `Completed` emit and the
+                    // shrike-handle cleanup; do both here so the UI row clears.
+                    if let Some(cb) = self.progress_callback.as_ref() {
+                        cb(expected_idx, SubagentProgress::Completed);
+                    }
+                    if let Some(h) = self.shrike_handles.as_ref()
+                        && let Ok(mut m) = h.lock()
+                    {
+                        m.remove(&format!("batch_task_{}", expected_idx));
+                    }
+                    tracing::warn!(
+                        target: "ironhermes_tools::delegate_task",
+                        batch_index = expected_idx,
+                        timeout_secs = child.timeout_secs,
+                        "subagent aborted by parent deadline"
+                    );
+                    results.push((
+                        expected_idx,
+                        format!(
+                            "Subagent timed out after {}s (aborted by parent deadline)",
+                            child.timeout_secs
+                        ),
+                    ));
+                }
             }
+            per_child_elapsed.push(child.spawned_at.elapsed().as_secs_f64().round());
         }
+        // D-01: evidence for the next unexplained hang.
+        tracing::info!(
+            target: "ironhermes_tools::delegate_task",
+            batch_size = results.len(),
+            elapsed_secs = ?per_child_elapsed,
+            "delegate batch collected"
+        );
         results.sort_by_key(|(idx, _)| *idx);
 
         // Format batch results as numbered sections
@@ -1217,6 +1398,9 @@ pub fn build_child_registry(
     // would be the same class of silent degradation `scope_to()`'s own doc
     // comment warns against for MCP tools — see `ToolRegistry::scope_to`.
     credentials: Arc<crate::credentials::ToolCredentials>,
+    // Phase 57 Plan 09 (SC-1 / D-15): the security screen the child registry carries, the
+    // same one the parent's registry has. `None` only for tests that build a bare child.
+    tool_screen: Option<Arc<dyn ironhermes_hooks::ToolScreen>>,
 ) -> anyhow::Result<ToolRegistry> {
     // Phase 32.2 D-01/D-02/D-03: expand tool list for orchestrators BEFORE the
     // structural-exclusion match loop (RESEARCH Pitfall 1: re-add BEFORE not after).
@@ -1248,6 +1432,12 @@ pub fn build_child_registry(
     // credential-backed tools registered below (and any future default
     // construction path) read it instead of defaulting to env-only.
     registry.with_credentials(credentials.clone());
+    // Phase 57 Plan 09 (SC-1 / D-15 / T-57-34): the child carries the parent's security
+    // screen. A child has no gated `terminal` intercept and no guardrails, so the screen is
+    // the only gate its tools have; it applies the full floor to `terminal` itself.
+    if let Some(screen) = tool_screen.clone() {
+        registry.set_tool_screen(screen);
+    }
 
     for tool_name in &effective_tools {
         match tool_name.as_str() {
@@ -1271,7 +1461,10 @@ pub fn build_child_registry(
                     // DelegateTaskTool must inherit the same snapshot — a
                     // grandchild spawned two delegate hops down must not
                     // silently fall back to env-only credentials.
-                    .with_credentials(credentials.clone());
+                    .with_credentials(credentials.clone())
+                    // Phase 57 Plan 09: and the same screen, so a grandchild's registry
+                    // is screened exactly like the child's.
+                    .with_tool_screen(tool_screen.clone());
                     registry.register(Box::new(child_tool));
                 }
                 // If runner_for_orchestrator is None (shouldn't reach here given effective_tools
@@ -1323,6 +1516,15 @@ pub fn build_child_registry(
                     registry.register(Box::new(crate::memory_tool::MemoryTool::new_read_only(
                         mgr.clone(),
                     )));
+                    // 58.2 D-12: children get only the read-only Tier 2 subset.
+                    if let Some(h) = crate::tier2_tools::tier2_handle_of(mgr) {
+                        for t in crate::tier2_tools::build_tier2_tools(
+                            h,
+                            crate::tier2_tools::Tier2ToolScope::ReadOnly,
+                        ) {
+                            registry.register(t);
+                        }
+                    }
                 } else {
                     tracing::warn!(
                         "memory tool requested but no MemoryManager available; skipping"
@@ -1506,7 +1708,7 @@ impl Tool for DelegateTaskTool {
                     "timeout_seconds": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Per-call wall-clock timeout override in seconds. Defaults to delegation.child_timeout_seconds from config (D-08)."
+                        "description": "Per-call wall-clock timeout override in seconds. Applies separately to waiting for a delegate slot and to the run itself, so a queued call can take up to twice this. Defaults to delegation.child_timeout_seconds from config (D-08)."
                     },
                     "max_iterations": {
                         "type": "integer",
@@ -1595,13 +1797,29 @@ impl Tool for DelegateTaskTool {
         // Create isolated temp directory for child (D-10, D-13)
         let child_dir = tempfile::TempDir::new()?;
 
+        // Phase 21.7 Plan 09 Task 9-01 (D-08): per-call `timeout_seconds`
+        // override via the schema-exposed arg; falls back to config default.
+        // 58.1 D-13: honored as given (no clamp). Parsed before the semaphore
+        // acquire because that wait is bounded by it (58.1 D-05).
+        let effective_timeout_secs = args
+            .get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.config.child_timeout_seconds);
+
         // Acquire semaphore permit (D-14), measuring actual wait time (D-15)
         let acquire_start = std::time::Instant::now();
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
+        let _permit = tokio::time::timeout(
+            Duration::from_secs(effective_timeout_secs),
+            self.semaphore.acquire(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Subagent timed out after {}s waiting for a delegate slot",
+                effective_timeout_secs
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
         let wait_duration = acquire_start.elapsed();
         if wait_duration > std::time::Duration::from_millis(50) {
             info!(
@@ -1661,6 +1879,7 @@ impl Tool for DelegateTaskTool {
             Some((self.runner.clone(), self.semaphore.clone())),
             child_gen_wiring,
             self.credentials.clone(),
+            self.child_tool_screen(),
         )?;
 
         // Build system prompt with structured summary instructions (D-10)
@@ -1721,13 +1940,6 @@ impl Tool for DelegateTaskTool {
                 }) as ChildToolProgressCallback
             });
 
-        // Phase 21.7 Plan 09 Task 9-01 (D-08): per-call `timeout_seconds`
-        // override via the schema-exposed arg; falls back to config default.
-        let effective_timeout_secs = args
-            .get("timeout_seconds")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(self.config.child_timeout_seconds);
-
         // D-08 Phase 32.2: per-call max_iterations override; falls back to config default.
         // D-03 Phase 35 (Option B — clamp-to-ceiling): a caller/model-supplied value above
         // config.max_iterations is clamped DOWN to the ceiling; values at or below are honored
@@ -1771,6 +1983,7 @@ impl Tool for DelegateTaskTool {
         let spawn_start = std::time::SystemTime::now();
 
         // Run child agent with timeout (D-08) and model override (D-23)
+        // shortcut (58.1 WR-05, deferred): single-task children run inline on the parent's task (task-locals live there), so a child blocked synchronously also blocks this call; move run_child onto a spawned task, re-scoping task-locals as execute_batch does, if a single-task hang is ever logged
         let result = tokio::time::timeout(
             Duration::from_secs(effective_timeout_secs),
             self.runner.run_child(
@@ -1868,8 +2081,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"read_file"), "should have read_file");
@@ -1891,8 +2105,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .expect("a child requesting 'artifact' must build, not bail");
         let tools = registry.list_tools();
         assert!(
@@ -1907,8 +2122,8 @@ mod tests {
         // delegated task can request it via `toolsets: ["artifacts"]`.
         assert_eq!(
             resolve_toolset_tools("artifacts", false).unwrap(),
-            vec!["artifact"],
-            "the 'artifacts' toolset group must map to [artifact]"
+            vec!["artifact", "report_publish"],
+            "the 'artifacts' toolset group must map to [artifact, report_publish]"
         );
     }
 
@@ -1924,8 +2139,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -1947,8 +2163,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -1969,8 +2186,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    );
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        );
         assert!(result.is_err(), "unknown tool should cause error");
         let err = result.err().unwrap().to_string();
         assert!(
@@ -1991,8 +2209,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         assert!(registry.list_tools().is_empty());
     }
@@ -2009,8 +2228,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"terminal"), "should have terminal");
@@ -2046,12 +2266,43 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"memory"), "should have memory");
         // The actual read-only behavior is tested in memory_tool::tests
+    }
+
+    /// 58.2 D-12: a child's `memory` toolset carries only the read-only Tier 2 subset.
+    #[test]
+    fn delegate_child_memory_gets_read_only_tier2_subset() {
+        use crate::tier2_tools::{TIER2_READ_ONLY_TOOL_NAMES, TIER2_TOOL_NAMES, stub_manager};
+        let registry = build_child_registry(
+            &["memory".to_string()],
+            Some(stub_manager(true)),
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+            None,
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
+        .unwrap();
+        let tools = registry.list_tools();
+        assert!(tools.contains(&"memory"));
+        for n in TIER2_READ_ONLY_TOOL_NAMES {
+            assert!(tools.contains(n), "child must carry read-only {n}");
+        }
+        for n in TIER2_TOOL_NAMES
+            .iter()
+            .filter(|n| !TIER2_READ_ONLY_TOOL_NAMES.contains(n))
+        {
+            assert!(!tools.contains(n), "child must not carry write tool {n}");
+        }
     }
 
     #[test]
@@ -2065,8 +2316,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -2105,6 +2357,94 @@ mod tests {
             SubagentConfig::default(),
             None,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 57 Plan 21 (CR-02 / D-15): the delegating session reaches every child
+    // -----------------------------------------------------------------------
+
+    /// Records the delegating session in scope at the moment each child starts.
+    struct SessionCaptureRunner {
+        seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl SubagentRunner for SessionCaptureRunner {
+        async fn run_child(
+            &self,
+            _registry: Arc<RwLock<ToolRegistry>>,
+            _system_prompt: String,
+            _max_iterations: usize,
+            _model_override: Option<&str>,
+            _cancel_token: Option<CancellationToken>,
+            _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
+        ) -> anyhow::Result<Option<String>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(ironhermes_hooks::screen::delegating_session());
+            Ok(Some("ok".into()))
+        }
+    }
+
+    fn make_capture_tool() -> (DelegateTaskTool, Arc<std::sync::Mutex<Vec<Option<String>>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = DelegateTaskTool::new(
+            Arc::new(SessionCaptureRunner { seen: seen.clone() }),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+            None,
+        );
+        (tool, seen)
+    }
+
+    #[tokio::test]
+    async fn batch_children_inherit_delegating_session() {
+        let (tool, seen) = make_capture_tool();
+        // Batch children run on `tokio::spawn`ed tasks, which a task-local does not cross:
+        // the tool must capture the session before the spawn and re-scope it inside.
+        ironhermes_hooks::screen::with_delegating_session("chat-batch".into(), async {
+            tool.execute(serde_json::json!({
+                "tasks": [{ "goal": "a" }, { "goal": "b" }]
+            }))
+            .await
+            .expect("batch delegation succeeds");
+        })
+        .await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                Some("chat-batch".to_string()),
+                Some("chat-batch".to_string())
+            ],
+            "every batch child must see the delegating session"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_child_inherits_delegating_session() {
+        let (tool, seen) = make_capture_tool();
+        ironhermes_hooks::screen::with_delegating_session("chat-single".into(), async {
+            tool.execute(serde_json::json!({ "task": "a" }))
+                .await
+                .expect("single delegation succeeds");
+        })
+        .await;
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![Some("chat-single".to_string())]
+        );
+
+        // Outside any scope there is no delegating session: the runner's strictest-level
+        // fallback is what applies, so the child must see `None`, not a stale value.
+        let (tool, seen) = make_capture_tool();
+        tool.execute(serde_json::json!({ "task": "a" }))
+            .await
+            .expect("unscoped single delegation succeeds");
+        assert_eq!(seen.lock().unwrap().clone(), vec![None]);
     }
 
     #[test]
@@ -2256,11 +2596,8 @@ mod tests {
                 // per-spawn temp dir, deleted the instant this future
                 // returns, unless the capture hook runs before that.
                 let reg = registry.read().await;
-                reg.execute_tool(
-                    "terminal",
-                    json!({"command": "printf 'print(1)' > out.py"}),
-                )
-                .await?;
+                reg.execute_tool("terminal", json!({"command": "printf 'print(1)' > out.py"}))
+                    .await?;
                 Ok(Some("done".to_string()))
             }
         }
@@ -2460,8 +2797,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         assert!(
             !child_registry.list_tools().contains(&"delegate_task"),
@@ -2479,8 +2817,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         assert!(
             !child_registry2.list_tools().contains(&"delegate_task"),
@@ -2840,12 +3179,22 @@ mod tests {
         std::fs::write(child_dir_a.path().join("a.py"), "print('a')").unwrap();
         std::fs::write(child_dir_b.path().join("b.py"), "print('b')").unwrap();
 
-        let id_a =
-            capture_child_deliverable(child_dir_a.path(), spawn_start, "batch-sibling-a", "task a", "task a")
-                .expect("sibling a must publish");
-        let id_b =
-            capture_child_deliverable(child_dir_b.path(), spawn_start, "batch-sibling-b", "task b", "task b")
-                .expect("sibling b must publish");
+        let id_a = capture_child_deliverable(
+            child_dir_a.path(),
+            spawn_start,
+            "batch-sibling-a",
+            "task a",
+            "task a",
+        )
+        .expect("sibling a must publish");
+        let id_b = capture_child_deliverable(
+            child_dir_b.path(),
+            spawn_start,
+            "batch-sibling-b",
+            "task b",
+            "task b",
+        )
+        .expect("sibling b must publish");
 
         assert_ne!(
             id_a, id_b,
@@ -3245,8 +3594,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -3268,8 +3618,9 @@ mod tests {
             &SubagentConfig::default(),
             None,
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -3414,8 +3765,9 @@ mod tests {
             &config,
             Some((runner, semaphore)),
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -3448,8 +3800,9 @@ mod tests {
             &config,
             Some((runner, semaphore)),
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -3477,8 +3830,9 @@ mod tests {
             &config,
             Some((runner, semaphore)),
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -3506,8 +3860,9 @@ mod tests {
             &config,
             Some((runner, semaphore)),
             None,
-                Arc::new(crate::credentials::ToolCredentials::env_only()),
-    )
+            Arc::new(crate::credentials::ToolCredentials::env_only()),
+            None,
+        )
         .unwrap();
         let tools = registry.list_tools();
         assert!(

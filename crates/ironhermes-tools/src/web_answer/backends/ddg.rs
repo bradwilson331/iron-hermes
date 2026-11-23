@@ -92,7 +92,8 @@ fn select_answer_text(resp: &DdgInstantAnswerResponse) -> Option<String> {
 /// distinct from `web_search`'s `DDG_HTML_ENDPOINT_OVERRIDE`, which points
 /// at a different endpoint entirely.
 fn resolve_endpoint() -> String {
-    std::env::var("DDG_API_ENDPOINT_OVERRIDE").unwrap_or_else(|_| DDG_INSTANT_ANSWER_ENDPOINT.to_string())
+    std::env::var("DDG_API_ENDPOINT_OVERRIDE")
+        .unwrap_or_else(|_| DDG_INSTANT_ANSWER_ENDPOINT.to_string())
 }
 
 #[cfg(test)]

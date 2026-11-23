@@ -54,19 +54,20 @@ None of `FIRECRAWL_API_KEY`/`EXA_API_KEY`/`TAVILY_API_KEY`/`BRAVE_API_KEY`/`PERP
 
 ### Voice / Speech-to-Text
 
-Voice mode (`/voice`, the TUI record key, and the web mic button) transcribes audio with a cloud STT provider. Provider selection is key-presence based: with `stt.provider: auto`, the first provider whose API key is set wins (Groq preferred, then OpenAI). Keys are read from the environment only — never written to logs.
+Voice mode (`/voice`, the TUI record key, and the web mic button) transcribes audio with a cloud STT provider. Provider selection is key-presence based: with `stt.provider: auto`, the first provider that is configured wins, in this fixed order: `openai_compatible > groq > openai` (a custom server when `stt.openai_compatible.base_url` is set, so a local server is never bypassed by a cloud key that is in the environment for another reason; then Groq when `GROQ_API_KEY` is set, then OpenAI when `VOICE_TOOLS_OPENAI_KEY` is set). An empty `KEY=` placeholder counts as unset. Keys are read from the environment only — never written to logs.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `GROQ_API_KEY` | Required for Groq STT | — | API key for Groq Whisper transcription (also used for the Groq LLM provider). Format: `gsk_...` |
 | `VOICE_TOOLS_OPENAI_KEY` | Required for OpenAI STT | — | API key for OpenAI Whisper transcription. Kept distinct from `OPENAI_API_KEY` so STT can use a separate key/budget. Format: `sk-...` |
-| `STT_GROQ_MODEL` | Optional | `whisper-large-v3-turbo` | Overrides `stt.groq.model` for the Groq provider |
-| `STT_OPENAI_MODEL` | Optional | `whisper-1` | Overrides `stt.openai.model` for the OpenAI provider |
-| `GROQ_BASE_URL` | Optional | `https://api.groq.com/openai/v1` | Override the Groq API base URL (testing / proxies) |
-| `OPENAI_STT_BASE_URL` | Optional | `https://api.openai.com/v1` | Override the OpenAI STT base URL (testing / proxies) |
+| `STT_GROQ_MODEL` | Optional | `whisper-large-v3-turbo` | Overrides `stt.groq.model` for the Groq provider **only** |
+| `STT_OPENAI_MODEL` | Optional | `whisper-1` | Overrides `stt.openai.model` for the OpenAI provider **only** (never `openai_compatible`) |
+| `GROQ_BASE_URL` | Optional | `https://api.groq.com/openai/v1` | Test-only override of the Groq API base URL; still applies (a custom server uses `stt.openai_compatible.base_url` instead) |
+| `OPENAI_STT_BASE_URL` | Optional | `https://api.openai.com/v1` | Test-only override of the OpenAI STT base URL; still applies (a custom server uses `stt.openai_compatible.base_url` instead) |
+| `VOICE_KEY_*` | Optional | — | A key for a custom voice server. Any variable whose name starts with `VOICE_KEY_` (for example `VOICE_KEY_KOKORO`) can be named by an `api_key_ref` — see [Voice server keys](#voice-server-keys-api_key_ref). Never the key itself in `config.yaml`. |
 | `ELEVENLABS_API_KEY` | Required for ElevenLabs TTS | — | API key for ElevenLabs text-to-speech (free-mode spoken replies). Without it, `tts.provider: elevenlabs` reports unavailable and replies fall back to keyless Edge. |
 
-Spoken replies use a TTS key (`ELEVENLABS_API_KEY` for ElevenLabs, `OPENAI_API_KEY` for OpenAI TTS; Edge is keyless), and the `open_mic` realtime voice path uses an OpenAI key resolved via `providers.openai.api_key_env`. The full voice-to-voice walkthrough — including which mode uses which voice — is in [`VOICE-TO-VOICE.md`](VOICE-TO-VOICE.md).
+Spoken replies use a TTS key (`ELEVENLABS_API_KEY` for ElevenLabs, `OPENAI_API_KEY` for OpenAI TTS; Edge is keyless), and the realtime voice path (`voice.service: realtime`) uses the key named by `realtime.api_key_ref`, or for the default OpenAI endpoint the OpenAI key resolved via `providers.openai.api_key_env`. The full voice-to-voice walkthrough — including which mode uses which voice — is in [`VOICE-TO-VOICE.md`](VOICE-TO-VOICE.md).
 
 ### Gateway / Messaging
 
@@ -110,6 +111,12 @@ Spoken replies use a TTS key (`ELEVENLABS_API_KEY` for ElevenLabs, `OPENAI_API_K
 | `IRONHERMES_CRON_SCRIPT_TIMEOUT` | Optional | `120` | Per-script execution timeout in seconds for jobs that use the `script` field. |
 | `IRONHERMES_CRON_MAX_PARALLEL` | Optional | `2` | Maximum number of non-workdir cron jobs to run concurrently per tick. When the env var is unset, resolution falls back to `cron.max_parallel` in `config.yaml` (default `2`). `0` = unbounded; `1` = serial. |
 
+### Robotics
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `IRONHERMES_ROS2_BRIDGE_URL` | Optional | — | rosbridge WebSocket URL (`ws://host:9090`). A non-blank value overrides `ros2.bridge_url`. When neither resolves, the `ros2` and `rospider` tools are hidden (D-14). See [ROS 2 (`ros2:`)](#ros-2-ros2) and [`docs/robots/rospider.md`](robots/rospider.md). |
+
 ### IronHermes Home
 
 | Variable | Required | Default | Description |
@@ -117,6 +124,8 @@ Spoken replies use a TTS key (`ELEVENLABS_API_KEY` for ElevenLabs, `OPENAI_API_K
 | `IRONHERMES_HOME` | Optional | `~/.ironhermes` | Override the default data and config directory |
 | `IRONHERMES_SOURCE` | Optional | — | Path to the IronHermes project root. When set, `hermes setup` (full) copies skill files from `$IRONHERMES_SOURCE/skills/` and `$IRONHERMES_SOURCE/optional-skills/` into `$IRONHERMES_HOME/skills/`. Auto-detected in dev builds via binary path walk. |
 | `IRONHERMES_WORKER_BIN` | Optional | `ironhermes` via `PATH` | Absolute path to the executable used when the Kanban dispatcher spawns worker processes. Set this in the dispatcher's `.env` when running a development build that is not installed on `PATH`, for example `/Users/me/code/ironhermes/target/debug/ironhermes`. The value is forwarded through the worker's scrubbed environment for recursive spawns. |
+| `IRONHERMES_TIRITH_BIN` | Optional | — | Absolute path to the `ironhermes-tirith` detection sidecar (Phase 57). Lookup order: a sibling of the running `ironhermes` executable, then this variable, then `PATH`. Use it when the sidecar is not installed next to `ironhermes`. `ironhermes doctor` reports which copy was found, its pinned `tirith-core` version and whether it answers. See [DEFCON levels](#defcon-levels-and-yolo-n). |
+| `IRONHERMES_DEFCON_LEVEL` | Set by the dispatcher | — | A whole number 1-5. The kanban dispatcher sets it on a spawned worker so the worker is never looser than the dispatcher: the worker uses the stricter (numerically lower) of this value and its own profile level. An invalid value is ignored with a warning on stderr. You do not normally set this yourself. |
 
 ### Debug Flags
 
@@ -162,14 +171,15 @@ providers:
 | `delegation` | Subagent delegation limits (renamed from `subagent` in Phase 32.2 — see [Delegation](#delegation-delegation)) |
 | `rate_limit` | Per-user inbound rate limiting |
 | `batch` | Batch processing worker settings |
-| `security` | Secret redaction in logs |
+| `security` | Secret redaction in logs; the DEFCON level and its remote-change switch — see [DEFCON levels](#defcon-levels-and-yolo-n) |
 | `providers` | Per-provider API key and endpoint overrides |
 | `custom_providers` | User-defined OpenAI-compatible endpoints |
 | `tools` | Per-toolset enable/disable, tool execution timeout (+ per-tool overrides), web-tool provider chains (`web_search`/`web_answer`/`web_extract`), and the config tier of tool credentials — see [Web Tools](#web-tools-toolsweb_search--toolsweb_answer--toolsweb_extract) |
 | `stt` | Speech-to-text provider selection and per-provider model overrides |
 | `tts` | Text-to-speech provider selection and per-provider voice/format overrides |
-| `voice` | Voice-mode interaction: record key, VAD silence detection, barge-in mode, wake word, realtime tuning |
-| `autonomous` | Autonomous (yolo) mode — skip dangerous-command approval prompts |
+| `voice` | Voice-mode interaction: voice service (realtime / turn-based), record key, VAD silence detection, barge-in mode, wake word, realtime tuning |
+| `realtime` | Realtime voice service endpoint, key reference, model, voice and transcription model — see [Realtime](#realtime-realtime) |
+| `autonomous` | Deprecated alias for `security.defcon_level` — `yolo: true` reads as DEFCON 5, `false` as DEFCON 3 |
 | `concurrency` | Per-session and process-wide caps for concurrent in-flight agent turns (Phase 39.1) |
 | `auxiliary` | Auxiliary model routing for helper tasks |
 | `browser` | Browser automation settings — Chromium by default, Obscura opt-in second backend (see [Browser](#browser-browser)) |
@@ -180,6 +190,8 @@ providers:
 | `audio_cache` | Audio cache lifecycle policy (max age, sweep interval) |
 | `mcp_servers` | MCP server configurations (raw YAML, parsed by ironhermes-mcp) |
 | `vault` | Optional operator secret store for provider API keys — consulted as a last-resort fallback in `ProviderResolver` resolution (Phase 46.8). See [Vault](#vault-vault) |
+| `ros2` | ROS 2 robot tools over rosbridge (`ros2`, `rospider`) — bridge URL, write allowlists, safety caps, ROSPider topic names. See [ROS 2 (`ros2:`)](#ros-2-ros2) |
+| `ui` | Web UI menu layout and the OpenUI hosted-Gateway switch — see [Web UI](#web-ui-ui) |
 
 ---
 
@@ -211,7 +223,39 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 | `model.base_url` | `null` | Override API base URL |
 | `model.vision_model` | `null` | Vision model (null = use default) |
 | `model.max_tokens` | `null` | Max tokens per response (null = provider default) |
-| `model.context_length` | `null` | Context window (null = auto-detect) |
+| `model.context_length` | `null` | Context window (null = auto-detect). A ceiling for a probed or learned window, a fallback otherwise; see [Context window and small models](#context-window-and-small-models) |
+
+#### Context window and small models
+
+The agent sizes every request against the model's context window, so it needs the real number. It resolves the window per endpoint and model, first match wins:
+
+| Order | Source | Shown as | Notes |
+|---|---|---|---|
+| 1 | `providers.<p>.models.<m>.context_length` | `override` | Per-model override. Outranks everything below, including a learned window. |
+| 2 | A window the server reported or a rejection taught ironhermes | `probed` / `learned` | Kept in `models-cache.json` (`context_windows`, per server URL and model), never in `config.yaml`. If `model.context_length` is set and smaller, it wins and shows as `pin`. |
+| 3 | The models cache or built-in model table | `cache` | |
+| 4 | `model.context_length` | `pin` | |
+| 5 | `8192` on a loopback or LAN endpoint, else `128000` | `local default` / `default` | Last resort for an unknown model. |
+
+**Local servers (LM Studio, Ollama, llama.cpp, Unsloth): raise the context length in the model server, not in ironhermes.** The window the server loaded is the real limit. Setting `model.context_length` or a per-model override higher than that only hides the true value and brings back `context_length_exceeded` errors; never set it above what the server has loaded. Ironhermes asks LM Studio, Ollama and llama.cpp for the loaded window before the first request to a loopback or LAN endpoint (a 2-second check, once per server and model per process). A server it cannot ask, such as Unsloth, is learned from the first rejection.
+
+**When the server rejects a request** with `context_length_exceeded`, the agent reads the window from the error text (or halves its assumed window if the text has no number), compresses to fit, and retries once. The learned window is saved and used from then on. This covers every surface and the helper-model calls (summarizer, vision and other auxiliary roles). If the retry also fails, the error names the window and says how to fix it.
+
+**Compact profile.** `agent.compact_profile` is `auto` (default), `on` or `off`. In `auto`, the profile turns on when the full system prompt plus tool definitions would take more than half the window. It then:
+
+- sends only `terminal`, `read_file`, `write_file`, `patch`, `memory`, `web_search` and `web_read` (a kanban worker also keeps `kanban_complete` and `kanban_block`); every other tool and the skills index are dropped;
+- keeps `SOUL.md` whole, and cuts `USER.md`, `MEMORY.md`, `AGENTS.md` and other context files to 1,500 characters each;
+- swaps the long tool-use guidance for a short version.
+
+The first compact turn of a session shows one notice naming the window ("Small context window (8192 tokens): this session uses the compact profile ..."); it is not repeated that session.
+
+**Small-window compression.** Below 32,768 tokens the compression trigger drops automatically (0.35 at 8,192, rising to the configured value by 32,768). `compression.model_thresholds` overrides it per model. The trigger is checked before each request, and the agent compresses up to three times if the request still does not fit. Summaries are sized to the window. Requests to a small window (compact profile on, or 32,768 tokens or less) send `max_tokens` equal to a reply reserve of 1,024 tokens at 8,192, growing to 4,096.
+
+**Refusal.** If the smallest prompt the agent can send does not fit, the turn is not sent and the reply reads: "This model's context window is N tokens, but the smallest prompt the agent can send (system prompt, tool definitions and a R-token reply reserve) needs about F tokens, so the turn was not sent." It ends with the fix: raise the context length in the model server and reload, pick a larger model, or shorten `SOUL.md`.
+
+**Where the window is shown.** `/usage` prints `Context window: N tokens (source)`. The web Settings "Context length" field and the Models screen show `resolved: N (source)`. A model switch (`/model`, the picker or a fallback provider) re-resolves the window.
+
+**`/models refresh`** (and `ironhermes models fetch`) saves the model ids each provider serves, so the `/model` picker lists them, including models you never put in `config.yaml`.
 
 ### Agent (`agent:`)
 
@@ -224,6 +268,7 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 | `agent.context_engine` | `summarizing` | Context engine: `summarizing` or `local_prune` |
 | `agent.compression_threshold` | `0.5` | Fraction of context_length at which compression triggers |
 | `agent.system_message` | `""` | Optional injected system message (empty = omitted) |
+| `agent.compact_profile` | `auto` | Compact prompt and tool set for small windows: `auto`, `on` or `off`. See [Context window and small models](#context-window-and-small-models) |
 
 ### Terminal (`terminal:`)
 
@@ -311,11 +356,25 @@ Both the gateway-embedded dispatcher and the CLI `hermes kanban dispatch` / depr
 
 | Key | Default | Description |
 |---|---|---|
-| `stt.provider` | `auto` | Active STT provider: `auto`, `groq`, or `openai`. `auto` selects the first provider whose API key is set (Groq preferred, then OpenAI). |
+| `stt.provider` | `auto` | Active STT provider: `auto`, `groq`, `openai`, or `openai_compatible`. `auto` selects the first configured provider in the order `openai_compatible > groq > openai` (`openai_compatible` when its `base_url` is set, then Groq when `GROQ_API_KEY` is set, then OpenAI when `VOICE_TOOLS_OPENAI_KEY` is set; an empty key variable counts as unset). |
 | `stt.groq.model` | `whisper-large-v3-turbo` | Groq Whisper model. Overridden by `STT_GROQ_MODEL`. |
 | `stt.openai.model` | `whisper-1` | OpenAI Whisper model. Overridden by `STT_OPENAI_MODEL`. |
+| `stt.openai_compatible.base_url` | `""` (unset) | Root URL of an OpenAI-compatible transcription server, e.g. `http://localhost:8178` (whisper.cpp) or `http://localhost:8000/v1` (faster-whisper-server). `http` or `https` only; no user-info. The provider is **available exactly when this is set** — no key is needed. The `/v1` segment, if your server uses one, belongs here. |
+| `stt.openai_compatible.path` | `/audio/transcriptions` | Optional endpoint path appended to `base_url`. Must start with `/` and carry no query or fragment. whisper.cpp serves transcription at `/inference`, so a whisper.cpp server needs `path: /inference`. |
+| `stt.openai_compatible.api_key_ref` | unset | Optional **reference** to the key (not the key): a `VOICE_KEY_*` environment variable name or a `secret/voice/*` vault entry. Unset sends no `Authorization` header. See [Voice server keys](#voice-server-keys-api_key_ref). |
+| `stt.openai_compatible.model` | `whisper-1` | Model id sent in the multipart form. Not affected by `STT_OPENAI_MODEL` / `STT_GROQ_MODEL`, which override only `groq` / `openai`. |
 
-Set the matching API key (`GROQ_API_KEY` and/or `VOICE_TOOLS_OPENAI_KEY`) in `.env`; see [Voice / Speech-to-Text](#voice--speech-to-text) above. With no key set, voice mode reports `provider: none` and transcription is disabled.
+Set the matching API key (`GROQ_API_KEY` and/or `VOICE_TOOLS_OPENAI_KEY`) in `.env` for the hosted providers; see [Voice / Speech-to-Text](#voice--speech-to-text) above. With nothing configured, voice mode reports `provider: none (no STT provider configured)` and transcription is disabled. The OpenAI keys are **never** sent to an `openai_compatible` host. `OPENAI_STT_BASE_URL` and `GROQ_BASE_URL` remain test-only overrides for the hosted providers and still apply.
+
+`ironhermes stt info` prints the selected provider and whether each of `groq`, `openai` and `openai_compatible` is available, using the same selection as `/voice status`.
+
+```yaml
+stt:
+  provider: auto
+  openai_compatible:
+    base_url: http://localhost:8178   # whisper.cpp
+    path: /inference
+```
 
 ### Voice Mode (`voice:`)
 
@@ -327,22 +386,77 @@ Set the matching API key (`GROQ_API_KEY` and/or `VOICE_TOOLS_OPENAI_KEY`) in `.e
 | `voice.auto_tts` | `false` | When `true`, **every** agent reply is spoken back (the `/voice tts` "All mode" — toggle live with `/voice tts`). Independent of `silence_threshold`/STT. |
 | `voice.beep_enabled` | `true` | Play an audio beep when recording starts/stops |
 | `voice.max_recording_seconds` | `120` | Maximum recording length before a forced stop |
-| `voice.barge_in_mode` | `push_to_interrupt` | Barge-in behavior during agent TTS playback. `push_to_interrupt` — turn-based, user presses the record key to interrupt (CLI/TUI + web, default). `open_mic` — full-duplex realtime voice over OpenAI Realtime API + WebRTC (web/orb only, Phase 36.17.12); requires `providers.openai.api_key_env` to resolve. `half_duplex` — deferred, not wired. |
-| `voice.wake_word.enabled` | `false` | Enable wake-word gating (case-insensitive "contains" match). **Applies to turn-based mode only** — disabled in `open_mic` mode (the UI greys it out with a hint). |
+| `voice.service` | `turn_based` (see migration) | Which voice family runs: `realtime` (full-duplex OpenAI-Realtime-compatible session over WebRTC, web/orb only) or `turn_based` (record, transcribe with `stt:`, think, speak with `tts:`). A config **without** this key and with `barge_in_mode: open_mic` loads as `realtime`; a config without it and without `open_mic` loads as `turn_based`. An explicit value always wins. See [Voice service and the open_mic migration](#voice-service-and-the-open_mic-migration). |
+| `voice.barge_in_mode` | `push_to_interrupt` | Barge-in behavior during agent TTS playback — **governs turn-based interruption only** since Phase 54.7. `push_to_interrupt` — user presses the record key to interrupt (CLI/TUI + web, default). `open_mic` — legacy value; on a config with no `voice.service` it is read as `voice.service: realtime` (migration input only). `half_duplex` — deferred, not wired. |
+| `voice.wake_word.enabled` | `false` | Enable wake-word gating (case-insensitive "contains" match). **Applies to turn-based mode only** — disabled when `voice.service` is `realtime` (the UI greys it out with a hint). |
 | `voice.wake_word.phrase` | `hey hermes` | Wake phrase to match |
 | `voice.web_silence_threshold_rms` | `5.0` | Web Audio (browser) RMS silence threshold. **DISTINCT from `silence_threshold`** (native PCM amplitude scale). Web VAD path only. Lower if the browser never detects end-of-speech; raise if it cuts off too early. |
-| `voice.realtime_model` | `gpt-realtime` | OpenAI Realtime API model for the open-mic WebRTC path. Whitelist-validated; unlisted values trigger the D-07 graceful fallback to turn-based voice. |
-| `voice.realtime_voice` | `shimmer` | Realtime agent voice. One of: `alloy`, `shimmer`, `echo`, `verse`, `ash`, `ballad`, `coral`, `sage`. Whitelist-validated; unlisted values trigger the D-07 fallback. |
-| `voice.realtime_transcription_model` | `gpt-4o-mini-transcribe` | Input-audio transcription model for the realtime path. One of: `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `whisper-1`, `off` (disables transcription). |
+| `voice.realtime_model`, `voice.realtime_voice`, `voice.realtime_transcription_model` | — | **Legacy.** Superseded by the top-level [`realtime:`](#realtime-realtime) block. Still read as fallbacks for any unset `realtime.*` field; never written by the web panel. |
 | `voice.realtime_noise_reduction` | `far_field` | Realtime mic noise-reduction profile applied before VAD and the model. `far_field` (laptop/built-in mic, most aggressive), `near_field` (headset/earbuds), `off` (disable). |
 | `voice.realtime_vad_mode` | `semantic_vad` | Realtime turn-detection mode. `semantic_vad` — model-based, robust to background noise (default). `server_vad` — energy-based, lower latency; uses the three keys below. |
 | `voice.realtime_vad_threshold` | `0.5` | `server_vad` activation threshold (0.0–1.0). Higher = less sensitive. Only applies when `realtime_vad_mode: server_vad`. |
 | `voice.realtime_vad_silence_ms` | `500` | `server_vad` trailing-silence in ms that ends a turn. Only applies when `realtime_vad_mode: server_vad`. |
 | `voice.realtime_vad_prefix_ms` | `300` | `server_vad` prefix padding in ms of audio kept before detected speech. Only applies when `realtime_vad_mode: server_vad`. |
 
-**Phase 39.3 — open_mic is a full Hermes agent surface.** With `voice.barge_in_mode: open_mic`, the realtime voice session is no longer a plain conversational model — it runs with the full Hermes identity and skills (same `PromptBuilder` output as text chat), exposes the complete `ToolRegistry` as session tools, and routes function calls through the same approval/yolo/DEFCON gate as all other surfaces. A visual Approve/Deny card appears in the orb overlay while the session keeps conversing; background tool turns deliver a verbal acknowledgment followed by an in-flight "working…" badge, and the result is voiced and written to transcript/trajectory on completion.
+**Phase 39.3 — the realtime service is a full Hermes agent surface.** With `voice.service: realtime` (formerly `voice.barge_in_mode: open_mic`), the realtime voice session is no longer a plain conversational model — it runs with the full Hermes identity and skills (same `PromptBuilder` output as text chat), exposes the complete `ToolRegistry` as session tools, and routes function calls through the same approval/yolo/DEFCON gate as all other surfaces. A visual Approve/Deny card appears in the orb overlay while the session keeps conversing; background tool turns deliver a verbal acknowledgment followed by an in-flight "working…" badge, and the result is voiced and written to transcript/trajectory on completion.
 
-> **Wake-word limitation:** `voice.wake_word` applies to turn-based mode only (`push_to_interrupt`). In `open_mic` mode the wake-word UI control is greyed out with an explanatory hint; the setting has no effect on the realtime session.
+> **Wake-word limitation:** `voice.wake_word` applies to the turn-based service only. With `voice.service: realtime` the wake-word UI control is greyed out with an explanatory hint; the setting has no effect on the realtime session.
+
+#### Voice service and the open_mic migration
+
+`voice.service` (`realtime` | `turn_based`) chooses the voice family. It is decoupled from `voice.barge_in_mode`, which now governs turn-based interruption only. A config that has no `voice.service` key is migrated when it loads:
+
+| Existing config | Loads as |
+|---|---|
+| `voice.service` present | that value (always wins) |
+| no `voice.service`, `barge_in_mode: open_mic` | `voice.service: realtime` |
+| no `voice.service`, any other `barge_in_mode` | `voice.service: turn_based` |
+
+**Every host migrates on load, but a host's `config.yaml` is rewritten only by that host's own first save from the web Voice panel.** A separately deployed server (for example a VPS container whose `config.yaml` is never re-synced from your local one) keeps the legacy keys until someone saves its panel; it behaves correctly in the meantime because the legacy keys are still read. Older IronHermes builds do not read the new `realtime:` block or `voice.service`.
+
+### Realtime (`realtime:`)
+
+Top-level block for the realtime service (`voice.service: realtime`). Web/orb only; the CLI and TUI never open a realtime session. It lives in the server's home `config.yaml` only — environment variables and profile configs do not override it.
+
+| Key | Default | Description |
+|---|---|---|
+| `realtime.provider` | `openai_compatible` | The one realtime provider this build ships: an OpenAI-Realtime-compatible server. |
+| `realtime.base_url` | `https://api.openai.com/v1` | Server root. The server mints an ephemeral token at `{base_url}/realtime/client_secrets` and the **browser connects directly** over WebRTC to `{base_url}/realtime/calls`, so this address must be reachable from the browser, not only from the server. |
+| `realtime.api_key_ref` | unset | Optional **reference** to the key (not the key): a `VOICE_KEY_*` environment variable or a `secret/voice/*` vault entry. Unset on the default OpenAI URL uses the implicit OpenAI key (`providers.openai.api_key_env`); unset on a custom URL means no key — token minting is skipped and the browser connects without one. See [Voice server keys](#voice-server-keys-api_key_ref). |
+| `realtime.model` | `gpt-realtime` | Realtime model id. |
+| `realtime.voice` | `shimmer` | Realtime agent voice. |
+| `realtime.transcription_model` | `gpt-4o-mini-transcribe` | Input-audio transcription model, or `off` to disable transcription. |
+
+The former fixed whitelists of models and voices are gone: `realtime.model`, `realtime.voice` and `realtime.transcription_model` accept any value inside a strict charset and length rule (ASCII letters, digits and a few separators such as `.` `_` `:` `-`; model ids may also contain `/`; no `..`, bounded length), so a value can never inject into the URL or JSON. The legacy `voice.realtime_model`, `voice.realtime_voice` and `voice.realtime_transcription_model` keys are still read as fallbacks for any unset field above and are removed from the file on the next web Voice save. `voice.realtime_noise_reduction` and `voice.realtime_vad_*` stay under `voice:`. If the realtime session cannot start, the web client falls back to turn-based voice.
+
+```yaml
+voice:
+  service: realtime
+realtime:
+  base_url: http://localhost:8080/v1   # must be browser-reachable
+  api_key_ref: VOICE_KEY_REALTIME      # optional; the NAME of the variable
+  model: gpt-realtime
+  voice: shimmer
+```
+
+#### Voice server keys (`api_key_ref`)
+
+`stt.openai_compatible.api_key_ref`, `tts.openai_compatible.api_key_ref` and `realtime.api_key_ref` hold a **reference**, never a key value. A reference is exactly one of:
+
+- the **name** of an environment variable that starts with `VOICE_KEY_` (for example `VOICE_KEY_KOKORO`), read from the process environment; or
+- a vault entry under `secret/voice/` (for example `secret/voice/kokoro`), read from the vault when `vault.enabled` is true and the environment variable is not set.
+
+Any other name is **rejected** — in particular another provider's key name such as `OPENAI_API_KEY`, `GROQ_API_KEY` or `ELEVENLABS_API_KEY`. This is deliberate (T-54.7-70): a voice server, possibly a machine on your LAN, can only ever receive a key that was created for it, and a typo or a copied config can never forward a hosted-provider key to it. To reuse an existing key, copy it into a `VOICE_KEY_*` variable. An empty or unset reference sends no `Authorization` header (a keyless local server is the normal case). A value that looks like a key (rather than a name) is rejected too.
+
+In `.env`, single-quote the value (dotenvy substitutes `${VAR}` inside unquoted values):
+
+```bash
+VOICE_KEY_KOKORO='replace-me'
+```
+
+#### When changes apply
+
+Saved voice settings apply without a restart where the voice path reads the live config: the **web voice WebSocket** (the next voice turn or session; an in-flight turn or session finishes on the settings it started with), the Test voice / Test mic / Test connection buttons (they use the form's unsaved values and never save). The agent's `text_to_speech` tool and gateway (Telegram, Discord, Slack) TTS follow the runtime config they were registered with, so they pick up a change on **Apply config now** (or a restart). The CLI (`ironhermes tts test`, `ironhermes stt info`) reads `config.yaml` on every run, and the TUI reads it each time you start recording or check `/voice status`; spoken TUI replies use the configuration the TUI session started with, so restart the TUI after editing `tts:`. The CLI and TUI have no editing surface for these fields — edit `config.yaml` by hand.
 
 **Spoken replies — three modes** (set live with `/voice`, no config needed):
 
@@ -358,7 +472,7 @@ Example — enable voice mode with Groq STT and spoken replies:
 
 ```yaml
 stt:
-  provider: auto              # auto | groq | openai
+  provider: auto              # auto | groq | openai | openai_compatible
   groq:
     model: whisper-large-v3-turbo
   openai:
@@ -381,7 +495,7 @@ Controls how spoken replies (and the agent's `text_to_speech` tool) synthesize a
 
 | Key | Default | Description |
 |---|---|---|
-| `tts.provider` | `edge` | Global active provider: `edge` (Microsoft Edge TTS — **keyless**), `elevenlabs` (needs `ELEVENLABS_API_KEY`), or `openai` (needs `OPENAI_API_KEY`). Per-avatar overrides under [`identities:`](#identities-identities) win over this. Falls back to Edge when the configured provider is unavailable. |
+| `tts.provider` | `edge` | Global active provider: `edge` (Microsoft Edge TTS — **keyless**), `elevenlabs` (needs `ELEVENLABS_API_KEY`), `openai` (needs `OPENAI_API_KEY`), or `openai_compatible` (a Kokoro-style server at `tts.openai_compatible.base_url`). Per-avatar overrides under [`identities:`](#identities-identities) win over this. Falls back to Edge when the configured provider is unavailable. |
 | `tts.ffmpeg_path` | `null` | Path to `ffmpeg` for MP3→Opus conversion (Telegram voice bubbles). `null` auto-detects `ffmpeg` on `PATH`. |
 | `tts.edge.voice` | `en-US-AriaNeural` | Edge TTS voice name |
 | `tts.edge.output_format` | `mp3` | Edge audio output format |
@@ -391,17 +505,24 @@ Controls how spoken replies (and the agent's `text_to_speech` tool) synthesize a
 | `tts.openai.model` | `tts-1` | OpenAI TTS model |
 | `tts.openai.voice` | `alloy` | OpenAI TTS voice: alloy, echo, fable, onyx, nova, shimmer |
 | `tts.openai.format` | `mp3` | OpenAI TTS output format |
+| `tts.openai_compatible.base_url` | `""` (unset) | Root URL of an OpenAI-compatible speech server **including any `/v1` segment**, e.g. `http://localhost:8880/v1` (Kokoro). `http` or `https` only; no user-info. The provider is **available exactly when this is set** — no key is needed. |
+| `tts.openai_compatible.path` | `/audio/speech` | Optional endpoint path appended to `base_url` (must start with `/`, no query or fragment). Only needed for a server that does not use the OpenAI route. |
+| `tts.openai_compatible.api_key_ref` | unset | Optional **reference** to the key (not the key): a `VOICE_KEY_*` environment variable name or a `secret/voice/*` vault entry. Unset sends no `Authorization` header. See [Voice server keys](#voice-server-keys-api_key_ref). |
+| `tts.openai_compatible.model` | `tts-1` | Model id sent in the request body (Kokoro accepts `kokoro`). |
+| `tts.openai_compatible.voice` | `alloy` | Voice id sent in the request body (for Kokoro, e.g. `af_heart`). |
+| `tts.openai_compatible.format` | `mp3` | Requested audio format: `mp3`, `opus` or `wav`. Any other value is sent as `mp3`. The saved file's extension follows this value for `openai` and `openai_compatible`; Edge and ElevenLabs always return MP3. |
 
-Edge requires no key and works out of the box. ElevenLabs requires `ELEVENLABS_API_KEY` and OpenAI TTS requires `OPENAI_API_KEY`; without the key the provider reports unavailable and spoken replies fall back to Edge.
+Edge requires no key and works out of the box. ElevenLabs requires `ELEVENLABS_API_KEY` and OpenAI TTS requires `OPENAI_API_KEY`; without the key the provider reports unavailable and spoken replies fall back to Edge. `openai_compatible` is never sent either of those keys — only the `VOICE_KEY_*` / `secret/voice/*` reference above. `ironhermes tts test --provider openai_compatible` synthesizes through it from `config.yaml`.
 
-This `tts:` block is the **global** voice. Each orb/avatar can override it per-identity (see [Identities](#identities-identities)). **ElevenLabs (and any `tts:` provider) is only used in free mode** (`voice.barge_in_mode: push_to_interrupt`); `open_mic` realtime uses OpenAI realtime voices instead. Full walkthrough: [`VOICE-TO-VOICE.md`](VOICE-TO-VOICE.md).
+This `tts:` block is the **global** voice. Each orb/avatar can override it per-identity (see [Identities](#identities-identities)). **Any `tts:` provider (ElevenLabs, `openai_compatible`, ...) is only used by the turn-based service** (`voice.service: turn_based`); the realtime service uses its own voice from [`realtime:`](#realtime-realtime). Full walkthrough: [`VOICE-TO-VOICE.md`](VOICE-TO-VOICE.md).
 
 ```yaml
 tts:
-  provider: elevenlabs        # edge | elevenlabs | openai
-  elevenlabs:
-    voice_id: pNInz6obpgDQGcFmaJgB
-    model_id: eleven_multilingual_v2
+  provider: openai_compatible   # edge | elevenlabs | openai | openai_compatible
+  openai_compatible:
+    base_url: http://localhost:8880/v1
+    model: kokoro
+    voice: af_heart
 ```
 
 ### Identities (`identities:`)
@@ -425,7 +546,7 @@ hand-write it. Override only what you want to change.
 | `identities.<slug>.appearance.glow` | `0.0`–`1.0` | Glow/bloom intensity |
 | `identities.<slug>.voice.free_mode_tts_provider` | `edge`\|`openai`\|`elevenlabs`\|`null` | Free-mode TTS provider override. `null` = inherit global `tts.provider`. |
 | `identities.<slug>.voice.free_mode_tts_voice` | string\|`null` | Free-mode voice override. For `elevenlabs` this is a voice ID. `null` = inherit global. |
-| `identities.<slug>.voice.realtime_voice` | string\|`null` | OpenAI realtime voice (`open_mic` only): alloy, shimmer, echo, verse, ash, ballad, coral, sage. `null` = inherit global `voice.realtime_voice`. |
+| `identities.<slug>.voice.realtime_voice` | string\|`null` | Realtime voice (`voice.service: realtime` only), any value accepted by the [`realtime.voice`](#realtime-realtime) charset rule (OpenAI voices: alloy, shimmer, echo, verse, ash, ballad, coral, sage). `null` = inherit global `realtime.voice`. |
 
 **Resolution** (`Config::effective_tts_config_for_identity`): the active identity's
 non-null fields override the global config; null/absent inherit it. A
@@ -460,6 +581,16 @@ identities:
 | `memory.nudge_interval` | `10` | Turns between periodic memory-review nudges. `0` disables the nudge entirely. See [Periodic Memory Review Nudge](#periodic-memory-review-nudge) below. |
 | `memory.skill_creation_guidance` | `true` | When `true` AND the `skill_manage` tool is registered, the system prompt includes the "Skill Creation (Learning Loop)" trigger block that tells the agent when to author a `SKILL.md`. Set to `false` in YAML to suppress the block (e.g. for child agents or restricted deployments). See [Autonomous Skill Creation](#autonomous-skill-creation-learning-toolset) below. |
 | `memory.recall_min_score` | `0.0000072` | Minimum bm25 relevance score (negated FTS5 bm25, higher = more relevant) for `memory_recall` results from the sqlite provider; below-floor matches are dropped so off-topic memories are never recalled (Phase 47.5 D-03). The default is calibrated on a small test fixture and bm25 scores are corpus-relative — raise this if irrelevant memories still surface, lower it if legitimate recall goes quiet. No-op for the duckdb provider, whose recall is substring match with synthetic scores. |
+| `memory.tier2_enabled` | `false` | Tier 2 semantic memory (ADR-0008): per-profile claim store under `<home>/tier2/`, Tier 1 indexing, `memory_search` / `memory_explain`, Memory > Tier 2 tab. Requires `memory.memory_enabled`. All four Tier 2 flags off = pre-58.2 behaviour; turning them off keeps the data. Read at process start. |
+| `memory.consolidation_enabled` | `false` | Hourly claim extraction from `user`/`assistant` turns (hosted by the gateway) and the `memory_consolidate` tool. Uses the `memory` model role. Requires `tier2_enabled`. |
+| `memory.dreams_enabled` | `false` | Nightly (02:00, `agent.timezone` else host zone) dreams run in the gateway, and the frozen, 1,500-char `ALIGNMENT_SYNTHESIS.md` block injected at session start. Requires `tier2_enabled`. |
+| `memory.forgetting_enabled` | `false` | Allows `memory_forget` and the UI Forget / Undo buttons to stage and cancel a forget (staged claims are hidden from every read surface until cancelled or until a human runs the purge, `ironhermes memory purge` or Purge now on the Tier 2 tab, which deletes them permanently). Requires `tier2_enabled`. |
+| `memory.promotion_enabled` | `false` | The gateway's hourly consolidation promotes durable, direct facts about the user into USER.md, or MEMORY.md when USER.md is disabled or full, through the normal Tier 1 write path (scanner, duplicate check, char limit, file lock). Requires `tier2_enabled` and `consolidation_enabled`. |
+| `memory.embeddings.base_url` | `null` | Optional OpenAI-compatible embeddings endpoint (`<base_url>/v1/embeddings`, must be `http://` or `https://`). Unset = built-in in-process model. The endpoint receives every claim and query. |
+| `memory.embeddings.model` | `all-MiniLM-L6-v2` | Embedding model name. With no `base_url` it must be a built-in 384-dim model (`all-MiniLM-L6-v2`, `all-MiniLM-L12-v2`, `bge-small-en-v1.5`, `paraphrase-multilingual-MiniLM-L12-v2`, `multilingual-e5-small`); with a `base_url` it is sent to the endpoint, which must return 384-dim vectors. |
+| `memory.embeddings.api_key_env` | `null` | **Name** of the environment variable holding the endpoint's Bearer key (read from the process environment only; never put the key in `config.yaml`). Optional, a loopback sidecar needs none. |
+
+Tier 2 is documented in full (layout, tools, sidecar setup, privacy, forgetting limits) in [MEMORY-TIER2.md](MEMORY-TIER2.md). Claim extraction and dreams run on the `memory` model role (`model.roles.memory`, below).
 
 #### Periodic Memory Review Nudge
 
@@ -665,6 +796,7 @@ RUST_LOG=ironhermes_tools::skill_manage=info hermes chat
 | `compression.protect_last_tokens` | `20000` | Tokens to protect at end of conversation |
 | `compression.tool_pair_shift_tokens` | `500` | Token budget for tool-pair boundary shifting |
 | `compression.protect_first_n` | `3` | Maximum number of leading system messages protected from compression (Phase 47.5: the first conversation pair is no longer pinned; `3` remains the default upper bound). |
+| `compression.model_thresholds` | `{}` | Map of model name to compression trigger fraction (for example `qwen2.5-7b: 0.3`). Keys match as case-insensitive substrings, longest wins; values outside 0 to 1 are ignored with a warning |
 
 ### Gateway (`gateway:`)
 
@@ -812,11 +944,75 @@ entirely.
 | `batch.max_turns` | `20` | Default max agent iterations per prompt |
 | `batch.output_dir` | `batch_output` | Default output directory (relative to cwd) |
 
+### Web UI (`ui:`)
+
+| Key | Default | Description |
+|---|---|---|
+| `ui.menu` | unset (shipped layout) | The docked wheel and header shortcuts, edited from Settings > Menu and saved per profile. Shape: `version`, `wheel` and `header`, each entry `{screen, label}`. The wheel holds 6 to 11 sections and must keep `chat` and `settings`; an invalid value falls back to the shipped layout with a notice in the Menu tab |
+| `ui.openui_gateway_enabled` | `false` | Lets the OpenUI screen use the Thesys hosted Gateway. Needs a `THESYS_API_KEY` (vault secret `thesys`, else the environment). Conversation content leaves the machine while it is on. Read from the root `config.yaml` |
+
+Edit these from the web UI rather than by hand where you can. Related web screens (all per profile):
+
+- **Settings > Config file (YAML)** edits the root or a profile `config.yaml` as raw text. Secret values show as `•••• (kept)`. Each save backs the old file up as `config.yaml.bak-<UTC time>` (newest 10 kept) and changes apply after a restart. Needs `security.web_config_write_enabled: true` to save.
+- **OpenUI** saves generated views under `<home>/openui/views` (200 per profile).
+- **Dashboard** saves boards under `<home>/dashboard/boards` (12 per profile) and reads reports written by the `report_publish` tool from `<home>/reports/<name>/` (20 versions kept per report). OpenUI and Dashboard files live in the active profile's home (`profiles/<name>/` inside `IRONHERMES_HOME`, or the root home for the default profile).
+
 ### Security (`security:`)
 
 | Key | Default | Description |
 |---|---|---|
 | `security.redact_secrets` | `true` | Redact secrets in logs and output |
+| `security.web_config_write_enabled` | `false` | Allows browser-initiated writes to `config.yaml`: the raw YAML editor in web Settings and other browser-initiated config saves. Read fresh from the root `config.yaml` on every save, for root and profile files alike. With it off the editor is read-only. A save that turns it off needs typed confirmation, and turning it back on needs host access |
+| `security.defcon_level` | unset (resolves to `3`) | The default DEFCON level for every new session, `1` (strictest) to `5` (most permissive). Unset, the level is resolved from the deprecated aliases below and finally falls back to `3`. Only levels `4` and `5` allow a Warn verdict to run without an approval (as an audited bypass); at `1`-`3` every Warn needs a real approval. A Block is never bypassed at any level. `/yolo <N>` overrides it per session and never writes it back. |
+| `security.defcon_remote_change_enabled` | `false` | Lets a remote surface (a chat platform or the web UI, anything that is not the local CLI/TUI) change a session's level with `/yolo <N>`. Chat platforms additionally require the sender to be on the platform's allowlist AND the message to be a direct message; the web requires an authenticated session (`web_ui.auth` on). With the flag off, every remote `/yolo <N>` is refused and the refusal is audited. The CLI and TUI are local and ungated by this flag. |
+
+#### DEFCON levels and `/yolo <N>`
+
+DEFCON is the one dial for how strict every security gate is. The level a call is judged under is
+read from the session at the moment of the call, so a `/yolo <N>` sent mid-turn applies to the very
+next tool call. How the default level is resolved, first match wins:
+
+1. `security.defcon_level`
+2. `skills.defcon_level` (deprecated alias; logs a warning)
+3. `autonomous.yolo` (deprecated alias: `true` reads as `5`, `false` as `3`; logs a warning when `true`)
+4. `3` — an install with none of these keys keeps today's "needs approval" behaviour.
+
+`ironhermes status` and `ironhermes doctor` print the resolved level. `ironhermes --yolo` starts the
+process at level `5`; the gateway ignores a command-line `--yolo` and reads its level from config only.
+
+| Level | tirith Critical | High | Medium | Low | Warn runs without approval? |
+|---|---|---|---|---|---|
+| `5` | Block | Warn | Allow | Allow | yes, audited bypass |
+| `4` | Block | Warn | Warn | Allow | yes, audited bypass |
+| `3` | Block | Block | Warn | Allow | no, approval required |
+| `2` | Block | Block | Warn | Warn | no, approval required |
+| `1` | Block | Block | Block | Warn | no, approval required |
+
+Every cell at level `n` is at least as strict as the same cell at level `n+1`. ironhermes's own
+rules sit alongside the table and the strictest verdict wins: a Tier-2 command (for example
+`rm -rf /`) and a recognised mutation verb (for example `wrangler delete`, including one
+reconstructed from `execute_code` Python source) are Blocked at every level; a Tier-1 command or a
+Python-table hit (for example `curl`) asks for approval at levels `2`-`5` and is Blocked only at
+level `1`. At levels `3` and stricter, `execute_code` source that reaches `subprocess`, `socket`,
+`ctypes` or `importlib` is Blocked.
+
+If the `ironhermes-tirith` sidecar is missing, crashed or timed out, tools that can change things
+(`terminal`, `execute_code`, `delegate_task`, `cronjob`, `write_file`, `patch`, MCP mutation tools)
+are Blocked at levels `1`-`3` and raised to Warn at levels `4`-`5`, each event audited with its
+reason. Inbound text and other non-mutating subjects keep their regex-floor verdict.
+
+**`/yolo <N>`** (`N` = 1-5) sets the *current session's* level on every surface (TUI, CLI, web,
+Telegram, Discord, Slack). It lasts until changed or until the session or process ends; it is never
+written to `config.yaml`. Every change writes a `defcon_change` row to `logs/audit.jsonl` (who,
+surface, old and new level), including a refused attempt. Authorization: the CLI and TUI are local
+and always allowed; a remote surface needs `security.defcon_remote_change_enabled: true` plus the
+per-surface condition described in that key's row.
+
+```yaml
+security:
+  defcon_level: 3                       # default for each new session (1 strictest .. 5 most permissive)
+  defcon_remote_change_enabled: false   # allow /yolo <N> from chat or the web (needs allowlist + DM / web auth)
+```
 
 ### Browser (`browser:`)
 
@@ -880,6 +1076,67 @@ machine-readable `capture` field (`full_page` or `viewport`) in its JSON
 envelope, and, on the Obscura (viewport) path, a prefix sentence in the
 `analysis` text itself, since the calling model never sees the screenshot
 image — only that prose.
+
+### ROS 2 (`ros2:`)
+
+Phase 49.8: talks to a ROS 2 (Humble) robot over a **rosbridge WebSocket** (JSON rosbridge
+protocol v2) — no ROS install, DDS, or Zenoh dependency in ironhermes itself. Writes
+(`publish`/`services`/`actions`) are **deny-by-default** — the inverse of
+`browser.allowed_domains`'s allow-all-when-empty default — so a topic/service/action must be
+explicitly declared, together with its message type, before ironhermes can write to it. `caps`
+are hard physical-safety limits enforced in-tool; `--yolo`/`autonomous.yolo` never relaxes them
+(D-11). Any value an operator configures is additionally clamped by the code-level ceiling for
+that cap. See [`docs/robots/rospider.md`](robots/rospider.md) for the full operator walkthrough
+(install, version check, launch, network exposure, name reconciliation).
+
+| Key | Default | Description |
+|---|---|---|
+| `ros2.bridge_url` | `null` | rosbridge WebSocket URL (e.g. `ws://<robot>:9090`). `null` with no `IRONHERMES_ROS2_BRIDGE_URL` override means both `ros2` and `rospider` report unavailable (hidden), mirroring `HEXAPOD_IP`. Moving ironhermes onto the robot itself changes only this value, to `ws://localhost:9090` (D-02). |
+| `ros2.publish` | `[]` | Allowlisted `publish` targets. Empty = nothing permitted (deny-by-default, D-04). Each entry declares `name`, `type`, and optional `limits`. |
+| `ros2.services` | `[]` | Allowlisted `call_service` targets. Same deny-by-default semantics as `publish`. |
+| `ros2.actions` | `[]` | Allowlisted `send_goal` action targets. Same deny-by-default semantics as `publish`. |
+| `ros2.caps.max_linear_velocity` | `0.10` (m/s) | Hard cap on any published linear velocity. An explicit `0` disables linear motion (every linear component is published as 0.0); an absent key takes the default; values above the 0.5 m/s code ceiling clamp to it. |
+| `ros2.caps.max_angular_velocity` | `0.5` (rad/s) | Hard cap on any published angular velocity. An explicit `0` disables angular motion (every angular component is published as 0.0); an absent key takes the default; values above the 1.5 rad/s code ceiling clamp to it. |
+| `ros2.caps.max_motion_duration_secs` | `5.0` | Hard cap on timed-motion duration; auto-stop fires at expiry (D-09). A value `<= 0` is not a usable limit here and falls back to the default. |
+| `ros2.caps.motion_publish_hz` | `10.0` | Republish rate for timed motion. A value `<= 0` is not a usable limit here and falls back to the default; the rate is clamped into 2-20 Hz. |
+| `ros2.caps.max_subscribe_messages` | `20` | Hard cap on messages collected per bounded-sample subscribe (D-12). An explicit `0` disables sampling: the ros2 subscribe action and every rospider sensor/camera read answer `is not permitted` without connecting; the code ceiling is 20. |
+| `ros2.caps.max_subscribe_secs` | `10.0` | Hard cap on a bounded-sample subscribe window. A value `<= 0` is not a usable limit here and falls back to the default. |
+| `ros2.caps.max_goal_secs` | `120.0` | Hard cap on how long an action goal may run before it is polled/cancelled. A value `<= 0` is not a usable limit here and falls back to the default. |
+| `ros2.rospider.cmd_vel_topic` | `/controller/cmd_vel` | ROSPider walk/turn/stop target. |
+| `ros2.rospider.traveling_topic` | `/controller/traveling` | ROSPider rest-stop target. After the zero-Twist stop, ironhermes publishes `kinematics_msgs/msg/Traveling` with `gait: 0` here, which is what actually brings the legs to rest; on ROSPider firmware a zero Twist alone leaves the robot stepping in place. Empty disables it (not recommended on a ROSPider). Never widens `ros2.publish`. |
+| `ros2.rospider.pose_topic` | `/controller/set_pose_euler` | ROSPider set_pose / body_height target. |
+| `ros2.rospider.gait_topic` | `/step_controller/cmd_param` | ROSPider gait-selection target. |
+| `ros2.rospider.builtin_pose_service` | `/controller/set_pose_1` | ROSPider builtin_pose service. |
+| `ros2.rospider.servo_topic` | `/servo_controller` | ROSPider camera_pan servo target. |
+| `ros2.rospider.camera_pan_servo_id` | `19` | Servo id used for camera_pan on `servo_topic`. |
+| `ros2.rospider.camera_compressed_topic` | `/depth_cam/rgb/image_compressed` | ROSPider camera_snapshot source (compressed, USB camera). |
+| `ros2.rospider.camera_raw_topic` | `/depth_cam/rgb/image_raw` | ROSPider camera_snapshot fallback source (raw). |
+| `ros2.rospider.imu_topic` | `/imu` | ROSPider read_imu source. |
+| `ros2.rospider.battery_topic` | `/ros_robot_controller/battery` | ROSPider read_battery source. |
+| `ros2.rospider.odom_topic` | `/odom` | ROSPider read_odom source. |
+| `ros2.rospider.scan_topic` | `/scan` | ROSPider lidar_summary source. |
+
+Allowlist entry fields (`ros2.publish` / `ros2.services` / `ros2.actions`):
+
+| Field | Description |
+|---|---|
+| `name` | Exact topic/service/action name (e.g. `/controller/cmd_vel`). Matched by exact string equality — no globbing. |
+| `type` | Declared message/service/action type (e.g. `geometry_msgs/msg/Twist`). Must match before a write is permitted. |
+| `limits` | Optional dotted-path `[min, max]` numeric clamps (e.g. `linear.x: [-0.1, 0.1]`). |
+
+```yaml
+ros2:
+  bridge_url: "ws://127.0.0.1:9090"
+  publish:
+    - name: "/controller/cmd_vel"
+      type: "geometry_msgs/msg/Twist"
+      limits:
+        "linear.x": [-0.1, 0.1]
+        "angular.z": [-0.5, 0.5]
+  actions:
+    - name: "/navigate_to_pose"
+      type: "nav2_msgs/action/NavigateToPose"
+```
 
 ### Web Extract (`extract:`)
 
@@ -1118,11 +1375,11 @@ effect of anything else in this phase.
 
 | Key | Default | Description |
 |---|---|---|
-| `autonomous.yolo` | `false` | When `true`, skip dangerous-command approval prompts. Budget-100% / fatal-error / user-interrupt remain unskippable (G-01/G-04/G-09). The CLI `--yolo` flag overrides this config value when both are set. |
+| `autonomous.yolo` | `false` | **Deprecated alias for `security.defcon_level`** (Phase 57): `true` is read as DEFCON 5 and `false` as DEFCON 3, and only when `security.defcon_level` is absent. At level 5 a Warn runs as an audited bypass; a Block is never bypassed. Budget-100% / fatal-error / user-interrupt remain unskippable (G-01/G-04/G-09). The CLI `--yolo` flag starts the process at level 5. Set `security.defcon_level` instead; see [DEFCON levels](#defcon-levels-and-yolo-n). |
 
 ```yaml
 autonomous:
-  yolo: false   # set true to suppress approval prompts
+  yolo: false   # deprecated: use security.defcon_level (true = 5, false = 3)
 ```
 
 ### Concurrency (`concurrency:`)
@@ -1226,7 +1483,7 @@ audio_cache:
 
 ### Tools (`tools:`)
 
-Toolsets enabled by default via `ToolsConfig::default()`: `memory`, `session`, `agent`, `skills`, `robotics`, `learning`. All known toolsets are additionally ensured present via `with_default_toolsets_merged()`, which iterates over `crate::constants::ALL_TOOLSETS`.
+Toolsets enabled by default via `ToolsConfig::default()`: `memory`, `session`, `agent`, `skills`, `robotics`, `learning`, `ros2`. All known toolsets are additionally ensured present via `with_default_toolsets_merged()`, which iterates over `crate::constants::ALL_TOOLSETS`.
 
 Toolsets disabled by default: `web`, `code`, `browser`
 
@@ -1238,6 +1495,7 @@ Toolsets disabled by default: `web`, `code`, `browser`
 | `skills` | discovery + invocation tools | Read existing skills from `skills/` paths |
 | `robotics` | hexapod / robot tools | Gates further on `HEXAPOD_IP` env var |
 | `learning` | `skill_manage` | **Phase 33** — autonomous skill creation (see [Autonomous Skill Creation](#autonomous-skill-creation-learning-toolset)) |
+| `ros2` | `ros2`, `rospider` | **Phase 49.8** — ROS 2 robot tools over rosbridge. Gates further on `IRONHERMES_ROS2_BRIDGE_URL` or `ros2.bridge_url` (see [ROS 2 (`ros2:`)](#ros-2-ros2)) |
 | `web` | `web_read`, `web_extract` | Opt-in; web scraping |
 | `code` | `execute_code` | Opt-in; Python sandbox |
 | `browser` | `browser_*` | Opt-in; headed browser automation |
@@ -1257,6 +1515,8 @@ tools:
       enabled: true   # gates further on HEXAPOD_IP env var
     learning:
       enabled: true   # Phase 33 — autonomous skill creation
+    ros2:
+      enabled: true   # Phase 49.8 — gates further on IRONHERMES_ROS2_BRIDGE_URL / ros2.bridge_url
     web:
       enabled: false   # opt-in required
     code:
@@ -1433,9 +1693,12 @@ model:
       model: "openai/gpt-4o"
     compression:
       provider: "main"   # inherits the primary provider
+    memory:              # Tier 2 claim extraction + dreams (default: none -> auxiliary block, else main model)
+      provider: "openrouter"
+      model: "meta-llama/llama-3.1-8b-instruct"
 ```
 
-Reserved role names: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`, `summarization`, `curator`
+Reserved role names: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`, `summarization`, `curator`, `memory`
 
 ---
 

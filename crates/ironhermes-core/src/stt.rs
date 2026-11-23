@@ -47,7 +47,47 @@ pub trait SttProvider: Send + Sync {
 /// `SttRegistry::register()` accepts only names in this set; any other name
 /// triggers a `tracing::warn!` and is ignored. This pre-positions the invariant
 /// for a future user-extension reversal without changing call sites.
-pub const BUILTIN_STT_NAMES: &[&str] = &["groq", "openai"];
+pub const BUILTIN_STT_NAMES: &[&str] = &["groq", "openai", "openai_compatible"];
+
+/// D-06 / Phase 54.7: startup-time STT provider selection.
+///
+/// - `config.provider != "auto"`: the explicit provider always wins.
+/// - Auto mode picks, in this deterministic order (Claude's discretion,
+///   RESEARCH A10; reordered by WR-09):
+///   1. `"openai_compatible"` when `stt.openai_compatible.base_url` is non-empty;
+///   2. `"groq"` when `GROQ_API_KEY` is set to a non-empty value;
+///   3. `"openai"` when `VOICE_TOOLS_OPENAI_KEY` is set to a non-empty value;
+///   4. otherwise `None` (STT disabled).
+///
+/// The explicitly configured server comes first: `GROQ_API_KEY` is also the
+/// standard key for Groq as an LLM provider and is commonly set for that reason
+/// alone, so an operator who pointed STT at a local server (whisper.cpp) must not
+/// have their microphone audio silently sent to Groq's cloud. An empty
+/// `KEY=` placeholder counts as unset.
+///
+/// Selection lives in core so the `/voice status` mirror and the tools-side
+/// re-export (`ironhermes_tools::stt::select_stt_provider`) cannot drift.
+/// Selection is startup-only — no mid-call failover.
+pub fn select_stt_provider(config: &crate::config::SttConfig) -> Option<String> {
+    if config.provider != "auto" {
+        return Some(config.provider.clone());
+    }
+    if !config.openai_compatible.base_url.trim().is_empty() {
+        return Some("openai_compatible".to_string());
+    }
+    if env_key_present("GROQ_API_KEY") {
+        return Some("groq".to_string());
+    }
+    if env_key_present("VOICE_TOOLS_OPENAI_KEY") {
+        return Some("openai".to_string());
+    }
+    None
+}
+
+/// True when `name` is set to a non-blank value (an empty placeholder is unset).
+fn env_key_present(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| !v.trim().is_empty())
+}
 
 /// Registry mapping provider names to `Arc<dyn SttProvider>` instances.
 ///

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::config::{DefconLevel, SkillsConfig};
-use crate::constants::get_hermes_home;
+use crate::constants::{get_hermes_home, get_root_hermes_home};
 
 // =============================================================================
 // Validation (SKILL-07)
@@ -662,6 +662,19 @@ pub struct SkillRegistry {
     /// renders in full, which is the behavior every pre-tiering caller (`load`,
     /// `load_with_paths`, direct test construction) still gets.
     priority_roots: Option<Vec<PathBuf>>,
+    /// Phase 54.1 D-12: the LOWERCASED names from `SkillsConfig.disabled`,
+    /// captured once at `load_with_config` time (via
+    /// `load_from_search_paths_with_config`). An empty set means "no opt-out
+    /// list was supplied" — the behavior every non-`load_with_config`
+    /// constructor gets (`load`, `load_with_paths`, direct test
+    /// construction).
+    ///
+    /// Hidden but reachable contract: these names are skipped by
+    /// `filtered_catalog_text` ONLY. They remain in `self.skills`, remain
+    /// resolvable by `find()`, and remain listed by `catalog_text()` — D-12
+    /// hides a disabled skill from the pre-paid prompt catalog without
+    /// removing its ability to be activated.
+    disabled_names: std::collections::HashSet<String>,
 }
 
 // =============================================================================
@@ -807,15 +820,72 @@ pub const DEFAULT_CATALOG_PRIORITY_ROOT_COUNT: usize = 2;
 /// Defaults first (priority order), extras appended after (D-19).
 /// Exposed as `pub` so callers (e.g. CLI reload arm, gateway handler) can
 /// count scanned-vs-loaded for D-05 WARN-BUT-LOAD reporting.
+///
+/// Thin wrapper over [`build_skill_search_paths_with_roots`] (Phase 54.1 D-03/
+/// D-09 extraction) that resolves the three home roots from the process
+/// environment: `user_home` from `HOME` (falling back to `dirs::home_dir()`),
+/// `hermes_home` from [`get_hermes_home`], and `root_hermes_home` from
+/// [`get_root_hermes_home`]. Signature is unchanged so existing callers
+/// (`ironhermes-cli/src/skills_cmd.rs`, `ironhermes-cli/src/main.rs`) keep
+/// compiling untouched.
 pub fn build_skill_search_paths(cwd: &Path, config: &SkillsConfig) -> Vec<PathBuf> {
-    let home = std::env::var("HOME")
+    let user_home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let hermes_home = get_hermes_home();
+    let root_hermes_home = get_root_hermes_home();
+    build_skill_search_paths_with_roots(cwd, config, &user_home, &hermes_home, &root_hermes_home)
+}
+
+/// Home-parameterized core of [`build_skill_search_paths`] (Phase 54.1 D-03/
+/// D-09 extraction — made pure and deterministically testable without env
+/// mutation; the workspace's edition-2024 `std::env::set_var` is `unsafe` and
+/// there is no `serial_test` dependency, so the env-reading wrapper above
+/// cannot itself be exercised by parallel tests).
+///
+/// Returns, in order:
+/// 1. `cwd/.ironhermes/skills` — per-invocation local override.
+/// 2. `hermes_home/skills` — the process's own (possibly profile-pivoted) home.
+/// 3. `user_home/.agents/skills` — shared cross-tool directory.
+/// 4. `root_hermes_home/skills` (Phase 54.1 D-03) — ONLY when
+///    `root_hermes_home != hermes_home`. On a `--profile`-pivoted process
+///    `hermes_home` is the profile's own home and `root_hermes_home` is the
+///    operator's ROOT home; without this entry a pivoted process could never
+///    reach the operator's curated root catalog. The guard exists because
+///    this fn performs no deduplication and [`get_root_hermes_home`] returns
+///    [`get_hermes_home`] verbatim (byte-for-byte) on every unpivoted
+///    process — omitting the guard would duplicate entry 2 there.
+///    Positional note: this lands at index 3, beyond
+///    [`DEFAULT_CATALOG_PRIORITY_ROOT_COUNT`] (2), so it renders tiered
+///    (a counted pointer, not a full catalog) per D-03 constraint 1.
+/// 5. `root_hermes_home/optional-skills` (Phase 54.1 D-09) — the operator's
+///    opt-in "optional skills" tree, the 4th hardcoded default, placed after
+///    `~/.agents/skills`. Uses the ROOT home (not the process home) so every
+///    profile reaches the shared tree per D-01/D-03. Unconditional — no
+///    existing entry can ever equal it, so no inequality guard is needed.
+///    This is what first makes `resolve_source`'s `optional-skills` ->
+///    [`SkillSource::Official`] arm reachable in production (D-09/F7).
+/// 6. `config.extra_paths`, in order (D-19) — always last so first-path-wins
+///    dedup preserves default priority.
+pub fn build_skill_search_paths_with_roots(
+    cwd: &Path,
+    config: &SkillsConfig,
+    user_home: &Path,
+    hermes_home: &Path,
+    root_hermes_home: &Path,
+) -> Vec<PathBuf> {
     let mut paths = vec![
         cwd.join(".ironhermes/skills"),
-        get_hermes_home().join("skills"),
-        home.join(".agents/skills"),
+        hermes_home.join("skills"),
+        user_home.join(".agents/skills"),
     ];
+    // Phase 54.1 D-03: root skills tree, guarded against duplicating entry 2
+    // on an unpivoted process (see fn doc above).
+    if root_hermes_home != hermes_home {
+        paths.push(root_hermes_home.join("skills"));
+    }
+    // Phase 54.1 D-09: root optional-skills tree, unconditional (see fn doc above).
+    paths.push(root_hermes_home.join("optional-skills"));
     // D-19: extras appended AFTER defaults so first-path-wins preserves default priority.
     paths.extend(config.extra_paths.iter().cloned());
     paths
@@ -945,7 +1015,11 @@ fn try_register_skill_from_dir(
     // Scan scope = raw frontmatter text + body per D-14.
     let raw_frontmatter_text = extract_raw_frontmatter(&content).unwrap_or_default();
     let combined_scan_target = format!("{}\n\n{}", raw_frontmatter_text, body);
-    let scan_result = crate::context_scanner::scan_skill_content(
+    // Regex floor only: the sidecar screens the content at delivery (screen_skill_delivery),
+    // so boot does not pay one sidecar round trip per installed skill. Every skill is
+    // `Builtin` here, so this scan only ever warned; Community hard-reject runs after
+    // trust recompute in `load_from_search_paths_with_config`, still with the sidecar.
+    let scan_result = crate::context_scanner::scan_skill_content_local(
         &combined_scan_target,
         &skill_md_path.display().to_string(),
     );
@@ -1060,19 +1134,53 @@ impl SkillRegistry {
     /// Phase 19.1 Plan 04 (D-08): after scanning, re-resolve each skill's source
     /// by consulting .hub/lock.json and config.hub.trusted_repos. Trust is never
     /// frozen — it is recomputed on every call by re-reading the config.
+    ///
+    /// Phase 57 Plan 02 (D-11): the CR-01 DEFCON tier is NOT read from
+    /// `config.defcon_level` (a deprecated alias). This entry point takes the
+    /// process default seeded by the host from `Config::effective_defcon_level()`
+    /// (`session_defcon().process_default()`, level 3 until a host seeds it). A
+    /// caller that holds the full `Config` should call
+    /// [`Self::load_with_config_at`] with `config.effective_defcon_level()`.
     pub fn load_with_config(cwd: &Path, config: &SkillsConfig) -> Self {
+        Self::load_with_config_at(
+            cwd,
+            config,
+            crate::defcon::session_defcon().process_default(),
+        )
+    }
+
+    /// [`Self::load_with_config`] with an explicit CR-01 DEFCON tier — pass
+    /// `Config::effective_defcon_level()` (Phase 57 D-11).
+    pub fn load_with_config_at(cwd: &Path, config: &SkillsConfig, defcon: DefconLevel) -> Self {
         // SKILL-08 kill switch (D-20).
         if !config.enabled {
             return Self {
                 skills: Vec::new(),
                 priority_roots: None,
+                disabled_names: std::collections::HashSet::new(),
             };
         }
 
         let search_paths = build_skill_search_paths(cwd, config);
+        Self::load_from_search_paths_with_config(&search_paths, config, defcon)
+    }
+
+    /// Everything `load_with_config` does AFTER it computes `search_paths`
+    /// (Phase 54.1 Task 1 extraction): the tiered load, the hub manifest
+    /// merge, the `resolve_source` relabel loop, and the D-15 community
+    /// retain. Pure extraction — behavior is identical to the pre-extraction
+    /// inline body. Exposed `pub(crate)` so tests can exercise the full
+    /// load->trust-resolution->D-12-capture chain against explicit fixture
+    /// search paths, without env mutation
+    /// ([`build_skill_search_paths_with_roots`] supplies those paths).
+    pub(crate) fn load_from_search_paths_with_config(
+        search_paths: &[PathBuf],
+        config: &SkillsConfig,
+        defcon: DefconLevel,
+    ) -> Self {
         let mut registry = Self::load_with_paths_defcon_tiered(
-            &search_paths,
-            config.defcon_level,
+            search_paths,
+            defcon,
             Some(config.catalog_priority_root_count),
         );
 
@@ -1139,6 +1247,12 @@ impl SkillRegistry {
                 true
             }
         });
+
+        // Phase 54.1 D-12: capture the opt-out list ONCE here — the only
+        // place config is consulted for this purpose. Never read inside a
+        // render fn (`filtered_catalog_text`'s purity contract stands —
+        // field-only read).
+        registry.disabled_names = config.disabled.iter().map(|n| n.to_lowercase()).collect();
 
         registry
     }
@@ -1296,6 +1410,7 @@ impl SkillRegistry {
         Self {
             skills,
             priority_roots,
+            disabled_names: std::collections::HashSet::new(),
         }
     }
 
@@ -1315,6 +1430,13 @@ impl SkillRegistry {
     }
 
     /// Return a compact catalog string: one `- name: description` line per skill.
+    ///
+    /// Phase 54.1 D-12: deliberately ignores `disabled_names`. The only
+    /// non-test caller is the `/skills` command
+    /// (`crates/ironhermes-core/src/commands/handlers.rs`), where untiered,
+    /// unfiltered output is correct — the operator's own listing must show
+    /// every installed skill, including ones they disabled from the prompt
+    /// catalog.
     pub fn catalog_text(&self) -> String {
         self.skills
             .iter()
@@ -1345,6 +1467,17 @@ impl SkillRegistry {
     /// collapse into a SINGLE trailing line stating the exact count of elided
     /// skills and pointing at the `skills` tool's `list`/`activate` actions —
     /// they remain fully reachable, just not pre-paid into every prompt.
+    ///
+    /// Phase 54.1 D-12: a skill whose lowercased name is in `disabled_names`
+    /// is skipped entirely — it costs ZERO prompt-catalog lines. This skip
+    /// happens BEFORE the priority-root check and does NOT increment
+    /// `elided_count`: the trailing counted-pointer line attributes its
+    /// count to "additional configured skill directories", so folding
+    /// disabled skills into it would both cost prompt tokens (an extra
+    /// line, or a larger number on an existing one) and misreport why the
+    /// skill is hidden. The disabled set is a field captured once at load
+    /// time (see the `disabled_names` field doc), so this skip adds no
+    /// filesystem or environment access — the purity contract above stands.
     pub fn filtered_catalog_text(
         &self,
         active_toolsets: &std::collections::HashSet<String>,
@@ -1357,6 +1490,9 @@ impl SkillRegistry {
         for s in self.skills.iter().filter(|s| {
             skill_passes_filter(s, active_toolsets, active_tools, connected_mcp_servers)
         }) {
+            if self.disabled_names.contains(&s.name.to_lowercase()) {
+                continue;
+            }
             if self.is_priority_skill(&s.path) {
                 lines.push(format!("- {}: {}", s.name, s.description));
             } else {
@@ -1382,12 +1518,13 @@ impl SkillRegistry {
         self.skills.iter().find(|s| s.name.to_lowercase() == lower)
     }
 
-    /// Read the body content of a skill by name (disk read, strips frontmatter).
+    /// Read the body content of a skill by name (disk read, strips frontmatter),
+    /// screened by the sidecar as it is handed out — see [`screen_skill_delivery`].
     pub fn read_content(&self, name: &str) -> Option<String> {
         let record = self.find(name)?;
         let content = std::fs::read_to_string(&record.path).ok()?;
         let (_frontmatter, body) = parse_skill_md(&content)?;
-        Some(body)
+        Some(screen_skill_delivery(record, body))
     }
 
     /// Return a slice of all discovered skills.
@@ -1476,6 +1613,35 @@ impl SkillRegistry {
         }
         reg
     }
+}
+
+/// Screen skill text with the sidecar at the moment it is handed to the model.
+///
+/// Registry load only runs the regex floor, so this is where a skill's content meets the
+/// sidecar — on the exact bytes delivered, which also catches edits made after load.
+/// Same source policy as load: a Community skill that hits is replaced by the `[BLOCKED: …]`
+/// placeholder (D-15 hard-reject); Builtin/Official/Trusted/SelfCreated warn but deliver
+/// (D-15 WARN-BUT-LOAD). The scan itself writes the audit row for a sidecar verdict.
+pub fn screen_skill_delivery(record: &SkillRecord, text: String) -> String {
+    let scan =
+        crate::context_scanner::scan_skill_content(&text, &record.path.display().to_string());
+    if !scan.starts_with("[BLOCKED:") {
+        return text;
+    }
+    if record.source == SkillSource::Community {
+        warn!(
+            skill = %record.name,
+            path = %record.path.display(),
+            "SkillRegistry: blocking community skill at delivery — scan hit"
+        );
+        return scan;
+    }
+    warn!(
+        skill = %record.name,
+        path = %record.path.display(),
+        "SkillRegistry: WARN-BUT-LOAD at delivery — scan hit on builtin/official/trusted/self-created skill"
+    );
+    text
 }
 
 // =============================================================================
@@ -2554,6 +2720,14 @@ mod tests {
     fn test_load_with_config_extras_respect_dedup_default_priority() {
         // Pins D-19: extras are appended AFTER defaults.
         // Use build_skill_search_paths directly to test path construction.
+        //
+        // Phase 54.1 D-09: a 4th hardcoded default (root_hermes_home's
+        // optional-skills tree) is now always appended unconditionally
+        // after the pre-existing 3 — this test's own process is unpivoted
+        // (no IRONHERMES_ROOT_HOME set), so D-03's root-skills append is
+        // suppressed (it would duplicate default 2) and only the D-09
+        // optional-skills entry lands, shifting extras from indices 3/4 to
+        // 4/5 and the total from 5 to 6.
         let cwd = PathBuf::from("/test/cwd");
         let config = SkillsConfig {
             enabled: true,
@@ -2561,21 +2735,21 @@ mod tests {
             ..SkillsConfig::default()
         };
         let paths = build_skill_search_paths(&cwd, &config);
-        assert_eq!(paths.len(), 5, "3 defaults + 2 extras");
+        assert_eq!(paths.len(), 6, "4 defaults (D-09 adds optional-skills) + 2 extras");
         assert_eq!(
             paths[0],
             cwd.join(".ironhermes/skills"),
             "default 1 must be first"
         );
         assert_eq!(
-            paths[3],
+            paths[4],
             PathBuf::from("/extra/a"),
-            "extra a must be at index 3"
+            "extra a must be at index 4"
         );
         assert_eq!(
-            paths[4],
+            paths[5],
             PathBuf::from("/extra/b"),
-            "extra b must be at index 4"
+            "extra b must be at index 5"
         );
     }
 
@@ -3241,6 +3415,329 @@ Body content.
         let covered_catalog =
             covered.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
         assert!(covered_catalog.contains("alpha") && covered_catalog.contains("bravo"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 54.1 Task 1: D-03/D-09 search-path and tracer end-to-end tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn skills_search_paths_d03_appends_root_skills_beyond_priority_window() {
+        // Pivoted layout: hermes_home is a profile under root, root_hermes_home
+        // is the operator's root. Both new entries must appear, in order, at
+        // indices >= DEFAULT_CATALOG_PRIORITY_ROOT_COUNT.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        let user_home = dir.path().join("userhome");
+        let hermes_home = root.join("profiles").join("p1");
+        let cwd = dir.path().join("cwd");
+
+        let config = SkillsConfig::default();
+        let paths = build_skill_search_paths_with_roots(
+            &cwd, &config, &user_home, &hermes_home, &root,
+        );
+
+        let expected = vec![
+            cwd.join(".ironhermes/skills"),
+            hermes_home.join("skills"),
+            user_home.join(".agents/skills"),
+            root.join("skills"),
+            root.join("optional-skills"),
+        ];
+        assert_eq!(
+            paths, expected,
+            "pivoted layout must yield exactly these 5 entries in order"
+        );
+
+        let root_skills_idx = paths
+            .iter()
+            .position(|p| p == &root.join("skills"))
+            .expect("root skills entry must be present");
+        let root_optional_idx = paths
+            .iter()
+            .position(|p| p == &root.join("optional-skills"))
+            .expect("root optional-skills entry must be present");
+        assert!(
+            root_skills_idx >= DEFAULT_CATALOG_PRIORITY_ROOT_COUNT,
+            "root skills entry at index {root_skills_idx} must be >= priority window {DEFAULT_CATALOG_PRIORITY_ROOT_COUNT}"
+        );
+        assert!(
+            root_optional_idx >= DEFAULT_CATALOG_PRIORITY_ROOT_COUNT,
+            "root optional-skills entry at index {root_optional_idx} must be >= priority window {DEFAULT_CATALOG_PRIORITY_ROOT_COUNT}"
+        );
+    }
+
+    #[test]
+    fn skills_search_paths_d03_no_duplicate_when_root_equals_current_home() {
+        // Unpivoted layout: hermes_home == root_hermes_home. The root `skills`
+        // append must be suppressed (no duplicate of entry 2); the
+        // optional-skills append must still appear.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        let user_home = dir.path().join("userhome");
+        let cwd = dir.path().join("cwd");
+
+        let config = SkillsConfig::default();
+        let paths =
+            build_skill_search_paths_with_roots(&cwd, &config, &user_home, &root, &root);
+
+        assert_eq!(
+            paths.len(),
+            4,
+            "unpivoted layout must yield exactly 4 entries, got {paths:?}"
+        );
+        let occurrences = paths.iter().filter(|p| **p == root.join("skills")).count();
+        assert_eq!(
+            occurrences, 1,
+            "root skills entry must appear exactly once, got {occurrences} in {paths:?}"
+        );
+    }
+
+    #[test]
+    fn skills_search_paths_d09_optional_skills_is_fourth_default() {
+        // optional-skills must be present in BOTH pivoted and unpivoted
+        // layouts, and config.extra_paths must still sort after it.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        let user_home = dir.path().join("userhome");
+        let cwd = dir.path().join("cwd");
+        let hermes_home = root.join("profiles").join("p1");
+        let extra = dir.path().join("extra-path");
+
+        let config = SkillsConfig {
+            extra_paths: vec![extra.clone()],
+            ..Default::default()
+        };
+
+        let pivoted = build_skill_search_paths_with_roots(
+            &cwd, &config, &user_home, &hermes_home, &root,
+        );
+        assert!(
+            pivoted.contains(&root.join("optional-skills")),
+            "pivoted layout must contain root optional-skills: {pivoted:?}"
+        );
+        let optional_idx = pivoted
+            .iter()
+            .position(|p| p == &root.join("optional-skills"))
+            .unwrap();
+        let extra_idx = pivoted.iter().position(|p| p == &extra).unwrap();
+        assert!(
+            extra_idx > optional_idx,
+            "extra_paths entry must sort after root optional-skills"
+        );
+
+        let unpivoted =
+            build_skill_search_paths_with_roots(&cwd, &config, &user_home, &root, &root);
+        assert!(
+            unpivoted.contains(&root.join("optional-skills")),
+            "unpivoted layout must contain root optional-skills: {unpivoted:?}"
+        );
+    }
+
+    #[test]
+    fn skills_search_paths_d03_d09_pivoted_registry_loads_root_catalog_as_counted_pointer() {
+        // End-to-end slice: seed root skills, root optional-skills, and a
+        // profile's own skills tree; build the path list via
+        // build_skill_search_paths_with_roots, load via
+        // load_from_search_paths_with_config with catalog_priority_root_count
+        // = 2, then assert tiering + trust-tier labeling together.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        let user_home = dir.path().join("userhome-absent");
+        let cwd = dir.path().join("cwd-absent");
+        let hermes_home = root.join("profiles").join("p1");
+
+        let root_skill_dir = root.join("skills").join("root-curated-skill");
+        fs::create_dir_all(&root_skill_dir).unwrap();
+        fs::write(
+            root_skill_dir.join("SKILL.md"),
+            make_skill_md("root-curated-skill", "Root curated skill", ""),
+        )
+        .unwrap();
+
+        let root_optional_dir = root.join("optional-skills").join("root-optional-skill");
+        fs::create_dir_all(&root_optional_dir).unwrap();
+        fs::write(
+            root_optional_dir.join("SKILL.md"),
+            make_skill_md("root-optional-skill", "Root optional skill", ""),
+        )
+        .unwrap();
+
+        let profile_skill_dir = hermes_home.join("skills").join("profile-own-skill");
+        fs::create_dir_all(&profile_skill_dir).unwrap();
+        fs::write(
+            profile_skill_dir.join("SKILL.md"),
+            make_skill_md("profile-own-skill", "Profile's own skill", ""),
+        )
+        .unwrap();
+
+        // cwd and user_home trees deliberately absent — fully closed fixture.
+        let config = SkillsConfig {
+            catalog_priority_root_count: 2,
+            ..Default::default()
+        };
+
+        let search_paths = build_skill_search_paths_with_roots(
+            &cwd, &config, &user_home, &hermes_home, &root,
+        );
+        let registry =
+            SkillRegistry::load_from_search_paths_with_config(&search_paths, &config, crate::config::DefconLevel::THREE);
+
+        assert!(
+            registry.find("root-curated-skill").is_some(),
+            "root-curated-skill must resolve via find()"
+        );
+        assert!(
+            registry.find("root-optional-skill").is_some(),
+            "root-optional-skill must resolve via find()"
+        );
+        assert!(
+            registry.find("profile-own-skill").is_some(),
+            "profile-own-skill must resolve via find()"
+        );
+
+        assert_eq!(
+            registry.find("root-curated-skill").unwrap().source,
+            SkillSource::Builtin,
+            "root skills-tree fixture must resolve to Builtin"
+        );
+        assert_eq!(
+            registry.find("root-optional-skill").unwrap().source,
+            SkillSource::Official,
+            "root optional-skills-tree fixture must resolve to Official"
+        );
+
+        let catalog =
+            registry.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
+        assert!(
+            catalog.contains("profile-own-skill"),
+            "profile-tree skill must render in full: {catalog}"
+        );
+        assert!(
+            !catalog.contains("root-curated-skill"),
+            "root skills-tree skill must NOT be individually enumerated: {catalog}"
+        );
+        assert!(
+            !catalog.contains("root-optional-skill"),
+            "root optional-skills-tree skill must NOT be individually enumerated: {catalog}"
+        );
+        assert!(
+            catalog.contains('2'),
+            "catalog must state elided count 2: {catalog}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 54.1 Task 2: D-12 disabled-skill catalog elision tests
+    // -------------------------------------------------------------------------
+
+    /// Shared fixture for the four `skills_disabled_catalog_d12_*` tests:
+    /// one priority root with two skills, `kept-skill` and `hidden-skill`.
+    /// Returns `(SkillsConfig with hidden-skill disabled, search_paths)`.
+    fn build_disabled_catalog_fixture(dir: &std::path::Path) -> (SkillsConfig, Vec<PathBuf>) {
+        let root = dir.join("root");
+        let kept_dir = root.join("kept-skill");
+        fs::create_dir_all(&kept_dir).unwrap();
+        fs::write(
+            kept_dir.join("SKILL.md"),
+            make_skill_md("kept-skill", "A skill that stays visible", ""),
+        )
+        .unwrap();
+
+        let hidden_dir = root.join("hidden-skill");
+        fs::create_dir_all(&hidden_dir).unwrap();
+        fs::write(
+            hidden_dir.join("SKILL.md"),
+            make_skill_md("hidden-skill", "A skill the operator disabled", ""),
+        )
+        .unwrap();
+
+        let config = SkillsConfig {
+            disabled: vec!["hidden-skill".to_string()],
+            catalog_priority_root_count: 1,
+            ..Default::default()
+        };
+        (config, vec![root])
+    }
+
+    #[test]
+    fn skills_disabled_catalog_d12_elides_disabled_skill_from_filtered_catalog() {
+        let dir = tempdir().unwrap();
+        let (config, search_paths) = build_disabled_catalog_fixture(dir.path());
+        let registry = SkillRegistry::load_from_search_paths_with_config(&search_paths, &config, crate::config::DefconLevel::THREE);
+
+        let catalog =
+            registry.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
+        assert!(
+            catalog.contains("kept-skill"),
+            "kept-skill must still render: {catalog}"
+        );
+        assert!(
+            !catalog.contains("hidden-skill"),
+            "disabled hidden-skill must be elided from the rendered catalog: {catalog}"
+        );
+    }
+
+    #[test]
+    fn skills_disabled_catalog_d12_disabled_skill_still_resolvable_by_find() {
+        let dir = tempdir().unwrap();
+        let (config, search_paths) = build_disabled_catalog_fixture(dir.path());
+        let registry = SkillRegistry::load_from_search_paths_with_config(&search_paths, &config, crate::config::DefconLevel::THREE);
+
+        assert!(
+            registry.find("hidden-skill").is_some(),
+            "disabled skill must still resolve via find()"
+        );
+        assert_eq!(
+            registry.list().len(),
+            2,
+            "disabled skill must remain in list() — hidden from render only"
+        );
+    }
+
+    #[test]
+    fn skills_disabled_catalog_d12_untiered_catalog_text_still_lists_disabled_skill() {
+        let dir = tempdir().unwrap();
+        let (config, search_paths) = build_disabled_catalog_fixture(dir.path());
+        let registry = SkillRegistry::load_from_search_paths_with_config(&search_paths, &config, crate::config::DefconLevel::THREE);
+
+        let untiered = registry.catalog_text();
+        assert!(
+            untiered.contains("hidden-skill"),
+            "untiered catalog_text() (the /skills command path) must still list the disabled skill: {untiered}"
+        );
+    }
+
+    #[test]
+    fn skills_disabled_catalog_d12_pure_render_reads_only_captured_field() {
+        let dir = tempdir().unwrap();
+        let (mut config, search_paths) = build_disabled_catalog_fixture(dir.path());
+        let registry = SkillRegistry::load_from_search_paths_with_config(&search_paths, &config, crate::config::DefconLevel::THREE);
+
+        let sentinel = "DISABLED_CATALOG_TEST_VAR_54_1";
+        assert!(
+            std::env::var_os(sentinel).is_none(),
+            "sentinel env var must not exist before test"
+        );
+        let first =
+            registry.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
+        assert!(
+            std::env::var_os(sentinel).is_none(),
+            "sentinel env var must not exist after filter call — filter must not touch env"
+        );
+        assert!(!first.contains("hidden-skill"));
+
+        // Mutate config AFTER the registry was built — the registry must be
+        // unaffected because disabled_names was captured once at load, not
+        // re-read from config on every render.
+        config.disabled.clear();
+        let second =
+            registry.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
+        assert_eq!(
+            first, second,
+            "mutating config.disabled after construction must not change the render — \
+             the disabled set must be a captured field, not re-read from config"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -4439,11 +4936,66 @@ Body.
         );
     }
 
+    /// Phase 57 Plan 02 (D-11): CR-01 enforcement follows the RESOLVED level.
+    /// A config whose only key is `security.defcon_level` (no `skills:` key)
+    /// must hard-reject the escaped skill at 2 and warn-but-load at 3.
+    #[cfg(unix)]
     #[test]
-    fn skills_config_default_defcon_is_five() {
-        use crate::config::SkillsConfig;
+    fn cr01_reads_effective_level() {
+        use crate::config::Config;
+        use std::io::Write;
+
+        let outside = tempfile::tempdir().unwrap();
+        let outside_skill_dir = outside.path().join("esc-skill");
+        std::fs::create_dir_all(&outside_skill_dir).unwrap();
+        let mut f = std::fs::File::create(outside_skill_dir.join("SKILL.md")).unwrap();
+        write!(
+            f,
+            "---
+name: esc-skill
+description: escapes its root
+---
+Body.
+"
+        )
+        .unwrap();
+        let skills_root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&outside_skill_dir, skills_root.path().join("esc-skill"))
+            .unwrap();
+        let roots = [skills_root.path().to_path_buf()];
+
+        let strict: Config = serde_yaml::from_str("security:\n  defcon_level: 2\n").unwrap();
+        let rejected = SkillRegistry::load_from_search_paths_with_config(
+            &roots,
+            &strict.skills,
+            strict.effective_defcon_level(),
+        );
+        assert!(
+            rejected.find("esc-skill").is_none(),
+            "security.defcon_level: 2 alone must hard-reject the escaped skill"
+        );
+
+        let relaxed: Config = serde_yaml::from_str("security:\n  defcon_level: 3\n").unwrap();
+        let loaded = SkillRegistry::load_from_search_paths_with_config(
+            &roots,
+            &relaxed.skills,
+            relaxed.effective_defcon_level(),
+        );
+        assert!(
+            loaded.find("esc-skill").is_some(),
+            "level 3 must warn-but-load"
+        );
+    }
+
+    #[test]
+    fn skills_config_default_defcon_is_unset() {
+        use crate::config::{Config, SkillsConfig};
         let cfg = SkillsConfig::default();
-        assert_eq!(cfg.defcon_level.level(), 5);
+        assert!(
+            cfg.defcon_level.is_none(),
+            "deprecated alias is unset by default"
+        );
+        assert_eq!(Config::default().effective_defcon_level().level(), 3);
     }
 
     /// Regression: a real skill (`qis-communication-jta`) failed to import

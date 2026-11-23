@@ -64,6 +64,7 @@ mod preflight;
 mod profile_migrate;
 mod provider_cmd;
 mod setup;
+mod sites_cmd;
 mod toolset_cmd;
 mod tui;
 mod vault_cmd;
@@ -323,6 +324,11 @@ enum Commands {
         #[command(subcommand)]
         action: mcp_config::McpAction,
     },
+    /// Show the site projects the bot can edit and deploy (D-20)
+    Sites {
+        #[command(subcommand)]
+        action: sites_cmd::SitesAction,
+    },
     /// Interactive first-run setup wizard (Phase 23, D-01/D-02).
     Setup {
         /// Section to configure: model, memory, gateway, tools (default: minimum-viable flow)
@@ -421,6 +427,12 @@ enum MemorySubcommand {
     Status,
     /// Disable external provider, keep built-in file memory (D-10).
     Off,
+    /// Permanently delete claims staged for forgetting (shows a dry run first).
+    Purge {
+        /// Show what would be deleted, then exit.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Backend selection per Phase 22.4 D-03 + D-04.
@@ -528,6 +540,9 @@ async fn register_kanban_tools_if_applicable(
     // shared factory. Registering twice on the same registry (HashMap insert
     // in ToolRegistry::register) is a harmless no-op overwrite, not an error.
     if worker_mode {
+        // Phase 54.10 D-09: same rationale for `report_publish` — an unwired tool
+        // is invisible to the kanban worker LLM (Pitfall 4).
+        registry.write().await.register_report_tool(config.clone());
         registry.write().await.register_artifact_tool(config);
     }
     Ok(())
@@ -1971,13 +1986,19 @@ async fn main() -> Result<()> {
     // `RUST_LOG` override — including an operator's `RUST_LOG=debug` — can
     // leak secrets to stderr/log files. Applied AFTER `RUST_LOG` is honored so
     // it always wins regardless of which arm above built the filter.
-    let env_filter = match std::env::var("RUST_LOG") {
-        Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
-        Err(_) if is_interactive_repl => tracing_subscriber::EnvFilter::new("error"),
-        Err(_) => tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("ironhermes=info".parse().unwrap()),
-    }
-    .add_directive("rusty_vault=off".parse().expect("valid static directive"));
+    //
+    // Phase 54.8 Plan 04 (D-08): a closure, not a value — `EnvFilter` is not
+    // `Clone`, and the gateway installs two layers (stdout + daily file) that
+    // each need their own filter built from the same rules.
+    let make_env_filter = || {
+        match std::env::var("RUST_LOG") {
+            Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
+            Err(_) if is_interactive_repl => tracing_subscriber::EnvFilter::new("error"),
+            Err(_) => tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("ironhermes=info".parse().unwrap()),
+        }
+        .add_directive("rusty_vault=off".parse().expect("valid static directive"))
+    };
     // Phase 36.8 (D-07 / Pitfall 1): the `acp` subcommand speaks JSON-RPC over stdout —
     // any tracing output there desyncs the client's NDJSON parser. This branch MUST be
     // evaluated before `will_use_ratatui_for_chat` below and MUST run before the first
@@ -1991,22 +2012,98 @@ async fn main() -> Result<()> {
     let is_chat_or_bare =
         matches!(&cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
     let will_use_ratatui_for_chat = is_chat_or_bare && !should_use_classic_tui(&cli);
+    // Phase 54.8 Plan 04 (D-08): held at main's top-level scope, before the
+    // dispatch `match`, so the non-blocking worker flushes its buffered lines
+    // when `main` returns. Dropping it earlier (an inner block) loses them.
+    let mut _gateway_log_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
+    let is_gateway_cmd = matches!(&cli.command, Some(Commands::Gateway { .. }));
     if is_acp {
         tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
+            .with_env_filter(make_env_filter())
             .with_writer(std::io::stderr) // D-07: stdout is protocol-only
             .with_target(false)
             .init();
     } else if !will_use_ratatui_for_chat {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_target(false)
-            .init();
+        use tracing_subscriber::prelude::*;
+        // Phase 54.8 Plan 04 (D-08): an unsupervised `ironhermes gateway` also
+        // writes an owner-only daily file `logs/gateway.log.YYYY-MM-DD`. When
+        // fd 1 is already the canonical `logs/gateway.log` (systemd, launchd,
+        // the watchdog and the container entrypoint all redirect there, 48.3
+        // D-06) the file layer is skipped so nothing is logged twice. Every
+        // other command keeps today's exact init.
+        let gateway_home = ironhermes_core::constants::get_hermes_home();
+        let mut file_layer_installed = false;
+        if is_gateway_cmd
+            && ironhermes_cli::gateway_log::should_install_file_layer(
+                ironhermes_cli::gateway_log::stdout_identity(),
+                &ironhermes_cli::gateway_log::canonical_gateway_log(&gateway_home),
+            )
+        {
+            match ironhermes_cli::gateway_log::build_file_writer(&gateway_home) {
+                Ok((writer, guard)) => {
+                    tracing_subscriber::registry()
+                        .with(
+                            tracing_subscriber::fmt::layer()
+                                .with_target(false)
+                                .with_filter(make_env_filter()),
+                        )
+                        .with(
+                            tracing_subscriber::fmt::layer()
+                                .with_writer(writer)
+                                .with_ansi(false)
+                                .with_target(false)
+                                .with_filter(make_env_filter()),
+                        )
+                        .init();
+                    _gateway_log_guard = Some(guard);
+                    file_layer_installed = true;
+                }
+                Err(e) => {
+                    // Includes the symlink / non-regular-file refusal. Fall
+                    // back to stdout only and say so; never a token.
+                    eprintln!(
+                        "gateway log file unavailable ({e}); logging to stdout only (logs dir: {})",
+                        gateway_home.join("logs").display()
+                    );
+                }
+            }
+        }
+        if !file_layer_installed {
+            tracing_subscriber::fmt()
+                .with_env_filter(make_env_filter())
+                .with_target(false)
+                .init();
+        }
+        if is_gateway_cmd {
+            let log_path = if file_layer_installed {
+                ironhermes_cli::gateway_log::current_day_log_path(&gateway_home)
+            } else {
+                ironhermes_cli::gateway_log::canonical_gateway_log(&gateway_home)
+            };
+            tracing::info!(
+                file_layer = file_layer_installed,
+                path = %log_path.display(),
+                "gateway logging configured"
+            );
+        }
     }
 
     // Phase 21.3: eagerly initialize tiktoken BPE tables to avoid ~100ms
     // latency on first token count.
     ironhermes_core::warm_tiktoken_singletons();
+
+    // Phase 57 D-02 / D-08 / OQ7: every agent-hosting or screening command boots the security
+    // sidecar ONCE, and the process default session level is fixed here, after the profile
+    // pivot of IRONHERMES_HOME and before any session exists. Config-only commands skip it.
+    if command_hosts_agent(&cli.command) {
+        let config = ironhermes_core::Config::load().unwrap_or_else(|e| {
+            eprintln!(
+                "warning: could not load config ({e:#}); using DEFCON 3 as the default level"
+            );
+            ironhermes_core::Config::default()
+        });
+        boot_security_for_cli(&config, cli_yolo_flag_for_boot(&cli));
+    }
 
     match cli.command {
         Some(Commands::Status(args)) => ironhermes_cli::status_cmd::run_status(args).await,
@@ -2022,6 +2119,8 @@ async fn main() -> Result<()> {
             // `cli.yolo` captures `hermes --yolo chat ...`; `chat_yolo` captures
             // `hermes chat --yolo ...`. Either path reaches the REPL with the
             // same effective state.
+            // (The flag itself is consumed once by `boot_security_for_cli` above; what is left
+            // here is the TUI's own `rata_cli.yolo` mirror field.)
             let cli_yolo_flag = cli.yolo || *chat_yolo;
             // Phase 36.3.7 (D-15): `chat -q/--query <PROMPT>` runs the same
             // non-interactive single-shot path as the top-level `-e/--execute`
@@ -2030,15 +2129,18 @@ async fn main() -> Result<()> {
             // the interactive REPL entirely. `-e` on the top-level still wins
             // when both are supplied to preserve back-compat for scripted callers.
             if let Some(prompt) = query.clone() {
-                return run_single(&cli, prompt, cli_yolo_flag, session_title.clone()).await;
+                return Box::pin(run_single(&cli, prompt, session_title.clone())).await;
             }
             // Phase 22.4 D-03/D-04: default to ratatui REPL; classic opt-out via
             // --classic-tui flag, IRONHERMES_CLASSIC_TUI=1 env var, or non-TTY.
             if should_use_classic_tui(&cli) {
-                run_chat(&cli, message.clone(), cli_yolo_flag).await
+                Box::pin(run_chat(&cli, message.clone())).await
             } else {
                 // Yolo banner fires BEFORE ratatui::init() so it lands in scrollback (D-18 item 11).
-                if cli_yolo_flag {
+                // Phase 57 D-08: it follows the process default level (the flag, the profile's
+                // configured level or a worker env), not only the flag.
+                let bypass_active = process_yolo_bypass_active();
+                if bypass_active {
                     ironhermes_cli::print_yolo_banner_to_stderr(true);
                 }
                 // D-03 (Phase 22.4): print_banner() fires BEFORE ratatui::init() so
@@ -2061,12 +2163,15 @@ async fn main() -> Result<()> {
                 ironhermes_cli::tui_rata::run_chat_ratatui(
                     &rata_cli,
                     message.clone(),
-                    cli_yolo_flag,
+                    bypass_active,
                 )
                 .await
             }
         }
-        Some(Commands::Gateway { ref token, .. }) => run_gateway(&cli, token.clone()).await,
+        // Boxed: keeps the large gateway future off the 8 MB main stack in debug builds.
+        Some(Commands::Gateway { ref token, .. }) => {
+            Box::pin(run_gateway(&cli, token.clone())).await
+        }
         Some(Commands::Acp) => run_acp_command(&cli).await,
         Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
         Some(Commands::Auth { command }) => auth_cmd::handle_auth_command(command).await,
@@ -2096,12 +2201,23 @@ async fn main() -> Result<()> {
         Some(Commands::Memory {
             action: MemorySubcommand::Off,
         }) => memory_cmd::handle_memory_off().await,
+        Some(Commands::Memory {
+            action: MemorySubcommand::Purge { dry_run },
+        }) => memory_cmd::handle_memory_purge(dry_run).await,
         Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
         Some(Commands::Pricing { command }) => {
             ironhermes_cli::pricing_cmd::handle_pricing_command(command).await
         }
         Some(Commands::Mcp { action }) => match mcp_config::handle_mcp_command(action).await {
             Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("{}: {}", "Error".red().bold(), e);
+                std::process::exit(1);
+            }
+        },
+        Some(Commands::Sites { action }) => match sites_cmd::run_sites(action) {
+            Ok(0) => Ok(()),
+            Ok(code) => std::process::exit(code),
             Err(e) => {
                 eprintln!("{}: {}", "Error".red().bold(), e);
                 std::process::exit(1);
@@ -2187,20 +2303,23 @@ async fn main() -> Result<()> {
         None => {
             if let Some(ref prompt) = cli.execute {
                 // Phase 21.7 Plan 08 (D-12): `-e` batch mode honors top-level
-                // `--yolo` only (no per-invocation subcommand). The config
-                // value is OR'd inside `run_single` via `resolve_yolo`.
+                // `--yolo` only (no per-invocation subcommand). Phase 57 D-08: the flag and
+                // the profile's configured level were folded into the process default
+                // level by `boot_security_for_cli` above, which `run_single` reads.
                 // Phase 50.2 Plan 02 (D-21): the top-level `-e` flag has no
                 // `--session` companion — session continuity is scoped to
                 // `chat -q --session`, the exact shape `run_bot_handoff`
                 // spawns; `-e` keeps its pre-50.2 fresh-uuid-per-call behavior.
-                run_single(&cli, prompt.clone(), cli.yolo, None).await
+                Box::pin(run_single(&cli, prompt.clone(), None)).await
             } else {
                 // Bare `hermes` -> default chat REPL (ratatui per D-03, classic fallback per D-04).
                 if should_use_classic_tui(&cli) {
-                    run_chat(&cli, None, cli.yolo).await
+                    Box::pin(run_chat(&cli, None)).await
                 } else {
                     // Yolo banner fires BEFORE ratatui::init() so it lands in scrollback (D-18 item 11).
-                    if cli.yolo {
+                    // Phase 57 D-08: it follows the process default level, not only the flag.
+                    let bypass_active = process_yolo_bypass_active();
+                    if bypass_active {
                         ironhermes_cli::print_yolo_banner_to_stderr(true);
                     }
                     // D-03 (Phase 22.4): print_banner() fires BEFORE ratatui::init() so
@@ -2220,16 +2339,175 @@ async fn main() -> Result<()> {
                         quiet: cli.quiet,
                         yolo: cli.yolo,
                     };
-                    ironhermes_cli::tui_rata::run_chat_ratatui(&rata_cli, None, cli.yolo).await
+                    ironhermes_cli::tui_rata::run_chat_ratatui(&rata_cli, None, bypass_active).await
                 }
             }
         }
     }
 }
 
+/// Whether this command hosts an agent or screens content, and so must boot the security
+/// sidecar (Phase 57 D-02, T-57-57 / T-57-69).
+///
+/// True for the REPL / ratatui / `-e` (no subcommand), `chat` (including the `chat -q` kanban
+/// worker), `gateway`, `acp`, `batch`, `cron tick`, `cron daemon` and `kanban dispatch`.
+/// Config-only and inspection commands do not spawn a sidecar. The match is deliberately
+/// exhaustive (no wildcard arm): a new subcommand will not compile until someone decides
+/// whether it hosts an agent.
+fn command_hosts_agent(cmd: &Option<Commands>) -> bool {
+    match cmd {
+        None => true,
+        Some(
+            Commands::Chat { .. }
+            | Commands::Gateway { .. }
+            | Commands::Acp
+            | Commands::Batch { .. },
+        ) => true,
+        Some(Commands::Cron { command }) => matches!(
+            command,
+            cron::CronCommands::Tick | cron::CronCommands::Daemon
+        ),
+        Some(Commands::Kanban { command, .. }) => {
+            matches!(command, kanban::KanbanCommands::Dispatch { .. })
+        }
+        Some(
+            Commands::Status(_)
+            | Commands::Doctor { .. }
+            | Commands::Version
+            | Commands::Auth { .. }
+            | Commands::Vault { .. }
+            | Commands::Web { .. }
+            | Commands::Skills { .. }
+            | Commands::Memory { .. }
+            | Commands::Models { .. }
+            | Commands::Pricing { .. }
+            | Commands::Mcp { .. }
+            | Commands::Sites { .. }
+            | Commands::Setup { .. }
+            | Commands::Config { .. }
+            | Commands::Toolset { .. }
+            | Commands::Provider { .. }
+            | Commands::Session { .. }
+            | Commands::Tts { .. }
+            | Commands::Stt { .. },
+        ) => false,
+        #[cfg(feature = "buzz")]
+        Some(Commands::Buzz { .. }) => false,
+    }
+}
+
+/// The `--yolo` flag as this process sees it (Phase 57 D-08): the top-level `--yolo` or
+/// `chat --yolo`. The gateway never honours it (D-12 / INV-21.7-05: the gateway reads its
+/// level from the profile config only, there is no per-process override from the command line).
+fn cli_yolo_flag_for_boot(cli: &Cli) -> bool {
+    match &cli.command {
+        Some(Commands::Gateway { .. }) => false,
+        Some(Commands::Chat { yolo, .. }) => cli.yolo || *yolo,
+        _ => cli.yolo,
+    }
+}
+
+/// Boot the security sidecar once for this process and fix the level that seeds every new
+/// session (Phase 57 D-02, D-08, research OQ7).
+///
+/// The level is the profile's effective level, or 5 for `--yolo`, tightened (never loosened) by
+/// a kanban worker's `IRONHERMES_DEFCON_LEVEL`. An invalid env value is ignored with a warning
+/// on stderr. Idempotent with the gateway runner's own boot (the service is process-global).
+fn boot_security_for_cli(config: &ironhermes_core::Config, cli_yolo_flag: bool) {
+    use ironhermes_security::service::{BootOptions, boot};
+
+    let _service = boot(&BootOptions::from_home(ironhermes_core::get_hermes_home()));
+    let worker_env = std::env::var(ironhermes_cli::WORKER_LEVEL_ENV).ok();
+    let (level, warning) = ironhermes_cli::resolve_session_default(
+        config.effective_defcon_level(),
+        cli_yolo_flag,
+        worker_env.as_deref(),
+    );
+    if let Some(warning) = warning {
+        eprintln!("warning: {warning}");
+    }
+    ironhermes_core::defcon::session_defcon().set_process_default(level);
+}
+
+/// Whether warn-class approvals are bypassed for sessions that start in this process: the flag
+/// the startup banner and (until Task 3 removes the argument) the CLI gate builders take.
+fn process_yolo_bypass_active() -> bool {
+    ironhermes_core::defcon::session_defcon()
+        .process_default()
+        .yolo_bypass_active()
+}
+
 // ---------------------------------------------------------------------------
 // Phase 36.17.5 Plan 04 — TTS CLI helper functions
 // ---------------------------------------------------------------------------
+
+/// Phase 54.7 (D-19): the registry `tts test` resolves providers from. Vault-aware so a
+/// `secret/voice/*` key reference on `tts.openai_compatible.api_key_ref` resolves here too.
+fn cli_tts_registry(config: &ironhermes_core::Config) -> ironhermes_core::TtsRegistry {
+    ironhermes_tools::tts::build_tts_registry_with_vault(
+        &config.tts,
+        ironhermes_core::voice_http::voice_vault_config(config),
+    )
+}
+
+/// Phase 54.7 (D-19): where `tts test` writes. An explicit path wins; otherwise
+/// `{audio_dir}/{uuid}.{ext}` with the extension from `tts::audio_format`.
+///
+/// `provider` is the provider `tts test` actually runs (WR-05): it can differ from
+/// `tts.provider`, and the file extension must follow the one that synthesizes.
+fn tts_test_output_path(
+    config: &ironhermes_core::Config,
+    provider: &str,
+    output_path: Option<String>,
+    audio_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    output_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            audio_dir.join(format!(
+                "{}.{}",
+                uuid::Uuid::new_v4(),
+                ironhermes_tools::tts::audio_format::extension_for_provider(&config.tts, provider)
+            ))
+        })
+}
+
+/// Phase 54.7 (D-19): the lines `stt info` prints — the selected provider (the shared
+/// `select_stt_provider` order: openai_compatible > groq > openai), then one line per
+/// built-in provider with its availability from the vault-aware registry.
+fn stt_info_lines(config: &ironhermes_core::Config) -> Vec<String> {
+    use ironhermes_core::BUILTIN_STT_NAMES;
+    use ironhermes_tools::stt::{build_stt_registry_with_vault, select_stt_provider};
+
+    let selected = select_stt_provider(&config.stt);
+    let registry = build_stt_registry_with_vault(
+        &config.stt,
+        ironhermes_core::voice_http::voice_vault_config(config),
+    );
+
+    let mut lines = vec![format!(
+        "STT provider selected: {}",
+        selected.as_deref().unwrap_or(
+            "<none — set GROQ_API_KEY or VOICE_TOOLS_OPENAI_KEY, or stt.openai_compatible.base_url>"
+        )
+    )];
+    for name in BUILTIN_STT_NAMES {
+        let available = registry
+            .get(name)
+            .map(|p| p.is_available())
+            .unwrap_or(false);
+        lines.push(format!(
+            "  {} — {}",
+            name,
+            if available {
+                "available"
+            } else {
+                "unavailable"
+            }
+        ));
+    }
+    lines
+}
 
 /// `hermes tts test` — synthesize a phrase via a named TTS provider and print
 /// the output path on stdout. Used by the UAT script for Gates 1, 2, and 3.
@@ -2242,7 +2520,6 @@ async fn cmd_tts_test(
     output_path: Option<String>,
 ) -> anyhow::Result<()> {
     use ironhermes_core::BUILTIN_TTS_NAMES;
-    use ironhermes_tools::tts::build_tts_registry;
 
     // msedge-tts uses rustls 0.23 + aws-lc-rs for its WebSocket TLS connection.
     // The process-level CryptoProvider must be installed before the first TLS call.
@@ -2252,8 +2529,8 @@ async fn cmd_tts_test(
     // 1. Load config (mirrors pattern used by other simple subcommands in main.rs).
     let config = ironhermes_core::Config::load().unwrap_or_default();
 
-    // 2. Build registry with both built-in providers.
-    let registry = build_tts_registry(&config.tts);
+    // 2. Build the vault-aware registry with every built-in provider (D-19).
+    let registry = cli_tts_registry(&config);
 
     // 3. Resolve the requested provider by name.
     let provider_arc = registry.get(&provider).ok_or_else(|| {
@@ -2272,14 +2549,13 @@ async fn cmd_tts_test(
         );
     }
 
-    // 5. Resolve output path — default to $IRONHERMES_HOME/audio_cache/<uuid>.mp3.
+    // 5. Resolve output path — default to $IRONHERMES_HOME/audio_cache/<uuid>.<ext>, the
+    //    extension following the provider's audio format (D-19).
     let audio_dir = ironhermes_core::get_hermes_home().join("audio_cache");
     std::fs::create_dir_all(&audio_dir)
         .map_err(|e| anyhow::anyhow!("Failed to create audio_cache dir {:?}: {e}", audio_dir))?;
 
-    let path = output_path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| audio_dir.join(format!("{}.mp3", uuid::Uuid::new_v4())));
+    let path = tts_test_output_path(&config, provider_arc.name(), output_path, &audio_dir);
 
     // 6. Synthesize.
     let written = provider_arc.synthesize(&text, &path).await?;
@@ -2318,40 +2594,14 @@ async fn cmd_tts_play(path: String) -> anyhow::Result<()> {
 
 /// Phase 36.17.8 — `hermes stt info` diagnostic subcommand.
 ///
-/// Calls `build_stt_registry` directly (NOT an LLM tool) and prints the
-/// selected provider name.  This satisfies the acceptance criterion that
-/// `main.rs` contains `build_stt_registry` (plan 36.17.8-05 Task 3).
+/// Builds the registry through `build_stt_registry_with_vault` (see
+/// [`stt_info_lines`]; NOT an LLM tool) and prints the selected provider name and
+/// each provider's availability.
 async fn cmd_stt_info() -> anyhow::Result<()> {
-    use ironhermes_core::BUILTIN_STT_NAMES;
-    use ironhermes_tools::stt::{build_stt_registry, select_stt_provider};
-
     let config = ironhermes_core::Config::load().unwrap_or_default();
-    let selected = select_stt_provider(&config.stt);
-    let registry = build_stt_registry(&config.stt);
-
-    println!(
-        "STT provider selected: {}",
-        selected
-            .as_deref()
-            .unwrap_or("<none — set GROQ_API_KEY or VOICE_TOOLS_OPENAI_KEY>")
-    );
-
-    for name in BUILTIN_STT_NAMES {
-        let available = registry
-            .get(name)
-            .map(|p| p.is_available())
-            .unwrap_or(false);
-        println!(
-            "  {} — {}",
-            name,
-            if available {
-                "available"
-            } else {
-                "unavailable"
-            }
-        );
+    for line in stt_info_lines(&config) {
+        println!("{line}");
     }
-
     Ok(())
 }
 
@@ -2890,12 +3140,7 @@ fn seed_history_messages(
 }
 
 /// Run a single prompt and exit.
-async fn run_single(
-    cli: &Cli,
-    prompt: String,
-    cli_yolo_flag: bool,
-    session_title: Option<String>,
-) -> Result<()> {
+async fn run_single(cli: &Cli, prompt: String, session_title: Option<String>) -> Result<()> {
     let (client, mut config, resolver) = build_client(cli).await?;
 
     // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
@@ -2920,11 +3165,12 @@ async fn run_single(
             config.agent.max_iterations = clamped;
         }
     }
-    // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo from CLI + config,
-    // print the banner ONCE per session. `run_single` is batch mode — a single
-    // `-e "prompt"` invocation — so "per session" means "per process".
-    let (yolo_enabled, _yolo_source) =
-        ironhermes_cli::resolve_yolo(cli_yolo_flag, config.autonomous.yolo);
+    // Phase 21.7 Plan 08 (D-11 / D-12 / D-14), Phase 57 D-08: the banner follows the process
+    // default level `boot_security_for_cli` fixed at startup (the `--yolo` flag, the profile's
+    // configured level, or a kanban worker's tightened level), printed ONCE per session.
+    // `run_single` is batch mode — a single `-e "prompt"` invocation — so "per session"
+    // means "per process".
+    let yolo_enabled = process_yolo_bypass_active();
     ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
     // Phase 36.3.12 Plan 10 (WR-01): load ApprovalsStore ONCE for the process
@@ -3063,8 +3309,14 @@ async fn run_single(
 
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
+    // One-shot turn: the per-turn security-level line is fresh. Key = the
+    // `session_id` handed to `build_gated_terminal_intercept` below. (run_chat
+    // and the TUI freeze their system message at session start, so a level
+    // line there would go stale after `/yolo`; their slash output already
+    // reaches the model history.)
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .with_provider(&config.model.provider)
+        .with_defcon_session(session_id.clone())
         .load_context(&cwd);
     // Phase 25.3 D-W-2: inject the resolved workspace root into the prompt so
     // PromptSlot::Identity (or whichever slot the builder uses for the workspace
@@ -3249,7 +3501,19 @@ async fn run_single(
     // and the post-loop `runtime.registry()` consumer (line ~1141) can
     // share ownership without taking either by value.
     let runtime_handle = std::sync::Arc::new(runtime);
-    let result = if worker_mode {
+    // 49.8-11 (D-10/D-16): the seam owns the future, and the future IS the
+    // whole session — one dispatch (a single turn, or the kanban goal loop)
+    // IS run_single's entire session, so "after the dispatch" and "at
+    // session end" are the same point. A `?` inside this async block
+    // returns from the block, never from run_single: this closes the
+    // verifier's gap by construction for every dispatch `?` below AND for
+    // the worker-mode setup `?`s that used to run before the goal loop
+    // (kanban worker: the process exits right after run_single returns, so
+    // awaiting the stop here — rather than a fire-and-forget spawn — is
+    // what guarantees it actually runs before exit).
+    let (turn_outcome, ros2_report): (anyhow::Result<ironhermes_agent::AgentResult>, String) =
+        ironhermes_tools::ros2::with_session_end_stop(runtime_handle.registry(), async {
+    if worker_mode {
         // Build the kanban + judge inputs for the wrapper.
         let kanban_config = crate::kanban::commands::load_kanban_config(&config);
         let judge_fn = crate::kanban::commands::build_runtime_judge_fn(&kanban_config, &config)
@@ -3356,6 +3620,12 @@ async fn run_single(
                         }),
                         // Phase 45 D-11: Local worker surface — no approval gate.
                         approval_gate: None,
+                        // Phase 54.3 D-03: flush-time yolo-bypass notice target ONLY —
+                        // it does not make the gate consultable for approval.
+                        yolo_notifier: Some(std::sync::Arc::new(
+                            ironhermes_cli::approval_gate::CliApprovalGate::from_shared(
+                                approvals.clone()),
+                        )),
                         // Phase 36.3.12 D-08/D-10: gate the LLM's terminal/execute_code
                         // calls through the same chokepoint every other surface uses —
                         // this worker-mode path was one of the four ungated local sites.
@@ -3365,7 +3635,6 @@ async fn run_single(
                             session_id.clone(),
                             "cli-worker",
                             session_id.clone(),
-                            yolo_enabled,
                             approvals.clone(),
                         )),
                         execute_code_intercept: Some(build_gated_execute_code_intercept(
@@ -3374,7 +3643,6 @@ async fn run_single(
                             session_id.clone(),
                             "cli-worker",
                             session_id.clone(),
-                            yolo_enabled,
                             approvals.clone(),
                         )),
                     };
@@ -3428,7 +3696,9 @@ async fn run_single(
         // "wrapper drove the session" shape — turns_used is left at the
         // wrapper-tracked count via best-available approximation (the
         // bumped counter on the DB is the canonical record).
-        ironhermes_agent::AgentResult::budget_exhausted(Vec::new(), 0)
+        Ok::<ironhermes_agent::AgentResult, anyhow::Error>(
+            ironhermes_agent::AgentResult::budget_exhausted(Vec::new(), 0),
+        )
     } else {
         // Non-worker mode: untouched chat -q semantics.
         let request = ironhermes_agent::TurnRequest {
@@ -3468,6 +3738,12 @@ async fn run_single(
             }),
             // Phase 45 D-11: Local single-shot surface — no approval gate.
             approval_gate: None,
+            // Phase 54.3 D-03: flush-time yolo-bypass notice target ONLY — it does
+            // not make the gate consultable for approval.
+            yolo_notifier: Some(std::sync::Arc::new(
+                ironhermes_cli::approval_gate::CliApprovalGate::from_shared(
+                    approvals_store.clone()),
+            )),
             // Phase 36.3.12 D-08/D-10: gate the LLM's terminal/execute_code calls —
             // this single-shot `chat -q` path was one of the four ungated local sites.
             terminal_intercept: Some(build_gated_terminal_intercept(
@@ -3476,7 +3752,6 @@ async fn run_single(
                 session_id.clone(),
                 "cli-single",
                 session_id.clone(),
-                yolo_enabled,
                 approvals_store.clone(),
             )),
             execute_code_intercept: Some(build_gated_execute_code_intercept(
@@ -3485,12 +3760,16 @@ async fn run_single(
                 session_id.clone(),
                 "cli-single",
                 session_id.clone(),
-                yolo_enabled,
                 approvals_store.clone(),
             )),
         };
-        runtime_handle.run_turn(request).await?
-    };
+        runtime_handle.run_turn(request).await
+    }
+        })
+        .await;
+    if ros2_report != "nothing to stop" {
+        tracing::info!(report = %ros2_report, "run_single: ros2 session-end stop");
+    }
 
     // Phase 34a MEM-READ-05: flush scrubber tail (emits held partial-tag if stream ended
     // mid-tag and it proved to not be a memory-context tag).
@@ -3503,8 +3782,14 @@ async fn run_single(
     // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
     // Warnings are NOT embedded in the model-bound message text; each surface renders
     // them separately so the user sees them without the model echoing them.
-    if !result.context_warnings.is_empty() {
-        let warning_lines: Vec<String> = result
+    // 49.8-11: reads from turn_outcome.as_ref() — there is no unwrapped
+    // `result` binding yet at this point in the (now unconditional) tail
+    // cleanup, so success-path stdout stays byte-for-byte unchanged and an
+    // errored turn simply has no warnings to render.
+    if let Ok(turn_result) = turn_outcome.as_ref()
+        && !turn_result.context_warnings.is_empty()
+    {
+        let warning_lines: Vec<String> = turn_result
             .context_warnings
             .iter()
             .map(|w| format!("- {}", w))
@@ -3523,8 +3808,7 @@ async fn run_single(
         .write()
         .await
         .drain_and_kill_session(&session_id)
-        .await
-    {
+        .await {
         tracing::warn!(
             error = %e,
             "process_registry drain_and_kill_session failed in run_single (best-effort)"
@@ -3566,6 +3850,16 @@ async fn run_single(
         .read()
         .await
         .call_session_end_hooks();
+
+    // 49.8-11 (D-10/D-16): the seam (with_session_end_stop) already ran the
+    // awaited, bounded stop above — before call_session_end_hooks() even
+    // ran — so it must not run a second time here. Only NOW, after every
+    // unconditional cleanup step above (scrubber flush, context-warnings,
+    // drain_and_kill_session, the 200ms transcript drain, the memory hook,
+    // and the D-07 all-tools hook) has run, is turn_outcome unwrapped with
+    // `?` — the error path is otherwise unchanged: the session is not
+    // marked completed, and the same error propagates to `main`.
+    let result = turn_outcome?;
 
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
@@ -3719,7 +4013,7 @@ fn count_invalid_skipped(
 }
 
 /// Run interactive chat mode.
-async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: bool) -> Result<()> {
+async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     print_banner();
     // GAP-5: force banner to hit the terminal BEFORE any async MCP startup
     // message can interleave on stderr. Without this flush, the stdout buffer
@@ -3753,12 +4047,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         }
     }
 
-    // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo + emit the
-    // bold-red stderr banner ONCE per REPL session before we enter the
-    // main loop. CLI flag wins over config; gateway reads config only
-    // (see run_gateway below and INV-21.7-05).
-    let (yolo_enabled, _yolo_source) =
-        ironhermes_cli::resolve_yolo(cli_yolo_flag, config.autonomous.yolo);
+    // Phase 21.7 Plan 08 (D-11 / D-12 / D-14), Phase 57 D-08: emit the bold-red stderr banner
+    // ONCE per REPL session before we enter the main loop, when the process default level
+    // (fixed by `boot_security_for_cli`: `--yolo` wins over the profile's configured level)
+    // bypasses warn-class approvals. The gateway reads config only (see run_gateway below
+    // and INV-21.7-05).
+    let yolo_enabled = process_yolo_bypass_active();
     ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
     // Phase 36.3.12 Plan 10 (WR-01): load ApprovalsStore ONCE for the process
@@ -4136,6 +4430,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // spawn site above; `repl_input` and `external_printer` are already
     // live here.
 
+    // 49.8-11 (D-10/D-16): run_chat is multi-turn, so it cannot route
+    // through with_session_end_stop (Task 1) the way run_single does —
+    // that would cancel every in-flight Nav2 goal at every turn boundary
+    // instead of only at the real session end. Instead, both turn sites
+    // below (the initial message and every REPL turn) capture a fatal
+    // error into this slot instead of `?`-returning past the D-07
+    // all-tools hook and the awaited ros2 stop; it is returned only after
+    // that cleanup runs, mirroring tui_rata/event_loop.rs's
+    // capture-then-cleanup shape.
+    let mut fatal_turn_error: Option<anyhow::Error> = None;
+
     // Handle initial message if provided
     if let Some(msg) = initial_message {
         let user_msg = ChatMessage::user(&msg);
@@ -4145,7 +4450,10 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
             .add_message(&session_id, &user_msg);
         messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
-        let response = run_agent_turn(
+        // 49.8-11 (D-10/D-16): capture the turn's error into fatal_turn_error
+        // instead of `?`-returning past the D-07 hook and the ros2 stop
+        // below — nothing is persisted or printed for an errored turn.
+        let response = match run_agent_turn(
             &runtime,
             &mut messages,
             &session_id,
@@ -4156,10 +4464,16 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
             state_store.clone(),       // Phase 25: session_search intercept
             trajectory_writer.clone(), // Phase 25.3 D-T-3
             None,                      // Phase 39.2 Plan 04: no TurnRegistry entry for -q mode
-            yolo_enabled,              // Phase 36.3.12 D-08: gated terminal/execute_code intercepts
             approvals_store.clone(), // Phase 36.3.12 Plan 10 (WR-01): shared process-lifetime store
         )
-        .await?;
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                fatal_turn_error = Some(e);
+                None
+            }
+        };
         // Persist assistant response
         if let Some(ref text) = response {
             let assistant_msg = ChatMessage::assistant(text);
@@ -4203,6 +4517,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     let mut turns_since_nudge: u32 = 0;
 
     loop {
+        // 49.8-11 (D-10/D-16): an initial-message turn error already stored
+        // itself in fatal_turn_error above — skip the REPL entirely and go
+        // straight to the shared teardown (which returns it after cleanup).
+        // A REPL-turn error (below) breaks here on the loop's NEXT
+        // iteration via the same check.
+        if fatal_turn_error.is_some() {
+            break;
+        }
         // Phase 22.1 D-05: pre-readline keybinding check for Idle/Always bindings.
         // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
         // already buffered. Only modifier-key combos (Ctrl+X, Alt+X) should be
@@ -4609,7 +4931,6 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     state_store.clone(), // Phase 25: session_search intercept
                     trajectory_writer.clone(), // Phase 25.3 D-T-3
                     Some(cli_turn_id),   // Phase 39.2 Plan 04: TurnRegistry UUID for bb correlation
-                    yolo_enabled, // Phase 36.3.12 D-08: gated terminal/execute_code intercepts
                     approvals_store.clone(), // Phase 36.3.12 Plan 10 (WR-01): shared process-lifetime store
                 ));
 
@@ -4917,7 +5238,22 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                             );
                             continue 'turn;
                         }
-                        r = &mut run_fut => { break 'turn r?; }
+                        r = &mut run_fut => {
+                            // 49.8-11 (D-10/D-16): capture the turn's error
+                            // instead of `?`-returning past the D-07 hook
+                            // and the ros2 stop below — the cancelled-path
+                            // value (None) is reused so drop(run_fut), the
+                            // deregister, the permit drops and
+                            // drain_buffered all still run unchanged before
+                            // the outer loop-top check exits.
+                            match r {
+                                Ok(v) => break 'turn v,
+                                Err(e) => {
+                                    fatal_turn_error = Some(e);
+                                    break 'turn None;
+                                }
+                            }
+                        }
                     }
                 };
 
@@ -5088,6 +5424,25 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
     registry.read().await.call_session_end_hooks();
 
+    // 49.8-08 (D-10/D-16): natural REPL exit is a real session boundary —
+    // stop the robot and cancel any goals. Awaited, and bounded by
+    // end_session_stop's own session-end timeout (see
+    // ironhermes_tools::ros2::session), so an unreachable bridge can never
+    // wedge REPL exit.
+    let ros2_report = ironhermes_tools::ros2::end_session_stop(&registry).await;
+    if ros2_report != "nothing to stop" {
+        tracing::info!(report = %ros2_report, "run_chat: ros2 session-end stop");
+    }
+
+    // 49.8-11 (D-10/D-16): a turn error is returned only NOW, after TUI
+    // shutdown, the process drain, the memory hook, the D-07 all-tools hook
+    // and the awaited ros2 stop above have all run. The session is not
+    // marked completed on this path — matches the pre-49.8-11 error
+    // semantics, just moved past the cleanup instead of skipping it.
+    if let Some(e) = fatal_turn_error {
+        return Err(e);
+    }
+
     state_store
         .lock()
         .unwrap()
@@ -5123,7 +5478,6 @@ async fn run_agent_turn(
     state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>, // Phase 25: session_search intercept
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>, // Phase 25.3 D-T-3
     cli_turn_id: Option<uuid::Uuid>, // Phase 39.2 Plan 04: TurnRegistry UUID for bb correlation
-    yolo: bool, // Phase 36.3.12 D-08: effective yolo flag for the gated terminal/execute_code intercepts
     approvals: std::sync::Arc<ironhermes_core::ApprovalsStore>, // Phase 36.3.12 Plan 10 (WR-01): process-lifetime store, shared across every REPL turn
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the TurnRequest's compression_count from the shared
@@ -5208,6 +5562,12 @@ async fn run_agent_turn(
         }),
         // Phase 45 D-11: Local REPL surface — no approval gate.
         approval_gate: None,
+        // Phase 54.3 D-03: flush-time yolo-bypass notice target ONLY — it does not
+        // make the gate consultable for approval.
+        yolo_notifier: Some(std::sync::Arc::new(
+            ironhermes_cli::approval_gate::CliApprovalGate::from_shared(
+                approvals.clone()),
+        )),
         // Phase 36.3.12 D-08/D-10: gate the LLM's terminal/execute_code calls —
         // this REPL turn path was one of the four ungated local sites.
         terminal_intercept: Some(build_gated_terminal_intercept(
@@ -5216,7 +5576,6 @@ async fn run_agent_turn(
             session_id.to_string(),
             "cli-repl",
             session_id.to_string(),
-            yolo,
             approvals.clone(),
         )),
         execute_code_intercept: Some(build_gated_execute_code_intercept(
@@ -5225,7 +5584,6 @@ async fn run_agent_turn(
             session_id.to_string(),
             "cli-repl",
             session_id.to_string(),
-            yolo,
             approvals.clone(),
         )),
     };
@@ -5297,11 +5655,11 @@ async fn run_acp_command(cli: &Cli) -> Result<()> {
 
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config, resolver) = build_client(cli).await?;
-    // Phase 21.7 Plan 08 (D-12 / INV-21.7-05): gateway reads yolo from the
-    // on-disk config ONLY. NO per-request field, NO CLI flag — the clap
-    // `Gateway` variant intentionally omits `--yolo`. `resolve_yolo(false, ...)`
-    // locks the flag source to `"config"` when enabled.
-    let (yolo_enabled, _yolo_source) = ironhermes_cli::resolve_yolo(false, config.autonomous.yolo);
+    // Phase 21.7 Plan 08 (D-12 / INV-21.7-05), Phase 57 D-08: the gateway's level comes from the
+    // on-disk config ONLY. NO per-request field, NO CLI flag — the clap `Gateway` variant
+    // intentionally omits `--yolo`, and `cli_yolo_flag_for_boot` passes `false` for it, so the
+    // process default `boot_security_for_cli` fixed is the profile's configured level.
+    let yolo_enabled = process_yolo_bypass_active();
     ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
     // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at gateway startup
@@ -6420,6 +6778,54 @@ mod nf1_rusty_vault_log_silence_46_8_gap {
     }
 }
 
+/// Phase 54.8 Plan 04 (D-08): source-shape pin for the Gateway subscriber wiring.
+/// The behavioral proof is the real-binary pair in `tests/gateway_log_file.rs`;
+/// this guards the one thing a subprocess cannot see: that the `WorkerGuard`
+/// lives in `main`'s own scope, not an inner block that ends before dispatch.
+/// Needles are assembled from fragments so this test's own source never matches.
+#[cfg(test)]
+mod gateway_log_wiring_54_8_04 {
+    #[test]
+    fn gateway_arm_installs_the_file_layer() {
+        let source = include_str!("main.rs");
+        let guard_decl = ["let mut _gateway", "_log_guard"].concat();
+        let call = ["gateway_log", "::should_install_file_layer("].concat();
+        let gateway_variant = ["Commands", "::Gateway"].concat();
+        let dispatch = ["\n    match cli", ".command {\n"].concat();
+        let startup_line = ["gateway logging", " configured"].concat();
+
+        let guard_idx = source
+            .find(&guard_decl)
+            .expect("main.rs must bind the gateway log guard");
+        assert!(
+            source[..guard_idx].ends_with("\n    "),
+            "the guard must be declared at main's top-level scope (4-space indent), \
+             not inside an inner block that ends before dispatch"
+        );
+        let dispatch_idx = guard_idx
+            + source[guard_idx..]
+                .find(&dispatch)
+                .expect("the dispatch match must follow the guard declaration");
+        let region = &source[guard_idx..dispatch_idx];
+        assert!(
+            region.contains(&call),
+            "the subscriber install between the guard and the dispatch must call should_install_file_layer"
+        );
+        assert!(
+            region.contains(&gateway_variant),
+            "the file layer must be keyed on the Gateway command"
+        );
+        assert!(
+            region.contains(&["_gateway", "_log_guard = Some("].concat()),
+            "the writer guard must be stored in the top-level binding"
+        );
+        assert!(
+            region.contains(&startup_line),
+            "the startup line must be emitted in both the file and the skip branch"
+        );
+    }
+}
+
 /// Phase 50.2 Plan 02 (D-21): tests for the `--session <title>` resolve-or-create
 /// primitive, its title-namespace validator, and the pure history-seeding
 /// assembly. Module name is the `session_title` nextest filter target.
@@ -7487,5 +7893,191 @@ mod session_continuity_tests {
             "ASSERTION 4 (dedupe wrong): the room-prompt wrapper must appear EXACTLY ONCE \
              across the assembled vector's texts. Got: {seeded_texts:?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 54.7 Plan 09 — CLI voice diagnostics see the OpenAI-compatible providers (D-19)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod voice_surface_tests {
+    use super::*;
+
+    /// Serialises the tests below: `stt info` reads provider key variables from the process
+    /// environment, which these tests clear and restore.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Clears the named variables and restores their previous values on drop, even on panic.
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn clear(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|n| (*n, std::env::var_os(n)))
+                .collect::<Vec<_>>();
+            for n in names {
+                // SAFETY: serialised by `env_lock`, restored on drop.
+                unsafe { std::env::remove_var(n) };
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (n, v) in self.0.drain(..) {
+                // SAFETY: serialised by `env_lock`.
+                unsafe {
+                    match v {
+                        Some(v) => std::env::set_var(n, v),
+                        None => std::env::remove_var(n),
+                    }
+                }
+            }
+        }
+    }
+
+    fn oc_tts_config(format: &str) -> ironhermes_core::Config {
+        let mut config = ironhermes_core::Config::default();
+        config.tts.provider = "openai_compatible".to_string();
+        config.tts.openai_compatible.base_url = "http://localhost:8880/v1".to_string();
+        config.tts.openai_compatible.format = format.to_string();
+        config
+    }
+
+    #[test]
+    fn cli_tts_registry_registers_openai_compatible() {
+        let config = oc_tts_config("mp3");
+        let registry = cli_tts_registry(&config);
+        let provider = registry
+            .get("openai_compatible")
+            .expect("openai_compatible must be registered for `tts test`");
+        assert!(
+            provider.is_available(),
+            "a base_url makes openai_compatible available (keyless servers are valid)"
+        );
+    }
+
+    #[test]
+    fn tts_test_default_path_uses_audio_format() {
+        let config = oc_tts_config("wav");
+        let dir = std::path::Path::new("/tmp/audio_cache_for_test");
+        let path = tts_test_output_path(&config, "openai_compatible", None, dir);
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("wav"));
+        assert!(
+            path.starts_with(dir),
+            "default path lives under the audio dir"
+        );
+
+        let explicit = tts_test_output_path(
+            &config,
+            "openai_compatible",
+            Some("/tmp/out.bin".to_string()),
+            dir,
+        );
+        assert_eq!(explicit, std::path::PathBuf::from("/tmp/out.bin"));
+    }
+
+    /// WR-05: `tts test --provider elevenlabs` while `tts.provider` is a WAV
+    /// openai_compatible server must name the file for ElevenLabs (MP3).
+    #[test]
+    fn tts_test_path_follows_the_requested_provider() {
+        let config = oc_tts_config("wav");
+        let dir = std::path::Path::new("/tmp/audio_cache_for_test");
+        let path = tts_test_output_path(&config, "elevenlabs", None, dir);
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("mp3"));
+    }
+
+    #[test]
+    fn stt_info_lines_list_openai_compatible() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvRestore::clear(&["GROQ_API_KEY", "VOICE_TOOLS_OPENAI_KEY"]);
+
+        let mut config = ironhermes_core::Config::default();
+        config.stt.provider = "auto".to_string();
+        config.stt.openai_compatible.base_url = "http://localhost:8178".to_string();
+        let lines = stt_info_lines(&config);
+
+        assert!(
+            lines.iter().any(|l| l.contains("openai_compatible")
+                && l.contains("available")
+                && !l.contains("unavailable")),
+            "openai_compatible must be listed as available: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("selected") && l.contains("openai_compatible")),
+            "the selected-provider line must name openai_compatible: {lines:?}"
+        );
+
+        config.stt.openai_compatible.base_url.clear();
+        let lines = stt_info_lines(&config);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("openai_compatible") && l.contains("unavailable")),
+            "without a base_url openai_compatible is unavailable: {lines:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 57 plan 13 (D-02, T-57-57 / T-57-69): which CLI commands boot the sidecar
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod cli_boot_tests {
+    use super::*;
+
+    fn hosts(args: &[&str]) -> bool {
+        let mut argv = vec!["ironhermes"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
+        command_hosts_agent(&cli.command)
+    }
+
+    /// D-02: every agent-hosting or screening command boots the sidecar once;
+    /// config-only commands never spawn one (a sidecar per `ironhermes config show`
+    /// would be a needless process, T-57-57).
+    #[test]
+    fn cli_boot_only_for_agent_hosting() {
+        let hosting: &[&[&str]] = &[
+            &[],                                 // REPL / ratatui
+            &["-e", "say hi"],                   // single-shot `-e`
+            &["chat"],                           // REPL
+            &["chat", "-q", "work kanban task"], // the kanban worker shape
+            &["gateway"],
+            &["acp"],
+            &["batch", "run", "prompts.jsonl"],
+            &["cron", "tick"],
+            &["cron", "daemon"],
+            &["kanban", "dispatch"],
+        ];
+        for args in hosting {
+            assert!(
+                hosts(args),
+                "{args:?} hosts an agent and must boot the sidecar"
+            );
+        }
+        let not_hosting: &[&[&str]] = &[
+            &["doctor"],
+            &["version"],
+            &["status"],
+            &["config", "show"],
+            &["toolset", "list"],
+            &["cron", "list"],
+            &["kanban", "stats"],
+        ];
+        for args in not_hosting {
+            assert!(
+                !hosts(args),
+                "{args:?} is config/inspection only and must not spawn a sidecar"
+            );
+        }
     }
 }

@@ -1,3 +1,8 @@
+use ironhermes_core::audit::{AuditConfig, AuditLog};
+use ironhermes_core::content_screen::{
+    ContentKind, ContentScreen, ContentScreenRequest, ScreenVerdict,
+};
+use ironhermes_core::context_scanner::{SECURITY_VERDICT_KIND, SIDECAR_UNAVAILABLE_KIND};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -149,10 +154,13 @@ pub fn validate_prm_issuer(issuer_url: &str, allowed: &[String]) -> anyhow::Resu
 ///
 /// Replaces all credential matches with `[REDACTED]`.
 /// Matches hermes-agent's `_sanitize_error()`.
+///
+/// 54.8-16 (T-54.8-49): also applies [`crate::oauth_redact::redact_oauth_params`],
+/// so an OAuth `code`/`state` (or token parameter) quoted in an exchange error —
+/// which `CREDENTIAL_PATTERN` has no arm for — never survives sanitization.
 pub fn sanitize_error(text: &str) -> String {
-    CREDENTIAL_PATTERN
-        .replace_all(text, "[REDACTED]")
-        .into_owned()
+    let credentials_masked = CREDENTIAL_PATTERN.replace_all(text, "[REDACTED]");
+    crate::oauth_redact::redact_oauth_params(&credentials_masked).into_owned()
 }
 
 /// Fixed markers a `run_server_task` failure reason carries when the failure
@@ -261,6 +269,426 @@ pub fn validate_web_redirect_base(base: &str) -> Result<String, String> {
     }
 
     Ok(parsed.origin().ascii_serialization())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 57 plan 08 (D-04c / D-04d / D-12): sidecar screening of MCP servers.
+// ---------------------------------------------------------------------------
+
+/// `AuditEntry::tool` of MCP server-configuration screening rows.
+pub const MCP_CONFIG_TOOL: &str = "mcp_config";
+/// `AuditEntry::tool` of MCP endpoint-URL screening rows.
+pub const MCP_ENDPOINT_TOOL: &str = "mcp_endpoint";
+/// The file name the sidecar sees for a rendered server config. tirith's MCP rules
+/// key on this name (research OQ6, probed positive in `context_and_mcp_probe.rs`).
+pub const MCP_CONFIG_SCREEN_NAME: &str = "mcp.json";
+
+/// The audit log rows are appended to. Tests redirect it to a private temp file.
+fn audit_log() -> AuditLog {
+    #[cfg(test)]
+    if let Some(path) = test_support::audit_path_override() {
+        return AuditLog::with_path(path, AuditConfig::default());
+    }
+    AuditLog::load(AuditConfig::default())
+}
+
+/// Append one screening row. Rows carry rule ids, the server name and the level
+/// only: never a URL with credentials, never config text. A failed write is logged,
+/// never fatal.
+fn write_screen_row(
+    tool: &str,
+    kind: &str,
+    server: Option<&str>,
+    reason: String,
+    decision: &str,
+    level: u8,
+    rules: &[String],
+) {
+    let log = audit_log();
+    let args = serde_json::json!({ "level": level, "rules": rules });
+    let entry = log.make_entry(
+        kind,
+        tool,
+        server.map(str::to_string),
+        "",
+        "mcp",
+        "",
+        reason,
+        decision,
+        "policy",
+        &args,
+    );
+    if let Err(e) = log.append_sync(&entry) {
+        tracing::warn!("could not write {kind} audit row for {tool}: {e}");
+    }
+}
+
+/// `scheme://host[:port]` of `raw`, for error text and logs. Userinfo, path, query
+/// and fragment are dropped: any of them can carry a credential.
+pub fn redact_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(u) => u.origin().ascii_serialization(),
+        Err(_) => "<unparseable url>".to_string(),
+    }
+}
+
+/// Why a screening did not come back clean: rule ids, else the unavailable reason.
+fn screen_reason(rules: &[String], unavailable: Option<&str>) -> String {
+    if let Some(reason) = unavailable {
+        format!("security sidecar unavailable: {reason}")
+    } else if rules.is_empty() {
+        "no rule ids reported".to_string()
+    } else {
+        format!("rules: {}", rules.join(", "))
+    }
+}
+
+/// Screen one rendered server config (D-04c, research OQ6 POSITIVE) and decide
+/// whether the server may start. Warn-class (D-12): a sidecar that cannot answer
+/// is Warn at DEFCON 4-5 (server starts, with a row saying why) and Block at 1-3
+/// (server skipped). Returns `true` when the server may start.
+pub fn screen_mcp_config(
+    screen: &dyn ContentScreen,
+    server: &str,
+    rendered_json: &str,
+    level: ironhermes_core::config::DefconLevel,
+) -> bool {
+    let outcome = screen.screen(&ContentScreenRequest {
+        kind: ContentKind::File,
+        text: rendered_json,
+        name: Some(MCP_CONFIG_SCREEN_NAME),
+        level,
+        warn_class: true,
+    });
+    let unavailable = outcome.unavailable.as_deref();
+    let kind = if unavailable.is_some() {
+        SIDECAR_UNAVAILABLE_KIND
+    } else {
+        SECURITY_VERDICT_KIND
+    };
+    let reason = format!("{server}: {}", screen_reason(&outcome.rules, unavailable));
+    match outcome.verdict {
+        ScreenVerdict::Block => {
+            tracing::error!(
+                server = %server,
+                rules = ?outcome.rules,
+                unavailable = ?unavailable,
+                "MCP server configuration blocked by the security screen; not starting it"
+            );
+            write_screen_row(
+                MCP_CONFIG_TOOL,
+                kind,
+                Some(server),
+                reason,
+                "blocked",
+                level.level(),
+                &outcome.rules,
+            );
+            false
+        }
+        ScreenVerdict::Warn => {
+            tracing::warn!(
+                server = %server,
+                rules = ?outcome.rules,
+                unavailable = ?unavailable,
+                "MCP server configuration flagged by the security screen; starting it"
+            );
+            write_screen_row(
+                MCP_CONFIG_TOOL,
+                kind,
+                Some(server),
+                reason,
+                "warned",
+                level.level(),
+                &outcome.rules,
+            );
+            true
+        }
+        ScreenVerdict::Allow => {
+            if unavailable.is_some() {
+                write_screen_row(
+                    MCP_CONFIG_TOOL,
+                    kind,
+                    Some(server),
+                    reason,
+                    "allow",
+                    level.level(),
+                    &outcome.rules,
+                );
+            }
+            true
+        }
+    }
+}
+
+/// Screen one resolved MCP endpoint URL (D-04d) as the exec command
+/// `curl '<url>'`, warn-class (D-12), and refuse the connect on a Block.
+///
+/// This is in addition to, never instead of, any SSRF guard: tirith reports
+/// metadata endpoints, raw-IP plain-http and punycode hosts, but nothing for
+/// `localhost` or private ranges.
+///
+/// - Block: `Err` naming the rule ids (or the unavailable reason).
+/// - Warn at DEFCON 4-5 (bypass levels): `Ok`, with a `security_verdict` row.
+/// - Warn at DEFCON 1-3: `Err`. An MCP connect has no approval prompt, so the
+///   conservative reading of D-07 for a non-interactive connect is to refuse.
+/// - Unavailable sidecar: the outcome verdict already encodes D-12 (Warn at 4-5,
+///   Block at 1-3); the reason is carried in the error or in a
+///   `sidecar_unavailable` row.
+///
+/// Errors and rows name only `scheme://host[:port]`: userinfo, path and query
+/// (where credentials live) are never echoed.
+pub fn screen_endpoint_url_with(
+    screen: &dyn ContentScreen,
+    url: &str,
+    level: ironhermes_core::config::DefconLevel,
+) -> anyhow::Result<()> {
+    let quoted = url.replace('\'', r"'\''");
+    let text = format!("curl '{quoted}'");
+    let outcome = screen.screen(&ContentScreenRequest {
+        kind: ContentKind::Exec,
+        text: &text,
+        name: None,
+        level,
+        warn_class: true,
+    });
+    let shown = redact_url(url);
+    let unavailable = outcome.unavailable.as_deref();
+    let reason = screen_reason(&outcome.rules, unavailable);
+    let kind = if unavailable.is_some() {
+        SIDECAR_UNAVAILABLE_KIND
+    } else {
+        SECURITY_VERDICT_KIND
+    };
+    match outcome.verdict {
+        ScreenVerdict::Block => Err(anyhow::anyhow!(
+            "MCP endpoint {shown} refused by the security screen ({reason}); \
+             endpoint URLs are screened before any connect (D-04d)"
+        )),
+        ScreenVerdict::Warn if !level.yolo_bypass_active() => Err(anyhow::anyhow!(
+            "MCP endpoint {shown} needs approval ({reason}) and an MCP connect has no \
+             approval prompt; refused at DEFCON {}",
+            level.level()
+        )),
+        ScreenVerdict::Warn => {
+            tracing::warn!(
+                endpoint = %shown,
+                rules = ?outcome.rules,
+                unavailable = ?unavailable,
+                "MCP endpoint flagged by the security screen; connecting"
+            );
+            write_screen_row(
+                MCP_ENDPOINT_TOOL,
+                kind,
+                None,
+                format!("{shown}: {reason}"),
+                "warned",
+                level.level(),
+                &outcome.rules,
+            );
+            Ok(())
+        }
+        ScreenVerdict::Allow => {
+            if unavailable.is_some() {
+                write_screen_row(
+                    MCP_ENDPOINT_TOOL,
+                    kind,
+                    None,
+                    format!("{shown}: {reason}"),
+                    "allow",
+                    level.level(),
+                    &outcome.rules,
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// [`screen_endpoint_url_with`] against the process-wide screen at the process
+/// default DEFCON level. With no screen installed (tests, an unbooted process) the
+/// connect proceeds exactly as before.
+pub fn screen_endpoint_url(url: &str) -> anyhow::Result<()> {
+    match ironhermes_core::content_screen::content_screen() {
+        Some(screen) => screen_endpoint_url_with(
+            screen.as_ref(),
+            url,
+            ironhermes_core::defcon::session_defcon().process_default(),
+        ),
+        None => Ok(()),
+    }
+}
+
+/// Test scaffolding for the process-wide content screen (Phase 57 plan 08).
+///
+/// The screen and the process DEFCON default are globals, so every test that
+/// installs a fake takes [`ScreenTestGuard`], which serializes them, points audit
+/// rows at a private temp file (never the real home) and restores the globals on
+/// drop.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use ironhermes_core::config::DefconLevel;
+    use ironhermes_core::content_screen::{
+        ContentScreen, ContentScreenOutcome, ContentScreenRequest, ScreenVerdict,
+        clear_content_screen_for_tests, install_content_screen,
+    };
+    use ironhermes_core::defcon::session_defcon;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    static SCREEN_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static AUDIT_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// The audit file override, when a test guard is alive.
+    pub(crate) fn audit_path_override() -> Option<PathBuf> {
+        AUDIT_PATH.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) struct ScreenTestGuard {
+        _lock: MutexGuard<'static, ()>,
+        dir: PathBuf,
+    }
+
+    impl ScreenTestGuard {
+        pub(crate) fn new() -> Self {
+            let lock = SCREEN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!(
+                "ironhermes_mcp_screen_{}_{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&dir).expect("test dir");
+            *AUDIT_PATH.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(dir.join("logs").join("audit.jsonl"));
+            clear_content_screen_for_tests();
+            session_defcon().set_process_default(DefconLevel::THREE);
+            Self { _lock: lock, dir }
+        }
+
+        pub(crate) fn install(&self, fake: &Arc<ScriptFake>) {
+            install_content_screen(fake.clone());
+        }
+
+        pub(crate) fn set_level(&self, level: u8) {
+            session_defcon().set_process_default(DefconLevel::try_from(level).unwrap());
+        }
+
+        /// Every JSON row written to the test audit file.
+        pub(crate) fn audit_rows(&self) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(self.dir.join("logs").join("audit.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("audit row is JSON"))
+                .collect()
+        }
+    }
+
+    impl Drop for ScreenTestGuard {
+        fn drop(&mut self) {
+            clear_content_screen_for_tests();
+            session_defcon().set_process_default(DefconLevel::THREE);
+            *AUDIT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A level-aware verdict for a matched needle.
+    pub(crate) type VerdictAt = fn(u8) -> ScreenVerdict;
+
+    pub(crate) fn block_always(_: u8) -> ScreenVerdict {
+        ScreenVerdict::Block
+    }
+
+    /// Mirrors the High row of the policy table: Block at levels 1-3, Warn at 4-5.
+    pub(crate) fn high(level: u8) -> ScreenVerdict {
+        if level <= 3 {
+            ScreenVerdict::Block
+        } else {
+            ScreenVerdict::Warn
+        }
+    }
+
+    /// A scripted `ContentScreen` that records every request text it was asked about.
+    pub(crate) struct ScriptFake {
+        rules: Vec<(&'static str, &'static str, VerdictAt)>,
+        unavailable: Option<&'static str>,
+        pub(crate) seen: Mutex<Vec<String>>,
+    }
+
+    impl ScriptFake {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                rules: Vec::new(),
+                unavailable: None,
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(crate) fn with_rule(
+            needle: &'static str,
+            rule: &'static str,
+            verdict_at: VerdictAt,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                rules: vec![(needle, rule, verdict_at)],
+                unavailable: None,
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(crate) fn unavailable(reason: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                rules: Vec::new(),
+                unavailable: Some(reason),
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(crate) fn seen_count(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+    }
+
+    impl ContentScreen for ScriptFake {
+        fn screen(&self, req: &ContentScreenRequest<'_>) -> ContentScreenOutcome {
+            self.seen.lock().unwrap().push(req.text.to_string());
+            if let Some(reason) = self.unavailable {
+                // Mirrors the real service: a Warn-class surface degrades by level,
+                // anything else keeps the floor verdict (Allow), reason always set.
+                let verdict = if !req.warn_class {
+                    ScreenVerdict::Allow
+                } else if req.level.level() >= 4 {
+                    ScreenVerdict::Warn
+                } else {
+                    ScreenVerdict::Block
+                };
+                return ContentScreenOutcome {
+                    verdict,
+                    rules: Vec::new(),
+                    max_severity: None,
+                    unavailable: Some(reason.to_string()),
+                };
+            }
+            for (needle, rule, verdict_at) in &self.rules {
+                if req.text.contains(needle) {
+                    return ContentScreenOutcome {
+                        verdict: verdict_at(req.level.level()),
+                        rules: vec![(*rule).to_string()],
+                        max_severity: Some("HIGH".to_string()),
+                        unavailable: None,
+                    };
+                }
+            }
+            ContentScreenOutcome {
+                verdict: ScreenVerdict::Allow,
+                rules: Vec::new(),
+                max_severity: None,
+                unavailable: None,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -374,6 +802,17 @@ mod tests {
     // -------------------------------------------------------------------------
     // sanitize_error tests (D-20)
     // -------------------------------------------------------------------------
+
+    /// T-54.8-49: a callback URL quoted in an exchange error must not leak its
+    /// one-time code or PKCE state through the sanitized text.
+    #[test]
+    fn sanitize_error_masks_oauth_values() {
+        let result = sanitize_error(
+            "exchange failed for http://127.0.0.1:8765/callback?code=cd-123&state=st-1",
+        );
+        assert!(!result.contains("cd-123"), "code leaked: {result}");
+        assert!(!result.contains("st-1"), "state leaked: {result}");
+    }
 
     #[test]
     fn test_sanitize_error_redacts_github_token() {
@@ -867,5 +1306,119 @@ mod tests {
                  got err={err:?} for input={input:?}"
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 57 plan 08 (D-04d / D-12): screen_endpoint_url_with
+    // -------------------------------------------------------------------------
+
+    use super::test_support::{ScreenTestGuard, ScriptFake, block_always, high};
+    use ironhermes_core::config::DefconLevel;
+
+    fn lvl(n: u8) -> DefconLevel {
+        DefconLevel::try_from(n).unwrap()
+    }
+
+    #[test]
+    fn redact_url_keeps_only_the_origin() {
+        assert_eq!(
+            redact_url("https://user:pw@mcp.example.com:8443/a/b?token=abc#frag"),
+            "https://mcp.example.com:8443"
+        );
+        assert_eq!(
+            redact_url("http://169.254.169.254/x"),
+            "http://169.254.169.254"
+        );
+        assert_eq!(redact_url("not a url sekret"), "<unparseable url>");
+    }
+
+    #[test]
+    fn endpoint_text_is_a_quoted_curl_command_with_quotes_escaped() {
+        let _g = ScreenTestGuard::new();
+        let fake = ScriptFake::new();
+        screen_endpoint_url_with(fake.as_ref(), "https://h.example.com/a'b", lvl(3)).unwrap();
+        assert_eq!(
+            fake.seen.lock().unwrap().clone(),
+            vec![r"curl 'https://h.example.com/a'\''b'".to_string()]
+        );
+    }
+
+    #[test]
+    fn endpoint_block_error_names_rules_and_hides_credentials() {
+        let _g = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("evil", "MetadataEndpoint", block_always);
+        let err = screen_endpoint_url_with(
+            fake.as_ref(),
+            "https://user:pw@evil.example.com/p?token=sekret",
+            lvl(5),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("MetadataEndpoint"), "{err}");
+        assert!(err.contains("https://evil.example.com"), "{err}");
+        for leaked in ["user", "pw@", "sekret", "/p?"] {
+            assert!(!err.contains(leaked), "leaked {leaked:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn endpoint_warn_refused_at_one_to_three_allowed_with_row_at_four_and_five() {
+        let g = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("xn--", "PunycodeDomain", |_| {
+            ironhermes_core::content_screen::ScreenVerdict::Warn
+        });
+        for n in 1..=3 {
+            let err = screen_endpoint_url_with(fake.as_ref(), "https://xn--a.example.com", lvl(n))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("approval") && err.contains("PunycodeDomain"),
+                "level {n}: {err}"
+            );
+        }
+        assert!(g.audit_rows().is_empty(), "a refusal writes no verdict row");
+        for n in 4..=5 {
+            screen_endpoint_url_with(fake.as_ref(), "https://xn--a.example.com", lvl(n)).unwrap();
+        }
+        let rows = g.audit_rows();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|r| r["kind"] == "security_verdict"
+            && r["tool"] == "mcp_endpoint"
+            && r["decision"] == "warned"));
+        assert!(
+            !serde_json::to_string(&rows)
+                .unwrap()
+                .contains("xn--a.example.com/"),
+            "rows carry no URL path"
+        );
+    }
+
+    #[test]
+    fn endpoint_unavailable_follows_the_warn_class_rule() {
+        let g = ScreenTestGuard::new();
+        let fake = ScriptFake::unavailable("timeout");
+        let err = screen_endpoint_url_with(fake.as_ref(), "https://h.example.com", lvl(3))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("sidecar unavailable") && err.contains("timeout"),
+            "{err}"
+        );
+        screen_endpoint_url_with(fake.as_ref(), "https://h.example.com", lvl(4)).unwrap();
+        let rows = g.audit_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["kind"], "sidecar_unavailable");
+        assert_eq!(rows[0]["tool"], "mcp_endpoint");
+        assert!(rows[0]["reason"].as_str().unwrap().contains("timeout"));
+    }
+
+    #[test]
+    fn endpoint_clean_verdict_is_ok_and_silent() {
+        let g = ScreenTestGuard::new();
+        let fake = ScriptFake::with_rule("never-matches", "X", high);
+        for n in 1..=5 {
+            screen_endpoint_url_with(fake.as_ref(), "https://mcp.example.com/mcp", lvl(n)).unwrap();
+        }
+        assert!(g.audit_rows().is_empty());
     }
 }

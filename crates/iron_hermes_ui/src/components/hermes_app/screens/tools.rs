@@ -24,7 +24,7 @@ mod credential_form;
 mod import_wizard;
 mod mcp_section;
 mod profile_bar;
-mod runtime_section;
+pub(crate) mod runtime_section;
 mod settings_panel;
 mod toolbar;
 

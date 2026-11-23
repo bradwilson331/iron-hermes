@@ -15,6 +15,7 @@ use std::path::Path;
 /// learning added in Phase 33 (autonomous skill creation, LEARN-03..05).
 /// voice added in Phase 36.17.6 (TTS toolset — text_to_speech + send_audio).
 /// messaging added in Phase 36.3.8 (send_message + clarify).
+/// ros2 added in Phase 49.8 D-07 (ros2 + rospider — talks to a robot over rosbridge).
 const KNOWN_TOOLSETS: &[&str] = &[
     "web",
     "code",
@@ -26,6 +27,7 @@ const KNOWN_TOOLSETS: &[&str] = &[
     "learning",
     "voice",
     "messaging",
+    "ros2",
 ];
 
 #[derive(Subcommand)]
@@ -276,7 +278,10 @@ fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'
             "grep_files",
         ],
     );
-    m.insert("memory", &["memory"]);
+    m.insert(
+        "memory",
+        ironhermes_tools::tier2_tools::MEMORY_TOOLSET_MEMBERS,
+    );
     m.insert("agent", &["delegate_task", "cronjob"]);
     m.insert("skills", &["skills"]);
     m.insert("session", &["session_search"]);
@@ -302,6 +307,9 @@ fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'
     m.insert("voice", &["text_to_speech", "send_audio"]);
     // Phase 36.3.8: messaging toolset — first-class send_message + clarify.
     m.insert("messaging", &["send_message", "clarify"]);
+    // Phase 49.8 D-07: ros2 toolset — generic `ros2` tool + high-level `rospider`.
+    // Keep in sync with toolset_session.rs::members_map (same doc comment there).
+    m.insert("ros2", &["ros2", "rospider"]);
     m
 }
 
@@ -579,9 +587,34 @@ mod tests {
         );
         assert_eq!(
             KNOWN_TOOLSETS.len(),
-            10,
-            "KNOWN_TOOLSETS must have exactly 10 entries after Phase 36.3.8 addition of messaging toolset"
+            11,
+            "KNOWN_TOOLSETS must have exactly 11 entries after Phase 49.8 D-07 addition of ros2 toolset"
         );
+    }
+
+    /// Phase 49.8 D-07: `ros2` must appear in KNOWN_TOOLSETS and its
+    /// toolset_members_map entry must list both `ros2` and `rospider` so
+    /// `hermes toolset enable/show ros2` works and neither tool is silently
+    /// filtered out of the LLM tool list.
+    #[test]
+    fn ros2_in_known_set_and_members_map() {
+        assert!(
+            KNOWN_TOOLSETS.contains(&"ros2"),
+            "Phase 49.8 D-07: 'ros2' must be in KNOWN_TOOLSETS (got: {:?})",
+            KNOWN_TOOLSETS
+        );
+        let m = toolset_members_map();
+        let ros2 = m
+            .get("ros2")
+            .copied()
+            .expect("ros2 toolset must exist in members map after Phase 49.8 D-07");
+        assert!(ros2.contains(&"ros2"), "ros2 members must contain 'ros2'; got {:?}", ros2);
+        assert!(
+            ros2.contains(&"rospider"),
+            "ros2 members must contain 'rospider'; got {:?}",
+            ros2
+        );
+        assert_eq!(ros2.len(), 2, "ros2 toolset must have exactly 2 members; got {:?}", ros2);
     }
 
     /// Phase 36.3.8 regression: `messaging` must appear in KNOWN_TOOLSETS so that
@@ -807,6 +840,15 @@ mod tests {
     }
 
     /// Phase 25.2 Plan 15 cross-crate parity: the CLI subcommand's static map
+    /// 58.2 D-12: the `memory` member list is the shared constant, not a literal.
+    #[test]
+    fn toolset_members_map_memory_entry_is_shared_constant() {
+        assert_eq!(
+            toolset_members_map()["memory"],
+            ironhermes_tools::tier2_tools::MEMORY_TOOLSET_MEMBERS
+        );
+    }
+
     /// MUST agree with the slash UI's RegistryToolsetSession internal map.
     /// Both surfaces show the same data; drift would surface as different
     /// member counts depending on entry point.
